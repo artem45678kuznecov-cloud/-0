@@ -282,6 +282,18 @@ def make_label(text='', font=(F_REG, 14), color=TXT, align=ui.ALIGN_LEFT,
     return lb
 
 
+def deactivate_tree(view):
+    """Рекурсивно зовёт stop() у всего, что умеет останавливаться."""
+    stop = getattr(view, 'stop', None)
+    if callable(stop):
+        try:
+            stop()
+        except Exception:
+            pass
+    for sub in list(getattr(view, 'subviews', ()) or ()):
+        deactivate_tree(sub)
+
+
 def card_view(frame, bg=CARD, radius=16, border=BORDER, border_w=1):
     v = ui.View(frame=frame)
     v.background_color = bg
@@ -636,7 +648,15 @@ class OrbView(ui.View):
 
 
 class ProgressBar(ui.View):
-    """Полоса прогресса. value=None -> неопределённый режим (бегунок)."""
+    """
+    Пассивная полоса прогресса. value=None -> неопределённый режим (бегунок).
+
+    Собственного таймера у неё НЕТ и быть не должно: раньше каждая полоса
+    заводила свою цепочку ui.delay, которая переживала удаление карточки
+    (проверка superview не спасала — полоса оставалась дочерней у уже
+    выброшенной card) и продолжала дёргать set_needs_display на мёртвых
+    view. Фазу теперь задаёт единственный таймер NoxApp._tick.
+    """
 
     def __init__(self, value=None, track=BORDER, fill=ACCENT, **kwargs):
         ui.View.__init__(self, **kwargs)
@@ -646,11 +666,27 @@ class ProgressBar(ui.View):
         self.track = track
         self.fill_color = fill
         self._phase = 0.0
-        self._running = False
+        self._detached = False
 
     def set_value(self, v):
+        if self._detached:
+            return
         self.value = v
         redraw(self)
+
+    def set_phase(self, phase):
+        """Только запомнить фазу и перерисоваться. Ничего не планирует."""
+        if self._detached:
+            return
+        try:
+            self._phase = float(phase) % 1.0
+        except Exception:
+            self._phase = 0.0
+        redraw(self)
+
+    def stop(self):
+        """Полосу сняли с экрана: дальше она молчит, даже если её позовут."""
+        self._detached = True
 
     def draw(self):
         w, h = self.width, self.height
@@ -671,30 +707,6 @@ class ProgressBar(ui.View):
             if v > 0:
                 ui.set_color(self.fill_color)
                 ui.Path.rounded_rect(0, 0, max(h, w * v), h, r).fill()
-
-    def start_indeterminate(self):
-        if self._running:
-            return
-        self._running = True
-        self._tick()
-
-    def stop(self):
-        self._running = False
-
-    def _tick(self):
-        if not self._running:
-            return
-        if self.superview is None:
-            self._running = False
-            return
-        self._phase += 0.035
-        if self._phase > 1.0:
-            self._phase = 0.0
-        redraw(self)
-        try:
-            ui.delay(self._tick, 0.05)
-        except Exception:
-            self._running = False
 
 
 class ThumbView(ui.View):
@@ -1440,8 +1452,16 @@ class DownloadManager(object):
         return None
 
     def signature(self):
-        """Структурный отпечаток: меняется — значит нужен полный rebuild."""
-        return tuple((j.id, j.status) for j in self.visible_jobs())
+        """
+        Структурный отпечаток очереди: ТОЛЬКО состав видимых заданий.
+
+        Статус сюда не входит намеренно: переходы queued -> preparing ->
+        downloading -> processing меняют лишь содержимое уже существующей
+        карточки, и полный rebuild четырёх экранов на них не нужен.
+        Отпечаток меняется, когда строка реально появилась или исчезла
+        (в том числе когда задание завершилось и ушло из очереди).
+        """
+        return tuple(j.id for j in self.visible_jobs())
 
     # -- изменение состояния ---------------------------------------
     def add(self, url, quality):
@@ -1946,7 +1966,11 @@ class Screen(ui.View):
             self.rebuild()
 
     def clear(self):
+        # Перед снятием со сцены гасим всё анимируемое вглубь дерева, чтобы
+        # ни одна ссылка на выброшенную view уже ничего не перерисовывала.
+        # Новых ui.delay здесь не заводится.
         for v in list(self.sv.subviews):
+            deactivate_tree(v)
             self.sv.remove_subview(v)
 
     # -- крестик: настоящая остановка загрузки ------------------------
@@ -1995,11 +2019,11 @@ class Screen(ui.View):
         finally:
             self._building = False
 
-    def refresh_jobs(self):
+    def refresh_jobs(self, phase=0.0):
         """
         Точечное обновление строк загрузки: тексты и полоса меняются на месте.
-        Экран целиком пересобирается только когда меняется состав очереди или
-        статус задания, а не на каждый чанк из сети.
+        Ни одна view не создаётся и не удаляется. Полный rebuild — только
+        когда реально изменился СОСТАВ очереди.
         """
         if not self._ready or self.hidden or self.width <= 40:
             return
@@ -2014,11 +2038,11 @@ class Screen(ui.View):
             if not row:
                 continue
             try:
-                self._apply_job(job, row)
+                self._apply_job(job, row, phase)
             except Exception as e:
                 print('NOX: не удалось обновить строку загрузки: %r' % (e,))
 
-    def _apply_job(self, job, row):
+    def _apply_job(self, job, row, phase=0.0):
         title = row.get('title')
         if title is not None:
             text = safe_name(job.display_title, 26)
@@ -2044,11 +2068,10 @@ class Screen(ui.View):
             value = job.percent
             if value is None and job.status in (ST_ERROR, ST_CANCELLED):
                 value = 0.0
-            if value is None:
-                bar.start_indeterminate()
-            else:
-                bar.stop()
             bar.set_value(value)
+            if value is None:
+                # Бегунок двигает общий такт приложения, а не свой таймер.
+                bar.set_phase(phase)
 
     def build(self):
         """Наполнение экрана. Переопределяется наследниками."""
@@ -2373,7 +2396,9 @@ class HomeScreen(Screen):
         bar = ProgressBar(bar_value, frame=(70, 50, w - 70 - 118, 5))
         v.add_subview(bar)
         if indeterminate:
-            bar.start_indeterminate()
+            # Начальная фаза берётся у общего такта приложения; дальше её
+            # двигает NoxApp._tick, собственного таймера у полосы нет.
+            bar.set_phase(self.app.indeterminate_phase)
 
         ic = Icon(st_icon, st_col, 1.6, frame=(w - 112, h / 2 - 10, 20, 20))
         v.add_subview(ic)
@@ -2655,7 +2680,11 @@ class DownloadsScreen(Screen):
             self.url_text = ''
             if self._url_field is not None:
                 self._url_field.text = ''
+            # Ровно один rebuild — чтобы появилась новая карточка. Корневой
+            # таймер после этого не станет делать reload_all: состав очереди
+            # он уже видел, а смена queued -> preparing его не касается.
             self.rebuild()
+            self.app.sync_downloads()
         else:
             nox_error(msg)
 
@@ -2735,7 +2764,9 @@ class DownloadsScreen(Screen):
         bar = ProgressBar(bar_value, frame=(left, 56, cw - left - 16, 5))
         c.add_subview(bar)
         if indeterminate:
-            bar.start_indeterminate()
+            # Начальная фаза берётся у общего такта приложения; дальше её
+            # двигает NoxApp._tick, собственного таймера у полосы нет.
+            bar.set_phase(self.app.indeterminate_phase)
         # Вторая строка занимает уже существовавшее пустое место под полосой,
         # ни один элемент карточки не сдвинут.
         dl = make_label(detail, (F_REG, 10), TXT_4,
@@ -3122,6 +3153,7 @@ class NoxApp(ui.View):
         self._tab = 0
         self._last_sig = ()
         self._last_tick = -1
+        self.indeterminate_phase = 0.0
 
         STATE.ensure_folder()
         _load_yt_dlp()
@@ -3326,10 +3358,11 @@ class NoxApp(ui.View):
             return
         # Экран нельзя разбирать прямо в обработчике касания его же кнопки:
         # перестраиваем отложенно, когда touch-событие уже отработало.
+        # Одноразовый delay, не цепочка.
         try:
-            ui.delay(self.reload_all, 0.05)
+            ui.delay(self.after_downloads_changed, 0.05)
         except Exception:
-            self.reload_all()
+            self.after_downloads_changed()
 
     # ---------------------------------------------------------------
     def start_autorefresh(self):
@@ -3338,10 +3371,12 @@ class NoxApp(ui.View):
 
     def _tick(self):
         """
-        Единственное место, где интерфейс читает состояние загрузки.
-        Крутится на главном потоке через ui.delay — рабочий поток yt-dlp
-        сам ui.View не трогает. Пока что-то качается, шаг UI_REFRESH
-        (~5 обновлений в секунду), в покое — раз в IDLE_REFRESH.
+        ЕДИНСТВЕННЫЙ периодический ui.delay во всём приложении.
+
+        Крутится на главном потоке — рабочий поток yt-dlp ui.View не трогает.
+        Пока что-то качается, шаг UI_REFRESH (~4-5 раз в секунду), в покое —
+        раз в IDLE_REFRESH. Здесь же двигается общая фаза бегунка, которую
+        получают все неопределённые полосы: своих таймеров у них нет.
         """
         if not self._alive:
             return
@@ -3350,17 +3385,19 @@ class NoxApp(ui.View):
             active = DOWNLOADER.active_jobs()
             if active:
                 step = UI_REFRESH
-            screen = self.screens[self._tab]
-            if self._tab in (0, 1):
-                if DOWNLOADER.signature() != self._last_sig:
-                    self._last_sig = DOWNLOADER.signature()
-                    self.after_downloads_changed()
-                elif active and DOWNLOADER.tick != self._last_tick:
-                    self._last_tick = DOWNLOADER.tick
-                    screen.refresh_jobs()
-            elif DOWNLOADER.signature() != self._last_sig:
-                self._last_sig = DOWNLOADER.signature()
+                self.indeterminate_phase += 0.08
+                if self.indeterminate_phase > 1.0:
+                    self.indeterminate_phase = 0.0
+            sig = DOWNLOADER.signature()
+            if sig != self._last_sig:
+                # Состав очереди изменился: строка появилась или ушла.
                 self.after_downloads_changed()
+            elif self._tab in (0, 1) and active \
+                    and DOWNLOADER.tick != self._last_tick:
+                # Смена статуса и прогресс — только точечное обновление,
+                # без LIB.scan и без rebuild экранов.
+                self._last_tick = DOWNLOADER.tick
+                self.screens[self._tab].refresh_jobs(self.indeterminate_phase)
         except Exception as e:
             print('NOX: сбой обновления интерфейса: %r' % (e,))
         try:
@@ -3368,15 +3405,19 @@ class NoxApp(ui.View):
         except Exception:
             self._alive = False
 
-    def after_downloads_changed(self):
-        """
-        Состав очереди изменился: пересканировать NoxMedia и обновить
-        Главную, Плеер, Загрузки и хранилище. Завершённые задания уходят
-        из очереди, файл появляется в медиатеке.
-        """
-        DOWNLOADER.clear_finished()
+    def sync_downloads(self):
+        """Отметить текущий состав очереди как уже показанный."""
         self._last_sig = DOWNLOADER.signature()
         self._last_tick = DOWNLOADER.tick
+
+    def after_downloads_changed(self):
+        """
+        Единичное событие: задание добавилось, ушло или завершилось.
+        Только здесь пересканируется NoxMedia и перестраиваются Главная,
+        Загрузки, Плеер и хранилище.
+        """
+        DOWNLOADER.clear_finished()
+        self.sync_downloads()
         self.reload_all()
 
     def will_close(self):

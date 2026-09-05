@@ -58,24 +58,31 @@ APP_VERSION = '1.0'
 #  Случайных hex-значений по файлу быть не должно: всё берётся отсюда.
 # ---------------------------------------------------------------------
 
-# Фон: почти чёрный. Синева — только локальным свечением, а не заливкой.
-BG            = '#04060E'
-BG_DEEP       = '#03050D'
-BG_TOP        = '#050711'
-BG_GLOW       = '#3b3fa8'          # локальное пятно света, очень слабое
+# Фон почти чёрный и ЦЕЛЬНЫЙ: один градиент сверху вниз, без отдельных
+# светящихся видов — именно они читались на устройстве прямоугольниками.
+BG            = '#040611'
+BG_TOP        = '#070A18'
+BG_MID        = '#030611'
+BG_DEEP       = '#02040B'
+BG_GLOW       = '#141a4a'          # едва заметный холодный оттенок
 
-# Стекло. Оно графитово-чёрное и прозрачное: цвет даёт материал, а не
-# заливка, поэтому оттенки здесь тёмные и почти нейтральные.
-GLASS_TINT          = '#0A0E1C'    # базовый оттенок стекла
-GLASS_TINT_A        = 0.55         # альфа оттенка для настоящего материала
-GLASS_THIN_A        = 0.62         # альфа дешёвого материала карточек
+# СТЕКЛО. Материал даёт тёмный UIBlurEffect, поверх него ложится
+# ТЁМНАЯ подкраска — не светло-серая заливка. Значения подобраны так,
+# чтобы поверхность оставалась почти чёрной и прозрачной.
+GLASS_TINT          = '#080B18'
+GLASS_TINT_A        = 0.66         # поверх настоящего blur
+GLASS_THIN_A        = 0.70         # дешёвый материал карточек
 GLASS_BG            = GLASS_TINT   # совместимость со старым именем
-GLASS_BG_STRONG     = '#131829'    # приподнятая поверхность
-GLASS_BG_DEEP       = '#05070F'    # утопленная (поле ввода, дорожка)
-GLASS_BORDER        = '#232a45'    # очень тонкая, почти незаметная
-GLASS_BORDER_SOFT   = '#191e33'
-GLASS_BORDER_ACTIVE = '#7d78f2'
-GLASS_HIGHLIGHT     = '#ffffff'    # верхний блик — белый, не синий
+GLASS_BG_STRONG     = '#0E1224'    # приподнятая поверхность
+GLASS_BG_DEEP       = '#04060E'    # утопленная (поле ввода, дорожка)
+GLASS_BORDER        = '#7878F5'    # рисуется с малой альфой, см. ниже
+GLASS_BORDER_A      = 0.20         # неактивная рамка почти не видна
+GLASS_BORDER_SOFT   = '#7878F5'
+GLASS_BORDER_ACTIVE = '#8d8bff'
+GLASS_HIGHLIGHT     = '#ffffff'
+# Верхний блик обязан ТОЛЬКО слегка ловиться глазом: на больших
+# поверхностях 0.20 осветляла их до серого.
+GLASS_HL_A          = 0.05
 GLASS_GLOW          = '#5b57e0'
 
 # Акцент — только интерактив.
@@ -92,9 +99,10 @@ TEXT_MUTED     = '#646b87'
 TEXT_FAINT     = '#474e68'
 
 # Размеры.
-NAV_HEIGHT   = 64.0        # высота плавающей капсулы навигации
+NAV_HEIGHT   = 66.0        # высота плавающей капсулы навигации
 NAV_SIDE     = 16.0        # отступ капсулы от краёв экрана
 NAV_GAP      = 8.0         # зазор между капсулой и safe area снизу
+PILL_H       = 52.0        # высота капсулы активной вкладки
 CARD_RADIUS  = 18.0
 GLASS_RADIUS = 22.0
 PILL_RADIUS  = 999.0       # «до упора», радиус ограничивается по высоте
@@ -417,20 +425,29 @@ def deactivate_tree(view):
 #  отказе NOX спускается на уровень ниже, но не падает.
 # ---------------------------------------------------------------------
 
+# ГЛАВНОЕ РЕШЕНИЕ ЭТОГО ПРОХОДА.
+#
+# UIGlassEffect на реальном устройстве отрисовывается почти БЕЛЫМ: поиск,
+# капсула статуса, панель URL, плитки качества, навигация и листы уходили
+# в светло-серый, и NOX переставал быть тёмным. Название UIKit-класса тут
+# не важно — важен вид, поэтому основным материалом становится ТЁМНЫЙ
+# UIBlurEffect, а UIGlassEffect остаётся выключенным экспериментом.
+USE_UIGLASS = False
+
 # Уровни материала:
-#   1 — UIGlassEffect / UIGlassContainerEffect (настоящий Liquid Glass)
-#   2 — UIBlurEffect + UIVisualEffectView
-#   3 — обычная полупрозрачная подкрашенная ui.View
+#   1 — UIGlassEffect / UIGlassContainerEffect (только при USE_UIGLASS)
+#   2 — UIBlurEffect + UIVisualEffectView  <-- рабочий режим NOX
+#   3 — обычная тёмная полупрозрачная ui.View
 GLASS_L1, GLASS_L2, GLASS_L3 = 1, 2, 3
 GLASS_LEVEL_NAMES = {
     GLASS_L1: 'UIGlassEffect',
-    GLASS_L2: 'UIBlurEffect',
+    GLASS_L2: 'UIBlurEffect (dark)',
     GLASS_L3: 'tinted view',
 }
 
-# UIBlurEffectStyle: сначала пробуем тёмный «ultra thin material»,
-# затем обычный dark.
-BLUR_STYLES = (9, 2)
+# Стили UIBlurEffect, которые остаются тёмными при любой системной теме:
+# .dark, systemThinMaterialDark, systemUltraThinMaterialDark.
+BLUR_STYLES = (2, 10, 9)
 
 _OBJC = {'checked': False, 'mod': None, 'level': GLASS_L3,
          'effectview': None, 'glass': None, 'container': None,
@@ -465,7 +482,8 @@ def _objc():
     _OBJC['blur'] = cls('UIBlurEffect')
     _OBJC['gradient'] = cls('CAGradientLayer')
     _OBJC['color'] = cls('UIColor')
-    if _OBJC['effectview'] is not None and _OBJC['glass'] is not None:
+    if USE_UIGLASS and _OBJC['effectview'] is not None \
+            and _OBJC['glass'] is not None:
         _OBJC['level'] = GLASS_L1
     elif _OBJC['effectview'] is not None and _OBJC['blur'] is not None:
         _OBJC['level'] = GLASS_L2
@@ -535,13 +553,17 @@ def attach_material(view, radius, tint=None, tint_alpha=0.0,
     except Exception:
         return 0
     effect, level = None, 0
-    if container and _OBJC['container'] is not None:
+    if not USE_UIGLASS:
+        # Прямой путь: только тёмный blur. Никаких стеклянных эффектов,
+        # которые светлеют на устройстве.
+        container = False
+    if container and USE_UIGLASS and _OBJC['container'] is not None:
         try:
             effect = _OBJC['container'].alloc().init()
             level = GLASS_L1
         except Exception:
             effect = None
-    if effect is None and _OBJC['glass'] is not None:
+    if effect is None and USE_UIGLASS and _OBJC['glass'] is not None:
         try:
             g = _OBJC['glass'].alloc().init()
             if interactive:
@@ -655,10 +677,13 @@ def sync_layer(lay, x, y, w, h):
 
 
 def apply_shadow(view, color=GLASS_GLOW, opacity=0.35, radius=14.0,
-                 offset=(0.0, 4.0)):
+                 offset=(0.0, 4.0), corner=None):
     """
-    Мягкая тень/свечение публичными свойствами CALayer. Именно так
-    делается ореол вокруг капсулы — не обводками внутрь границ.
+    Мягкая тень публичными свойствами CALayer.
+
+    corner задаёт shadowPath. Без него CALayer считает тень по альфе всего
+    поддерева и вокруг кнопки «Скачать» появлялся тёмный ПРЯМОУГОЛЬНИК.
+    С явным скруглённым shadowPath форма тени совпадает с капсулой.
     """
     m = _objc()
     if m is None:
@@ -673,7 +698,27 @@ def apply_shadow(view, color=GLASS_GLOW, opacity=0.35, radius=14.0,
         lay.setShadowRadius_(float(radius))
         lay.setShadowOffset_(m.CGSize(offset[0], offset[1]))
         lay.setMasksToBounds_(False)
+        if corner is not None:
+            set_shadow_path(view, corner)
         _OBJC['shadows'] += 1
+        return True
+    except Exception:
+        return False
+
+
+def set_shadow_path(view, corner):
+    """Форма тени = скруглённый прямоугольник ровно по границам view."""
+    m = _OBJC['mod']
+    if m is None:
+        return False
+    try:
+        w, h = view.width, view.height
+        if w <= 0 or h <= 0:
+            return False
+        rect = m.CGRect(m.CGPoint(0, 0), m.CGSize(w, h))
+        path = m.ObjCClass('UIBezierPath') \
+            .bezierPathWithRoundedRect_cornerRadius_(rect, float(corner))
+        view.objc_instance.layer().setShadowPath_(path.CGPath())
         return True
     except Exception:
         return False
@@ -701,24 +746,28 @@ def native_blur_available():
 
 class GlassView(ui.View):
     """
-    Единая стеклянная поверхность NOX.
+    ЕДИНАЯ фабрика тёмного стекла NOX (она же DarkGlassView).
 
-    Ничего не рисует в draw() — вообще. Материал даёт UIKit, оттенок и
-    рамку даёт обычная подкрашенная view, блик и свечение — CAGradientLayer
-    и тень CALayer. Полос на устройстве взяться неоткуда.
+    Централизует всё: стиль blur, тёмный оттенок, тонкую рамку,
+    скругление, едва заметный блик и мягкую тень. Разного «случайного»
+    материала у кнопок больше нет.
 
-    material='glass' — поверхность просит настоящий Liquid Glass;
-    material='thin'  — дешёвый полупрозрачный материал без effect view
-                       (обычные карточки медиатеки: их на экране много).
+    Ничего не рисует в draw(): материал даёт UIKit, оттенок и рамку —
+    обычная подкрашенная view, блик — один CAGradientLayer, свечение —
+    тень CALayer. Полосам взяться неоткуда.
+
+    material='glass' — просит настоящий blur (крупные поверхности);
+    material='thin'  — без effect view, только тёмная подкраска
+                       (карточек на экране много, blur им не нужен).
     """
 
     def __init__(self, radius=CARD_RADIUS, tint=GLASS_TINT, tint_alpha=None,
-                 border=GLASS_BORDER, border_alpha=0.5, border_w=1.0,
-                 highlight=0.0, glow=0.0, glow_color=GLASS_GLOW,
-                 material='thin', interactive=False, container=False,
-                 shadow=None, fill=None, fill_alpha=None, **kwargs):
-        # fill/fill_alpha — прежние имена тех же параметров: оставлены,
-        # чтобы ни один вызов не остался с рассинхронизированным стилем.
+                 border=GLASS_BORDER, border_alpha=GLASS_BORDER_A,
+                 border_w=1.0, highlight=0.0, glow=0.0,
+                 glow_color=GLASS_GLOW, material='thin', interactive=False,
+                 container=False, shadow=None, fill=None, fill_alpha=None,
+                 **kwargs):
+        # fill/fill_alpha — прежние имена тех же параметров.
         if fill is not None:
             tint = fill
         if fill_alpha is not None:
@@ -735,7 +784,10 @@ class GlassView(ui.View):
         self.material = material
         self.level = 0
         self._grad = None
-        self._highlight = highlight
+        self._shadow_corner = None
+        # Блик приглушается жёстко: на больших поверхностях даже 0.10
+        # белого читается как осветление до серого.
+        self._highlight = min(float(highlight or 0.0), GLASS_HL_A)
         if tint_alpha is None:
             tint_alpha = GLASS_TINT_A if material == 'glass' else GLASS_THIN_A
         self.tint_alpha = tint_alpha
@@ -746,8 +798,7 @@ class GlassView(ui.View):
                                          tint_alpha=0.20,
                                          interactive=interactive,
                                          container=container)
-        # Оттенок и рамка живут отдельным тонким слоем ПОВЕРХ материала,
-        # чтобы не гасить сам эффект прозрачностью effect view.
+        # Оттенок и рамка — отдельный слой ПОВЕРХ материала.
         skin = ui.View(frame=self.bounds)
         skin.flex = 'WH'
         skin.user_interaction_enabled = False
@@ -757,24 +808,26 @@ class GlassView(ui.View):
         skin.border_color = rgba(border, border_alpha)
         self.add_subview(skin)
         self.skin = skin
-        if highlight > 0:
+        if self._highlight > 0:
             self._grad = attach_gradient(
                 skin,
-                [(GLASS_HIGHLIGHT, highlight, 0.0),
-                 (GLASS_HIGHLIGHT, highlight * 0.35, 0.35),
-                 (GLASS_HIGHLIGHT, 0.0, 1.0)],
+                [(GLASS_HIGHLIGHT, self._highlight, 0.0),
+                 (GLASS_HIGHLIGHT, self._highlight * 0.30, 0.30),
+                 (GLASS_HIGHLIGHT, 0.0, 0.85)],
                 radius=r)
         if glow > 0:
-            apply_shadow(self, glow_color, min(0.85, glow * 1.6),
-                         14.0, (0.0, 0.0))
+            self._shadow_corner = r
+            apply_shadow(self, glow_color, min(0.55, glow), 16.0, (0.0, 0.0),
+                         corner=r)
         elif shadow:
-            apply_shadow(self, BG_DEEP, 0.45, 16.0, (0.0, 8.0))
+            self._shadow_corner = r
+            apply_shadow(self, BG_DEEP, 0.55, 18.0, (0.0, 10.0), corner=r)
 
     def _skin_alpha(self):
-        # Под настоящим материалом оттенок обязан быть лёгким, иначе
-        # стекло превращается в крашеный прямоугольник.
+        # Под настоящим blur оттенок чуть легче, но остаётся ТЁМНЫМ:
+        # именно попытка «не гасить эффект» делала поверхности серыми.
         if self.level in (GLASS_L1, GLASS_L2):
-            return self.tint_alpha * 0.45
+            return max(0.55, self.tint_alpha - 0.06)
         return self.tint_alpha
 
     def _radius(self):
@@ -789,24 +842,34 @@ class GlassView(ui.View):
         set_corner(skin, r)
         if self._grad is not None:
             sync_layer(self._grad, 0, 0, self.width, self.height)
+        if self._shadow_corner is not None:
+            self._shadow_corner = r
+            set_shadow_path(self, r)
 
     def set_active(self, flag, active_color=GLASS_BORDER_ACTIVE,
                    idle_color=GLASS_BORDER, glow=0.30):
-        """Выделение без пересборки: меняются только цвета уже готовых слоёв."""
+        """Выделение меняет цвета готовых слоёв, ничего не пересобирая."""
         self.border = active_color if flag else idle_color
-        self.border_w = 1.4 if flag else 1.0
+        self.border_w = 1.2 if flag else 1.0
         self.glow = glow if flag else 0.0
         skin = getattr(self, 'skin', None)
         if skin is None:
             return
-        skin.border_color = rgba(self.border, 0.95 if flag else self.border_alpha)
+        skin.border_color = rgba(self.border, 0.75 if flag else self.border_alpha)
         skin.border_width = self.border_w
-        skin.background_color = rgba(ACCENT if flag else self.tint,
-                                     (0.16 if flag else self._skin_alpha()))
+        # Активная плитка — тёмное фиолетовое стекло, а не заливка акцентом.
+        skin.background_color = (rgba(ACCENT_DEEP, 0.30) if flag
+                                 else rgba(self.tint, self._skin_alpha()))
+        r = self._radius()
         if flag:
-            apply_shadow(self, ACCENT, 0.45, 12.0, (0.0, 0.0))
+            self._shadow_corner = r
+            apply_shadow(self, ACCENT, 0.35, 12.0, (0.0, 0.0), corner=r)
         else:
             apply_shadow(self, ACCENT, 0.0, 0.0, (0.0, 0.0))
+
+
+# Явное имя тёмной фабрики: то же самое стекло.
+DarkGlassView = GlassView
 
 
 def glass_card(frame, radius=CARD_RADIUS, **kwargs):
@@ -1195,7 +1258,9 @@ class CTAButtonView(ui.View):
                 radius=r)
         else:
             set_corner(self, r)
-        apply_shadow(self, ACCENT_DEEP, 0.45, 18.0, (0.0, 8.0))
+        # Тень строго по форме капсулы: без shadowPath CALayer считал её
+        # по альфе поддерева и за кнопкой появлялся тёмный прямоугольник.
+        apply_shadow(self, ACCENT_DEEP, 0.38, 20.0, (0.0, 8.0), corner=r)
 
     def layout(self):
         r = self.height / 2.0
@@ -1208,6 +1273,7 @@ class CTAButtonView(ui.View):
                     pass
         if self._grad is None:
             set_corner(self, r)
+        set_shadow_path(self, r)
 
     def draw(self):
         # Fallback без CoreAnimation: одна ровная капсула, без полос.
@@ -1327,7 +1393,7 @@ class ThumbView(ui.View):
 
     def __init__(self, image=None, **kwargs):
         ui.View.__init__(self, **kwargs)
-        self.background_color = CARD_2
+        self.background_color = GLASS_BG_DEEP
         self.user_interaction_enabled = False
         self.img = image
         self.iv = None
@@ -1344,8 +1410,8 @@ class ThumbView(ui.View):
         w, h = self.width, self.height
         if w <= 0 or h <= 0:
             return
-        # Ровная подложка вместо прежних 20 полос градиента.
-        ui.set_color(GLASS_BG_STRONG)
+        # Ровная тёмная подложка вместо прежних 20 полос градиента.
+        ui.set_color(GLASS_BG_DEEP)
         ui.fill_rect(0, 0, w, h)
         # тусклый значок видео по центру
         s = min(w, h) * 0.34
@@ -3989,8 +4055,9 @@ def build_header(width, y=0.0):
     cap_w = min(210.0, max(150.0, width * 0.47))
     cap_x = width - PAD - cap_w
     cap = glass_pill((cap_x, (h - cap_h) / 2.0 + 1, cap_w, cap_h),
-                     tint=GLASS_TINT, border=GLASS_BORDER, border_alpha=0.38,
-                     highlight=0.12, material='glass')
+                     tint=GLASS_TINT, tint_alpha=0.70, border=GLASS_BORDER,
+                     border_alpha=0.20, highlight=GLASS_HL_A,
+                     material='glass')
     orb_size = 30.0
     orb_frame = (13, (cap_h - orb_size) / 2.0, orb_size, orb_size)
     icon_img = load_project_icon()
@@ -4053,15 +4120,16 @@ def section_header(width, y, title, right_text=None, right_action=None):
 
 def glass_circle(frame, icon_name, color=TEXT_SECONDARY, line=1.8,
                  icon_size=20.0, action=None, fill=GLASS_BG_STRONG,
-                 fill_alpha=0.85, glow=0.0, border=GLASS_BORDER):
+                 fill_alpha=0.74, glow=0.0, border=GLASS_BORDER,
+                 material='glass'):
     """
     Круглая стеклянная кнопка — шестерёнка, play, пауза, крестик.
     Хит-таргетом всегда служит настоящий прозрачный ui.Button.
     """
     x, y, w, h = frame
     v = GlassView(radius=min(w, h) / 2.0, tint=fill, tint_alpha=fill_alpha,
-                  border=border, border_alpha=0.40, highlight=0.14, glow=glow,
-                  material='glass', interactive=True, frame=(x, y, w, h))
+                  border=border, border_alpha=0.26, highlight=GLASS_HL_A,
+                  glow=glow, material=material, frame=(x, y, w, h))
     ic = Icon(icon_name, color, line,
               frame=((w - icon_size) / 2.0, (h - icon_size) / 2.0,
                      icon_size, icon_size))
@@ -4081,9 +4149,10 @@ def empty_block(width, y, title, subtitle, icon='film'):
     v = glass_card((PAD, y, width - PAD * 2, h), GLASS_RADIUS,
                    border_alpha=0.30, highlight=0.07)
     w = v.width
-    ring = GlassView(radius=44.0, tint=GLASS_BG_STRONG, border=GLASS_BORDER,
-                     border_alpha=0.35, highlight=0.14, glow=0.18,
-                     material='glass', frame=(w / 2.0 - 44, 30, 88, 88))
+    ring = GlassView(radius=44.0, tint=GLASS_BG_STRONG, tint_alpha=0.72,
+                     border=GLASS_BORDER, border_alpha=0.24,
+                     highlight=GLASS_HL_A, glow=0.14, material='glass',
+                     frame=(w / 2.0 - 44, 30, 88, 88))
     ring.add_subview(Icon(icon, ACCENT_LIGHT, 2.0, frame=(28, 28, 32, 32)))
     v.add_subview(ring)
     t = make_label(title, (F_BOLD, 17), TEXT_PRIMARY, ui.ALIGN_CENTER,
@@ -4172,7 +4241,7 @@ def job_card(screen, w, y, temp, job):
                                                    th_s, th_s))
     thumb.corner_radius = 13
     thumb.border_width = 1
-    thumb.border_color = rgba(GLASS_BORDER, 0.9)
+    thumb.border_color = rgba(GLASS_BORDER, 0.18)
     card.add_subview(thumb)
 
     # Правая колонка кнопок — своя территория, тексты сюда не заходят.
@@ -4317,9 +4386,9 @@ def dots_button(action, x, y, h=CTRL_ZONE, w=CTRL_ZONE):
 
 def play_orb(cx, cy, size=54.0):
     """Стеклянная круглая кнопка play поверх обложки (эталон, фото 3)."""
-    v = GlassView(radius=size / 2.0, tint=GLASS_BG_STRONG, tint_alpha=0.42,
-                  border=GLASS_HIGHLIGHT, border_alpha=0.34,
-                  highlight=0.18, material='glass',
+    v = GlassView(radius=size / 2.0, tint='#05070F', tint_alpha=0.58,
+                  border=GLASS_HIGHLIGHT, border_alpha=0.16,
+                  highlight=GLASS_HL_A, material='thin',
                   frame=(cx - size / 2.0, cy - size / 2.0, size, size))
     v.user_interaction_enabled = False
     s = size * 0.40
@@ -4337,154 +4406,200 @@ class NoxSheet(ui.View):
     """
     Единственный модальный компонент NOX.
 
-    Живёт поверх интерфейса внутри самого NoxApp: затемнение на весь
-    экран плюс стеклянная панель снизу. Никаких dialogs.list_dialog и
-    console.alert — именно они выбивались из дизайна и на устройстве
-    иногда уносили Pythonista с собой.
+    БАГ, который здесь исправлен. Раньше __init__ создавал panel и body
+    с временным кадром 100x100, а вызывающий код СРАЗУ строил содержимое:
+    header/row/chips считали ширину как self.body.width, то есть по 100 pt.
+    Настоящую ширину panel получала только позже, в layout(), но уже
+    построенные чипы не пересчитывались — отсюда колонка слева и подписи
+    «Сн...», «По...», «3...».
 
-    Ни одного нового таймера: открытие и закрытие — одна ui.animate,
-    её completion всегда настоящий callable (см. animate()).
+    Теперь лист хранит НЕ готовые view, а функцию-строитель, и вызывает её
+    из layout(), когда реальная ширина уже известна. Смена ширины (другой
+    телефон, поворот) полностью перестраивает содержимое.
     """
 
     SIDE = 12.0
     ROW_H = 56.0
+    MAX_W = 520.0
+    TOP_PAD = 26.0          # место под drag handle
+    BOTTOM_PAD = 16.0
 
-    def __init__(self, app, title='', **kwargs):
+    def __init__(self, app, builder=None, **kwargs):
         ui.View.__init__(self, **kwargs)
         self.app = app
         self.background_color = 'clear'
-        self.title_text = title
+        self.builder = builder
         self._closing = False
         self._on_close = None
+        self._built_w = -1.0
+        self._content_h = 0.0
+        self._presented = False
 
         self.dim = ui.View(frame=self.bounds)
         self.dim.flex = 'WH'
-        self.dim.background_color = rgba(BG_DEEP, 0.62)
+        self.dim.background_color = rgba('#000000', 0.52)
         self.dim.alpha = 0.0
         self.add_subview(self.dim)
-        # Тап мимо панели закрывает лист.
         self.dim_hit = ui.Button(frame=self.bounds)
         self.dim_hit.flex = 'WH'
         self.dim_hit.background_color = 'clear'
         self.dim_hit.action = lambda sender: self.close()
         self.dim.add_subview(self.dim_hit)
 
-        self.panel = GlassView(radius=GLASS_RADIUS + 6, tint=GLASS_TINT,
-                               tint_alpha=0.72, border=GLASS_BORDER,
-                               border_alpha=0.36, highlight=0.10,
+        # Тёмная стеклянная панель: графитово-синяя, с волосяной рамкой.
+        self.panel = GlassView(radius=GLASS_RADIUS + 6, tint='#0A0D18',
+                               tint_alpha=0.80, border=GLASS_BORDER,
+                               border_alpha=0.26, highlight=GLASS_HL_A,
                                material='glass', shadow=True,
                                frame=(0, 0, 100, 100))
         self.add_subview(self.panel)
 
         self.handle = ui.View(frame=(0, 10, 40, 5))
-        self.handle.background_color = rgba(TEXT_MUTED, 0.55)
+        self.handle.background_color = rgba(TEXT_MUTED, 0.5)
         self.handle.corner_radius = 2.5
         self.handle.user_interaction_enabled = False
         self.panel.add_subview(self.handle)
 
-        self.body = ui.View(frame=(0, 24, 100, 100))
+        self.body = ui.View(frame=(0, self.TOP_PAD, 100, 100))
         self.body.background_color = 'clear'
         self.panel.add_subview(self.body)
-        self._content_h = 0.0
 
     # -- вёрстка ---------------------------------------------------
-    def set_content_height(self, h):
-        self._content_h = float(h)
-        self.layout()
+    def panel_width(self):
+        return max(120.0, min(self.MAX_W, self.width - self.SIDE * 2))
 
     def layout(self):
         w, hh = self.width, self.height
-        if w <= 0:
+        if w <= 1 or hh <= 1:
             return
-        pw = w - self.SIDE * 2
+        pw = self.panel_width()
+        if abs(pw - self._built_w) > 0.5:
+            # Ширина известна ТОЛЬКО здесь — содержимое строится под неё.
+            self._built_w = pw
+            self._content_h = self._build_content(pw)
+        ph = self._content_h + self.TOP_PAD + self.BOTTOM_PAD
+        ph = max(180.0, min(ph, hh - 90.0))
         bottom = getattr(self.app, 'bottom_inset', 20.0) + 10.0
-        ph = min(max(160.0, self._content_h + 34.0), hh - 90.0)
-        self.panel.frame = (self.SIDE, hh - ph - bottom, pw, ph)
+        px = (w - pw) / 2.0
+        py = hh - ph - bottom
+        if self._presented:
+            self.panel.frame = (px, py, pw, ph)
+        else:
+            self.panel.frame = (px, hh, pw, ph)
         self.handle.frame = (pw / 2.0 - 20, 10, 40, 5)
-        self.body.frame = (0, 24, pw, ph - 24)
+        self.body.frame = (0, self.TOP_PAD, pw, ph - self.TOP_PAD)
 
-    # -- содержимое ------------------------------------------------
+    def resting_frame(self):
+        pw = self.panel_width()
+        ph = self.panel.frame[3]
+        bottom = getattr(self.app, 'bottom_inset', 20.0) + 10.0
+        return ((self.width - pw) / 2.0, self.height - ph - bottom, pw, ph)
+
+    def _build_content(self, pw):
+        """Полная пересборка содержимого под ширину pw."""
+        for v in list(self.body.subviews):
+            deactivate_tree(v)
+            self.body.remove_subview(v)
+        if not callable(self.builder):
+            return 0.0
+        try:
+            return float(self.builder(self, pw) or 0.0)
+        except Exception as e:
+            log_debug('sheet build: %r' % (e,))
+            return 0.0
+
+    def rebuild(self):
+        """Перестроить содержимое, сохранив открытое состояние листа."""
+        self._built_w = -1.0
+        self.layout()
+
+    # -- содержимое (ширина приходит параметром, а не из body) -----
     def add(self, view):
         self.body.add_subview(view)
         return view
 
-    def header(self, y, title, subtitle=None, thumb=None):
-        """Шапка листа: обложка, название, метаданные."""
-        w = self.body.width
-        h = 68.0 if thumb is not None else 46.0
+    def header(self, w, y, title, subtitle=None, thumb=None):
+        """Шапка листа: обложка, полное название, метаданные."""
+        pad = 18.0
+        h = 62.0 if thumb is not None else 48.0
         v = ui.View(frame=(0, y, w, h))
         v.background_color = 'clear'
-        left = 18.0
+        left = pad
         if thumb is not None:
-            th = ThumbView(thumb, frame=(18, 0, 96, 60))
-            th.corner_radius = 12
+            tw, th_h = 84.0, 52.0
+            th = ThumbView(thumb, frame=(pad, (h - th_h) / 2.0, tw, th_h))
+            th.corner_radius = 11
             th.border_width = 1
-            th.border_color = rgba(GLASS_BORDER, 0.7)
+            th.border_color = rgba(GLASS_BORDER, 0.22)
             v.add_subview(th)
-            left = 124.0
-        v.add_subview(make_label(safe_name(title, 34), (F_BOLD, 17),
+            left = pad + tw + 12.0
+        tw_text = max(60.0, w - left - pad)
+        v.add_subview(make_label(safe_name(title, 46), (F_BOLD, 17),
                                  TEXT_PRIMARY, lines=2,
-                                 frame=(left, 2, w - left - 18, 40)))
+                                 frame=(left, 2, tw_text, 40)))
         if subtitle:
             v.add_subview(make_label(subtitle, (F_REG, 12.5), TEXT_MUTED,
-                                     frame=(left, 42, w - left - 18, 17)))
+                                     frame=(left, 42, tw_text, 17)))
         self.add(v)
-        return y + h + 10
+        return y + h + 12
 
-    def row(self, y, icon, title, action, danger=False, subtitle=None):
-        """Строка действия. Хит-таргет — настоящий ui.Button."""
-        w = self.body.width
+    def row(self, w, y, icon, title, action, danger=False, subtitle=None):
+        """Строка действия почти на всю ширину листа."""
+        pad = 14.0
         h = self.ROW_H
+        rw = w - pad * 2
         col = DANGER if danger else TEXT_PRIMARY
-        v = GlassView(radius=14.0, tint=GLASS_BG_STRONG,
-                      tint_alpha=0.55 if not danger else 0.40,
+        v = GlassView(radius=15.0, tint=(DANGER if danger else GLASS_BG_STRONG),
+                      tint_alpha=0.14 if danger else 0.68,
                       border=DANGER if danger else GLASS_BORDER,
-                      border_alpha=0.35 if danger else 0.30,
-                      highlight=0.09, frame=(14, y, w - 28, h))
+                      border_alpha=0.28 if danger else GLASS_BORDER_A,
+                      highlight=GLASS_HL_A, frame=(pad, y, rw, h))
         v.add_subview(Icon(icon, DANGER if danger else ACCENT_LIGHT, 1.8,
-                           frame=(16, h / 2.0 - 10, 20, 20)))
+                           frame=(18, h / 2.0 - 10, 20, 20)))
         ty = 0 if not subtitle else 8
-        v.add_subview(make_label(title, (F_REG, 15.5), col,
-                                 frame=(48, ty, w - 28 - 62, h if not subtitle else 20)))
+        v.add_subview(make_label(title, (F_REG, 16), col,
+                                 frame=(52, ty, rw - 70,
+                                        h if not subtitle else 20)))
         if subtitle:
-            v.add_subview(make_label(subtitle, (F_REG, 11.5), TEXT_MUTED,
-                                     frame=(48, 29, w - 28 - 62, 16)))
-        hit = ui.Button(frame=(0, 0, w - 28, h))
+            v.add_subview(make_label(subtitle, (F_REG, 12), TEXT_MUTED,
+                                     frame=(52, 30, rw - 70, 16)))
+        hit = ui.Button(frame=(0, 0, rw, h))
         hit.flex = 'WH'
         hit.background_color = 'clear'
         hit.action = action
         v.add_subview(hit)
         self.add(v)
-        return y + h + 8
+        return y + h + 9
 
-    def section(self, y, title):
-        w = self.body.width
-        self.add(make_label(title, (F_BOLD, 13), TEXT_MUTED,
-                            frame=(18, y, w - 36, 18)))
-        return y + 24
+    def section(self, w, y, title):
+        self.add(make_label(title, (F_BOLD, 12.5), TEXT_MUTED,
+                            frame=(20, y, w - 40, 18)))
+        return y + 26
 
-    def chips(self, y, options, current, on_pick, per_row=3):
+    def chips(self, w, y, options, current, on_pick, per_row=2):
         """
-        Сетка выбора вместо длинного списка одинаковых строк.
-        options — [(key, title)], current — выбранный key.
+        Сетка выбора. Ширина колонки считается от РЕАЛЬНОЙ ширины листа,
+        поэтому подписи помещаются целиком и «Сн...» больше не бывает.
         """
-        w = self.body.width
+        pad = 14.0
         gap = 8.0
-        cw = (w - 28 - gap * (per_row - 1)) / float(per_row)
-        ch = 42.0
+        avail = w - pad * 2
+        cw = (avail - gap * (per_row - 1)) / float(per_row)
+        ch = 44.0
         for i, (key, title) in enumerate(options):
             col = i % per_row
             row = i // per_row
             sel = (key == current)
-            tile = GlassView(radius=13.0, tint=GLASS_BG_STRONG,
-                             tint_alpha=0.50, border=GLASS_BORDER,
-                             border_alpha=0.30, highlight=0.08,
-                             frame=(14 + col * (cw + gap),
+            tile = GlassView(radius=14.0, tint=GLASS_BG_STRONG,
+                             tint_alpha=0.68, border=GLASS_BORDER,
+                             border_alpha=GLASS_BORDER_A,
+                             highlight=GLASS_HL_A,
+                             frame=(pad + col * (cw + gap),
                                     y + row * (ch + gap), cw, ch))
             tile.set_active(sel)
-            tile.add_subview(make_label(title, (F_BOLD if sel else F_REG, 13),
+            tile.add_subview(make_label(title, (F_BOLD if sel else F_REG, 14),
                                         TEXT_PRIMARY if sel else TEXT_SECONDARY,
-                                        ui.ALIGN_CENTER, frame=(0, 0, cw, ch)))
+                                        ui.ALIGN_CENTER, frame=(4, 0, cw - 8, ch)))
             hit = ui.Button(frame=(0, 0, cw, ch))
             hit.flex = 'WH'
             hit.background_color = 'clear'
@@ -4492,7 +4607,7 @@ class NoxSheet(ui.View):
             tile.add_subview(hit)
             self.add(tile)
         rows = (len(options) + per_row - 1) // per_row
-        return y + rows * (ch + gap) + 4
+        return y + rows * (ch + gap) + 2
 
     @staticmethod
     def _picker(on_pick, key):
@@ -4500,24 +4615,25 @@ class NoxSheet(ui.View):
             on_pick(key)
         return _act
 
-    def buttons(self, y, left_title, left_action, right_title, right_action,
+    def buttons(self, w, y, left_title, left_action, right_title, right_action,
                 right_danger=False):
-        """Пара кнопок внизу листа: например «Отмена» и «Удалить»."""
-        w = self.body.width
+        """Две широкие кнопки по половине ширины листа."""
+        pad = 14.0
         gap = 10.0
-        bw = (w - 28 - gap) / 2.0
-        h = 50.0
+        bw = (w - pad * 2 - gap) / 2.0
+        h = 52.0
         for i, (title, action, danger) in enumerate(
                 ((left_title, left_action, False),
                  (right_title, right_action, right_danger))):
-            tint = DANGER if danger else GLASS_BG_STRONG
-            v = GlassView(radius=h / 2.0, tint=tint,
-                          tint_alpha=0.85 if danger else 0.55,
+            v = GlassView(radius=h / 2.0,
+                          tint=(DANGER if danger else GLASS_BG_STRONG),
+                          tint_alpha=0.22 if danger else 0.72,
                           border=DANGER if danger else GLASS_BORDER,
-                          border_alpha=0.45 if danger else 0.32,
-                          highlight=0.14, material='glass', interactive=True,
-                          frame=(14 + i * (bw + gap), y, bw, h))
-            v.add_subview(make_label(title, (F_BOLD, 16), TEXT_PRIMARY,
+                          border_alpha=0.40 if danger else 0.22,
+                          highlight=GLASS_HL_A, material='glass',
+                          frame=(pad + i * (bw + gap), y, bw, h))
+            v.add_subview(make_label(title, (F_BOLD, 16),
+                                     DANGER if danger else TEXT_PRIMARY,
                                      ui.ALIGN_CENTER, frame=(0, 0, bw, h)))
             hit = ui.Button(frame=(0, 0, bw, h))
             hit.flex = 'WH'
@@ -4527,30 +4643,33 @@ class NoxSheet(ui.View):
             self.add(v)
         return y + h + 6
 
-    def text_block(self, y, text, mono=False):
-        w = self.body.width
-        lines = max(1, min(6, len(text) // 32 + 1))
-        h = 20.0 + lines * 17.0
-        v = GlassView(radius=13.0, tint=GLASS_BG_DEEP, tint_alpha=0.80,
-                      border=GLASS_BORDER, border_alpha=0.30,
-                      frame=(14, y, w - 28, h))
+    def text_block(self, w, y, text):
+        pad = 14.0
+        bw = w - pad * 2
+        lines = max(1, min(6, len(text) // max(1, int(bw / 7.0)) + 1))
+        h = 22.0 + lines * 17.0
+        v = GlassView(radius=14.0, tint=GLASS_BG_DEEP, tint_alpha=0.85,
+                      border=GLASS_BORDER, border_alpha=0.18,
+                      frame=(pad, y, bw, h))
         v.add_subview(make_label(text, (F_REG, 12.5), TEXT_SECONDARY,
                                  lines=lines,
-                                 frame=(14, 10, w - 56, h - 20)))
+                                 frame=(16, 11, bw - 32, h - 22)))
         self.add(v)
-        return y + h + 8
+        return y + h + 9
 
     # -- показ и закрытие ------------------------------------------
     def present(self, on_close=None):
         self._on_close = on_close
-        self.layout()
-        start = self.panel.frame
-        self.panel.frame = (start[0], self.height, start[2], start[3])
+        self.layout()                     # содержимое строится здесь
+        rest = self.resting_frame()
+        f = self.panel.frame
+        self.panel.frame = (rest[0], self.height, rest[2], rest[3])
         self.panel.alpha = 0.0
+        self._presented = True
 
         def _in():
             self.dim.alpha = 1.0
-            self.panel.frame = start
+            self.panel.frame = rest
             self.panel.alpha = 1.0
         animate(_in, 0.24)
 
@@ -4570,8 +4689,6 @@ class NoxSheet(ui.View):
                 deactivate_tree(self)
                 if self.superview is not None:
                     self.superview.remove_subview(self)
-                # Приложение не должно держать ссылку на снятый лист:
-                # иначе следующий open_sheet считал бы его живым.
                 if getattr(self.app, 'sheet', None) is self:
                     self.app.sheet = None
             except Exception as e:
@@ -4591,16 +4708,12 @@ class NoxSheet(ui.View):
 
 class ActivePill(ui.View):
     """
-    Капсула активной вкладки.
+    Капсула активной вкладки: ТЁМНОЕ фиолетовое стекло внутри общей
+    панели, а не белая таблетка и не прямоугольник.
 
-    Прежняя версия рисовала тело полосами ui.fill_rect, и на устройстве
-    у неё были видны прямые края — прямоугольник вокруг вкладки. Здесь
-    нет ни одной полосы: форму задаёт cornerRadius = h/2 у самой view и
-    у её слоёв, поэтому «квадрату» взяться неоткуда. Внутри — либо
-    отдельный UIGlassEffect (когда доступен), либо непрерывный градиент,
-    либо ровная заливка. Ореол — публичная тень CALayer, наружу.
-
-    Капсула ОДНА на всю панель и просто переезжает между вкладками.
+    Полос нет ни одной: форму задаёт cornerRadius = h/2, тело — тёмная
+    подкраска ACCENT_DEEP с малой альфой, край — тонкая lavender-линия,
+    ореол — тень CALayer со скруглённым shadowPath.
     """
 
     def __init__(self, **kwargs):
@@ -4608,23 +4721,24 @@ class ActivePill(ui.View):
         self.background_color = 'clear'
         self.user_interaction_enabled = False
         r = max(1.0, self.height / 2.0)
-        # Слой материала: отдельное стекло внутри стеклянного контейнера.
-        self.level = attach_material(self, r, tint=ACCENT, tint_alpha=0.28,
-                                     interactive=True)
+        # Своего blur у капсулы НЕТ намеренно: она лежит поверх уже
+        # размытой панели, и второй слой размытия только осветлял бы её.
+        self.level = 0
         skin = ui.View(frame=self.bounds)
         skin.flex = 'WH'
         skin.user_interaction_enabled = False
-        skin.background_color = rgba(ACCENT, 0.30 if self.level else 0.85)
+        # Тёмный фиолет: под blur чуть легче, без него плотнее.
+        skin.background_color = rgba(ACCENT_DEEP, 0.58)
         set_corner(skin, r)
         skin.border_width = 1.0
-        skin.border_color = rgba(ACCENT_LIGHT, 0.45)
+        skin.border_color = rgba(ACCENT_LIGHT, 0.34)
         self.add_subview(skin)
         self.skin = skin
         self._spec = attach_gradient(
             skin,
-            [(GLASS_HIGHLIGHT, 0.22, 0.0), (GLASS_HIGHLIGHT, 0.04, 0.45),
-             (GLASS_HIGHLIGHT, 0.0, 1.0)], radius=r)
-        apply_shadow(self, ACCENT, 0.5, 14.0, (0.0, 0.0))
+            [(GLASS_HIGHLIGHT, GLASS_HL_A, 0.0),
+             (GLASS_HIGHLIGHT, 0.0, 0.7)], radius=r)
+        apply_shadow(self, ACCENT, 0.30, 12.0, (0.0, 0.0), corner=r)
 
     def layout(self):
         r = max(1.0, self.height / 2.0)
@@ -4637,15 +4751,15 @@ class ActivePill(ui.View):
                 self._spec.setCornerRadius_(float(r))
             except Exception:
                 pass
+        set_shadow_path(self, r)
 
     def draw(self):
-        # Fallback без CoreAnimation: ОДНА скруглённая заливка.
         if getattr(self, 'skin', None) is not None:
             return
         w, h = self.width, self.height
         if w <= 0 or h <= 0:
             return
-        ui.set_color(rgba(ACCENT, 0.85))
+        ui.set_color(rgba(ACCENT_DEEP, 0.60))
         ui.Path.rounded_rect(0, 0, w, h, h / 2.0).fill()
 
 
@@ -4697,15 +4811,18 @@ class TabBar(ui.View):
         self.index = 0
         # Главный showcase Liquid Glass: контейнер из UIGlassContainerEffect,
         # внутри которого живёт отдельное стекло активной вкладки.
+        # Тёмная плавающая капсула: почти чёрная, прозрачная, с волосяной
+        # синеватой рамкой. Белой она быть не должна.
         self.capsule = GlassView(radius=NAV_HEIGHT / 2.0,
-                                 tint=GLASS_TINT, tint_alpha=0.50,
-                                 border=GLASS_BORDER, border_alpha=0.40,
-                                 border_w=1.0, highlight=0.10,
+                                 tint=GLASS_TINT, tint_alpha=0.72,
+                                 border=GLASS_BORDER, border_alpha=0.22,
+                                 border_w=1.0, highlight=GLASS_HL_A,
                                  material='glass', container=True,
                                  shadow=True,
                                  frame=(NAV_SIDE, 0, 100, NAV_HEIGHT))
         self.add_subview(self.capsule)
-        self.pill = ActivePill(frame=(0, 6, 10, NAV_HEIGHT - 12))
+        self.pill = ActivePill(frame=(0, (NAV_HEIGHT - PILL_H) / 2.0,
+                                      10, PILL_H))
         self.capsule.add_subview(self.pill)
         specs = [('Главная', 'home'), ('Загрузки', 'download'),
                  ('Плеер', 'play_circle'), ('Настройки', 'gear')]
@@ -4716,10 +4833,13 @@ class TabBar(ui.View):
         self.items[0].set_selected(True)
 
     def _slot(self, index):
+        # Капсула заметно уже своего слота и ниже панели: она не должна
+        # перетягивать на себя всё внимание.
         n = max(1, len(self.items))
         iw = self.capsule.width / float(n)
-        pw = max(48.0, iw - 10.0)
-        return (index * iw + (iw - pw) / 2.0, 6.0, pw, NAV_HEIGHT - 12.0)
+        pw = max(44.0, iw - 16.0)
+        return (index * iw + (iw - pw) / 2.0, (NAV_HEIGHT - PILL_H) / 2.0,
+                pw, PILL_H)
 
     def layout(self):
         w = max(80.0, self.width - NAV_SIDE * 2)
@@ -4795,7 +4915,8 @@ class Screen(ui.View):
         """
         holder, icon = glass_circle((x, y, w, h), icon_name or 'pause',
                                     color, 1.9, w * 0.42, action,
-                                    glow=glow, border=border)
+                                    glow=glow, border=border,
+                                    material='thin')
         return holder, icon
 
     def _toggle_button(self, job, x, y, w=CTRL_SIZE, h=CTRL_SIZE):
@@ -5019,8 +5140,8 @@ class HomeScreen(Screen):
         btn = h
         box_w = w - PAD * 2 - btn - gap
         box = glass_pill((PAD, y, box_w, h), tint=GLASS_TINT,
-                         border_alpha=0.36, highlight=0.11,
-                         material='glass')
+                         tint_alpha=0.70, border_alpha=0.20,
+                         highlight=GLASS_HL_A, material='glass')
         box.add_subview(Icon('search', TEXT_MUTED, 2.0,
                              frame=(20, h / 2 - 11, 22, 22)))
 
@@ -5085,9 +5206,9 @@ class HomeScreen(Screen):
         row = Tappable(action=lambda s: self.app.open_media(item),
                        press_scale=0.99, frame=(14, 14, 190, 30))
         row.background_color = 'clear'
-        circ = GlassView(radius=15.0, tint=GLASS_BG_STRONG,
-                         border=GLASS_BORDER, border_alpha=0.40,
-                         highlight=0.16, material='glass',
+        circ = GlassView(radius=15.0, tint=GLASS_BG_STRONG, tint_alpha=0.74,
+                         border=GLASS_BORDER, border_alpha=0.26,
+                         highlight=GLASS_HL_A, material='glass',
                          frame=(0, 0, 30, 30))
         circ.add_subview(Icon('play', TEXT_PRIMARY, 1.7, frame=(10, 8, 13, 14)))
         row.add_subview(circ)
@@ -5121,10 +5242,9 @@ class HomeScreen(Screen):
         card.add_subview(meta)
 
         # Капсула «Продолжить» в правом нижнем углу, как на эталоне.
-        btn = GlassView(radius=bh / 2.0, tint=ACCENT, tint_alpha=0.88,
-                        border=ACCENT_LIGHT, border_alpha=0.50,
-                        highlight=0.20, glow=0.26, material='glass',
-                        interactive=True,
+        btn = GlassView(radius=bh / 2.0, tint=ACCENT_DEEP, tint_alpha=0.82,
+                        border=ACCENT_LIGHT, border_alpha=0.34,
+                        highlight=GLASS_HL_A, glow=0.22, material='glass',
                         frame=(cw - bw - 14, h - bh - 14, bw, bh))
         btn.add_subview(Icon('play', TEXT_PRIMARY, 1.9, frame=(26, 15, 17, 17)))
         btn.add_subview(make_label('Продолжить', (F_BOLD, 16), TEXT_PRIMARY,
@@ -5243,7 +5363,7 @@ class HomeScreen(Screen):
         th = ThumbView(item.load_thumb_image(), frame=(0, 0, cw, thumb_h))
         th.corner_radius = 16
         th.border_width = 1
-        th.border_color = rgba(GLASS_BORDER, 0.9)
+        th.border_color = rgba(GLASS_BORDER, 0.18)
         c.add_subview(th)
         c.add_subview(check_badge(cw - 32, 6))
         dur = fmt_clock(item.duration)
@@ -5374,14 +5494,17 @@ class DownloadsScreen(Screen):
     # ---------------------------------------------------------------
     def _build_url_box(self, w, y):
         h = 132.0
+        # Внешняя панель — тёмное стекло, внутреннее поле ЕЩЁ темнее.
+        # Раньше было наоборот: светлая панель и чёрный input.
         box = glass_panel((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
-                          border_alpha=0.34, highlight=0.10)
+                          tint=GLASS_TINT, tint_alpha=0.62,
+                          border_alpha=0.18)
         bw = box.width
 
         fh = 58.0
         field = GlassView(radius=fh / 2.0, tint=GLASS_BG_DEEP,
-                          tint_alpha=0.86, border=GLASS_BORDER,
-                          border_alpha=0.42, highlight=0.05,
+                          tint_alpha=0.92, border=GLASS_BORDER,
+                          border_alpha=0.22,
                           frame=(14, 14, bw - 28, fh))
         field.add_subview(Icon('link', TEXT_MUTED, 1.8, frame=(16, 19, 22, 20)))
 
@@ -5405,8 +5528,9 @@ class DownloadsScreen(Screen):
 
         # Отдельная стеклянная кнопка «Вставить» внутри поля.
         pb = GlassView(radius=pbh / 2.0, tint=GLASS_BG_STRONG,
-                       border=GLASS_BORDER, border_alpha=0.45,
-                       highlight=0.16, material='glass', interactive=True,
+                       tint_alpha=0.78, border=GLASS_BORDER,
+                       border_alpha=0.30, highlight=GLASS_HL_A,
+                       material='glass',
                        frame=(field.width - paste_w - 8, (fh - pbh) / 2.0,
                               paste_w, pbh))
         pb.add_subview(Icon('clip', TEXT_PRIMARY, 1.7, frame=(14, 13, 16, 16)))
@@ -5459,10 +5583,12 @@ class DownloadsScreen(Screen):
             x = PAD + i * (cw + gap)
             # Плитка — стекло, а не просто синяя рамка: у активной меняются
             # и поверхность, и край, и внутреннее свечение.
-            tile = GlassView(radius=16.0, tint=GLASS_TINT,
-                             border=GLASS_BORDER, border_alpha=0.34,
-                             highlight=0.09, material='glass',
-                             interactive=True, frame=(x, y, cw, ch))
+            # Неактивная плитка — тёмное navy-стекло, активная —
+            # тёмное фиолетовое (см. GlassView.set_active).
+            tile = GlassView(radius=16.0, tint=GLASS_TINT, tint_alpha=0.70,
+                             border=GLASS_BORDER, border_alpha=GLASS_BORDER_A,
+                             highlight=GLASS_HL_A, material='glass',
+                             frame=(x, y, cw, ch))
             t = make_label(top, (F_BOLD, 17), TEXT_PRIMARY, ui.ALIGN_CENTER,
                            frame=(0, 20, cw, 22))
             tile.add_subview(t)
@@ -5618,9 +5744,9 @@ class DownloadsScreen(Screen):
                        border_alpha=0.30, highlight=0.08)
         cw = c.width
 
-        box = GlassView(radius=15.0, tint=GLASS_BG_STRONG,
-                        border=GLASS_BORDER, border_alpha=0.38,
-                        highlight=0.14, material='glass',
+        box = GlassView(radius=15.0, tint=GLASS_BG_STRONG, tint_alpha=0.74,
+                        border=GLASS_BORDER, border_alpha=0.24,
+                        highlight=GLASS_HL_A, material='glass',
                         frame=(14, 22, 54, 54))
         box.add_subview(Icon('drive', ACCENT_LIGHT, 1.9, frame=(14, 14, 26, 26)))
         c.add_subview(box)
@@ -5719,7 +5845,7 @@ class PlayerScreen(Screen):
         th = ThumbView(item.load_thumb_image(), frame=(8, 8, cw - 16, th_h))
         th.corner_radius = 15
         th.border_width = 1
-        th.border_color = rgba(GLASS_BORDER, 0.9)
+        th.border_color = rgba(GLASS_BORDER, 0.18)
         c.add_subview(th)
         c.add_subview(play_orb(cw / 2.0, 8 + th_h / 2.0, 74.0))
         dur = fmt_clock(item.duration)
@@ -5771,7 +5897,7 @@ class PlayerScreen(Screen):
         th = ThumbView(item.load_thumb_image(), frame=(10, ty, tw, th_h))
         th.corner_radius = 13
         th.border_width = 1
-        th.border_color = rgba(GLASS_BORDER, 0.9)
+        th.border_color = rgba(GLASS_BORDER, 0.18)
         c.add_subview(th)
         c.add_subview(play_orb(10 + tw / 2.0, h / 2.0, orb))
         dur = fmt_clock(item.duration)
@@ -5878,9 +6004,9 @@ class SettingsScreen(Screen):
 
     def _row_button(self, cw, y, h, icon, title, action):
         """Строка-действие внутри раздела: стекло плюс прозрачный ui.Button."""
-        b = GlassView(radius=13.0, tint=GLASS_BG_STRONG,
-                      border=GLASS_BORDER, border_alpha=0.36,
-                      highlight=0.12, material='glass',
+        b = GlassView(radius=13.0, tint=GLASS_BG_STRONG, tint_alpha=0.72,
+                      border=GLASS_BORDER, border_alpha=0.24,
+                      highlight=GLASS_HL_A, material='glass',
                       frame=(16, y, cw - 32, h))
         b.add_subview(Icon(icon, ACCENT_LIGHT, 1.7,
                            frame=(15, h / 2.0 - 9, 18, 18)))
@@ -6128,35 +6254,28 @@ class NoxApp(ui.View):
 
     def _build_backdrop(self):
         """
-        Фон приложения: непрерывный CAGradientLayer плюс два очень слабых
-        РАДИАЛЬНЫХ пятна света. Ни одной полосы — раньше здесь было 26
-        ui.fill_rect подряд, и их швы были видны на устройстве.
-        Строится один раз, такт обновления загрузок его не трогает.
+        ОДНА цельная поверхность фона.
+
+        Раньше поверх градиента лежали три отдельные radial-view: на
+        устройстве они читались как большие прямоугольные блоки, потому
+        что вид квадратный, а свечение внутри него — нет. Теперь фон
+        целиком в одном CAGradientLayer, а холодный оттенок — просто
+        промежуточная точка того же градиента.
         """
         self.backdrop = GradientFill([(BG_TOP, 1.0, 0.0),
-                                      (BG, 1.0, 0.45),
+                                      (BG_GLOW, 0.22, 0.16),
+                                      (BG_MID, 1.0, 0.55),
                                       (BG_DEEP, 1.0, 1.0)],
+                                     start=(0.12, 0.0), end=(0.88, 1.0),
                                      flat=BG,
                                      frame=self.bounds)
         self.backdrop.flex = 'WH'
         self.add_subview(self.backdrop)
-        self.glows = []
-        for fx, fy, fs, alpha in ((0.10, 0.02, 1.5, 0.16),
-                                  (0.95, 0.34, 1.1, 0.09),
-                                  (0.50, 1.00, 1.3, 0.10)):
-            g = GradientFill([(BG_GLOW, alpha, 0.0),
-                              (BG_GLOW, alpha * 0.28, 0.45),
-                              (BG_GLOW, 0.0, 1.0)],
-                             radial=True, flat=BG, flat_alpha=0.0,
-                             frame=(0, 0, 10, 10))
-            self.add_subview(g)
-            self.glows.append((g, fx, fy, fs))
 
     def _layout_backdrop(self):
-        w, h = self.width, self.height
-        for g, fx, fy, fs in getattr(self, 'glows', ()):
-            size = w * fs
-            g.frame = (w * fx - size / 2.0, h * fy - size / 2.0, size, size)
+        b = self.backdrop
+        if b is not None and b.frame[2:] != (self.width, self.height):
+            b.frame = (0, 0, self.width, self.height)
 
     # ---------------------------------------------------------------
     def select_tab(self, index):
@@ -6243,20 +6362,17 @@ class NoxApp(ui.View):
         self.after_player_closed()
 
     # -- собственные меню NOX --------------------------------------
-    def _sheet_host(self):
-        """Куда класть лист: поверх всего содержимого NoxApp."""
-        return self
-
     def close_sheet(self):
         sheet = getattr(self, 'sheet', None)
         if sheet is not None:
             sheet.close()
             self.sheet = None
 
-    def open_sheet(self, title=''):
+    def open_sheet(self, builder):
         """
-        Открывает новый лист, аккуратно убрав предыдущий. Только главный
-        поток: метод вызывается из обработчиков нажатий.
+        Открывает лист. Кадр выставляется ДО построения содержимого, а
+        само содержимое строит `builder(sheet, width)` уже из layout(),
+        когда реальная ширина известна.
         """
         old = getattr(self, 'sheet', None)
         if old is not None:
@@ -6266,65 +6382,60 @@ class NoxApp(ui.View):
                     old.superview.remove_subview(old)
             except Exception as e:
                 log_debug('sheet swap: %r' % (e,))
-        sheet = NoxSheet(self, title, frame=self.bounds)
+        sheet = NoxSheet(self, builder, frame=self.bounds)
         sheet.flex = 'WH'
         self.add_subview(sheet)
+        sheet.frame = self.bounds          # реальная ширина экрана
         self.sheet = sheet
+        sheet.present()
         return sheet
 
     def item_menu(self, item):
-        """⋯ у видео: стеклянный лист NOX, без единого системного окна."""
+        """⋯ у видео: тёмный стеклянный лист NOX, без системных окон."""
         try:
-            sheet = self.open_sheet()
-            y = 12.0
-            y = sheet.header(y, item.title,
-                             item.meta_line or item.fmt_label,
-                             item.load_thumb_image())
-            watch = STATE.watch_get(item.watch_id)
-            pos = 0.0
-            if isinstance(watch, dict):
-                try:
-                    pos = float(watch.get('position') or 0.0)
-                except Exception:
-                    pos = 0.0
-            if pos > 0:
-                y = sheet.row(y, 'play', 'Продолжить',
-                              self._sheet_open(item),
-                              subtitle='с ' + fmt_clock(pos))
-            else:
-                y = sheet.row(y, 'play', 'Открыть', self._sheet_open(item))
-            y = sheet.row(y, 'link', 'Источник', self._sheet_source(item))
-            y = sheet.row(y, 'trash', 'Удалить', self._sheet_confirm(item),
-                          danger=True)
-            sheet.set_content_height(y)
-            sheet.present()
+            self.open_sheet(lambda sh, w: self._build_item_menu(sh, w, item))
         except Exception as e:
             log_debug('item_menu: %r' % (e,))
             nox_error('Меню недоступно')
 
+    def _build_item_menu(self, sheet, w, item):
+        y = 12.0
+        y = sheet.header(w, y, item.title,
+                         item.meta_line or item.fmt_label,
+                         item.load_thumb_image())
+        pos = watch_position(item)
+        if pos > 0:
+            y = sheet.row(w, y, 'play', 'Продолжить', self._sheet_open(item),
+                          subtitle='с ' + fmt_clock(pos))
+        else:
+            y = sheet.row(w, y, 'play', 'Открыть', self._sheet_open(item))
+        y = sheet.row(w, y, 'link', 'Источник', self._sheet_source(item))
+        y = sheet.row(w, y, 'trash', 'Удалить', self._sheet_confirm(item),
+                      danger=True)
+        return y
+
     def _sheet_open(self, item):
         def _act(sender):
             self.close_sheet()
-            # Открываем плеер следующим шагом: сначала лист должен уйти.
             run_on_main(lambda: PLAYER.open(item))
         return _act
 
     def _sheet_source(self, item):
         def _act(sender):
-            src = item.webpage_url or ''
-            sheet = self.open_sheet()
-            y = 12.0
-            y = sheet.header(y, 'Источник', safe_name(item.title, 34))
-            y = sheet.text_block(y, src or 'Источник неизвестен')
-            if src and clipboard is not None:
-                y = sheet.row(y, 'clip', 'Скопировать ссылку',
-                              self._sheet_copy(src))
-            y = sheet.buttons(y, 'Назад',
-                              lambda s: self.item_menu(item),
-                              'Закрыть', lambda s: self.close_sheet())
-            sheet.set_content_height(y)
-            sheet.present()
+            self.open_sheet(lambda sh, w: self._build_source(sh, w, item))
         return _act
+
+    def _build_source(self, sheet, w, item):
+        src = item.webpage_url or ''
+        y = 12.0
+        y = sheet.header(w, y, 'Источник', safe_name(item.title, 40))
+        y = sheet.text_block(w, y, src or 'Источник неизвестен')
+        if src and clipboard is not None:
+            y = sheet.row(w, y, 'clip', 'Скопировать ссылку',
+                          self._sheet_copy(src))
+        y = sheet.buttons(w, y, 'Назад', lambda s: self.item_menu(item),
+                          'Закрыть', lambda s: self.close_sheet())
+        return y
 
     def _sheet_copy(self, text):
         def _act(sender):
@@ -6337,18 +6448,19 @@ class NoxApp(ui.View):
 
     def _sheet_confirm(self, item):
         def _act(sender):
-            sheet = self.open_sheet()
-            y = 12.0
-            y = sheet.header(y, 'Удалить видео?', safe_name(item.title, 40))
-            y = sheet.text_block(
-                y, 'Файл и его обложка с метаданными будут удалены '
-                   'с устройства безвозвратно.')
-            y = sheet.buttons(y, 'Отмена', lambda s: self.close_sheet(),
-                              'Удалить', self._sheet_delete(item),
-                              right_danger=True)
-            sheet.set_content_height(y)
-            sheet.present()
+            self.open_sheet(lambda sh, w: self._build_confirm(sh, w, item))
         return _act
+
+    def _build_confirm(self, sheet, w, item):
+        y = 12.0
+        y = sheet.header(w, y, 'Удалить видео?', safe_name(item.title, 46))
+        y = sheet.text_block(
+            w, y, 'Файл и его обложка с метаданными будут удалены '
+                  'с устройства безвозвратно.')
+        y = sheet.buttons(w, y, 'Отмена', lambda s: self.close_sheet(),
+                          'Удалить', self._sheet_delete(item),
+                          right_danger=True)
+        return y
 
     def _sheet_delete(self, item):
         def _act(sender):
@@ -6357,50 +6469,50 @@ class NoxApp(ui.View):
         return _act
 
     def open_filter_sheet(self, on_change=None):
-        """Сортировка и фильтр качества — сетка, а не список из 11 строк."""
+        """Сортировка и фильтр — сетка полноразмерных чипов."""
         try:
-            sheet = self.open_sheet()
-
-            def rebuild_sheet():
-                self.open_filter_sheet(on_change)
-
-            def pick_sort(key):
-                STATE.set('sort', key)
-                if callable(on_change):
-                    on_change()
-                rebuild_sheet()
-
-            def pick_quality(key):
-                STATE.set('quality_filter', key)
-                if callable(on_change):
-                    on_change()
-                rebuild_sheet()
-
-            def reset(sender):
-                STATE.set('sort', 'new')
-                STATE.set('quality_filter', 'all')
-                if callable(on_change):
-                    on_change()
-                rebuild_sheet()
-
-            y = 12.0
-            y = sheet.header(y, 'Сортировка и фильтр')
-            y = sheet.section(y, 'СОРТИРОВКА')
-            y = sheet.chips(y, [(k, t) for k, t in SORT_OPTIONS],
-                            STATE.get('sort', 'new'), pick_sort, per_row=2)
-            y += 8
-            y = sheet.section(y, 'КАЧЕСТВО')
-            y = sheet.chips(y, [(k, t) for k, t in QUALITY_FILTERS],
-                            STATE.get('quality_filter', 'all'), pick_quality,
-                            per_row=3)
-            y += 6
-            y = sheet.buttons(y, 'Сбросить', reset,
-                              'Готово', lambda s: self.close_sheet())
-            sheet.set_content_height(y)
-            sheet.present()
+            self.open_sheet(lambda sh, w: self._build_filter(sh, w, on_change))
         except Exception as e:
             log_debug('filter sheet: %r' % (e,))
             nox_error('Меню недоступно')
+
+    def _build_filter(self, sheet, w, on_change):
+        def apply_and_refresh():
+            if callable(on_change):
+                on_change()
+            # Лист остаётся открытым и того же размера: перестраивается
+            # только его содержимое, кадр не трогается.
+            sheet.rebuild()
+
+        def pick_sort(key):
+            STATE.set('sort', key)
+            apply_and_refresh()
+
+        def pick_quality(key):
+            STATE.set('quality_filter', key)
+            apply_and_refresh()
+
+        def reset(sender):
+            STATE.set('sort', 'new')
+            STATE.set('quality_filter', 'all')
+            apply_and_refresh()
+
+        y = 12.0
+        y = sheet.header(w, y, 'Сортировка и фильтр')
+        y = sheet.section(w, y, 'СОРТИРОВКА')
+        y = sheet.chips(w, y, list(SORT_OPTIONS), STATE.get('sort', 'new'),
+                        pick_sort, per_row=2)
+        y += 10
+        y = sheet.section(w, y, 'КАЧЕСТВО')
+        # Три колонки: «1080p+» и «MAX/4K» помещаются целиком.
+        per_row = 3 if w >= 330 else 2
+        y = sheet.chips(w, y, list(QUALITY_FILTERS),
+                        STATE.get('quality_filter', 'all'), pick_quality,
+                        per_row=per_row)
+        y += 8
+        y = sheet.buttons(w, y, 'Сбросить', reset,
+                          'Готово', lambda s: self.close_sheet())
+        return y
 
     def _delete(self, item):
         """

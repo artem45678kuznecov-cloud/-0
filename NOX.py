@@ -1807,6 +1807,7 @@ class DownloadsScreen(Screen):
     _chips = ()
     _url_field = None
     _delegate = None
+    _dl_button = None
 
     def __init__(self, app, **kwargs):
         self.url_text = ''
@@ -1971,7 +1972,10 @@ class DownloadsScreen(Screen):
     # ---------------------------------------------------------------
     def _build_button(self, w, y):
         h = 62.0
-        btn = Tappable(action=self._download, press_scale=0.97,
+        # Визуал остаётся прежним, но действие снято с Tappable: на устройстве
+        # его touch_ended до обработчика не доходил. Хит-таргетом служит
+        # настоящий прозрачный ui.Button поверх всей кнопки (см. ниже).
+        btn = Tappable(action=None, press_scale=0.97,
                        frame=(PAD, y, w - PAD * 2, h))
         btn.background_color = ACCENT_DEEP
         btn.corner_radius = h / 2.0
@@ -1983,6 +1987,14 @@ class DownloadsScreen(Screen):
                              frame=(bw / 2 - 78, h / 2 - 13, 26, 26)))
         btn.add_subview(make_label('Скачать', (F_BOLD, 20), TXT,
                                    frame=(bw / 2 - 44, 0, 160, h)))
+        self._dl_button = btn
+
+        hit = ui.Button(frame=btn.bounds)
+        hit.flex = 'WH'
+        hit.background_color = 'clear'
+        hit.action = self._download
+        btn.add_subview(hit)
+
         self.sv.add_subview(btn)
         y += h + 10
         self.sv.add_subview(make_label('Для больших загрузок не закрывайте a-Shell.',
@@ -1990,7 +2002,29 @@ class DownloadsScreen(Screen):
                                        frame=(PAD, y, w - PAD * 2, 16)))
         return y + 26
 
+    def _pulse_download_button(self):
+        """Прежняя press-анимация 0.97 -> 1.0: касание теперь ловит ui.Button."""
+        btn = self._dl_button
+        if btn is None or btn.superview is None:
+            return
+
+        def down():
+            try:
+                btn.transform = ui.Transform.scale(0.97, 0.97)
+            except Exception:
+                pass
+
+        def up():
+            try:
+                btn.transform = ui.Transform.scale(1.0, 1.0)
+            except Exception:
+                pass
+
+        animate(down, 0.08, 0.0, lambda: animate(up, 0.14))
+
     def _download(self, sender):
+        console.hud_alert('DOWNLOAD TAP', 'success', 0.8)   # временная диагностика
+        self._pulse_download_button()
         url = self.url_text
         if self._url_field is not None:
             url = self._url_field.text or url

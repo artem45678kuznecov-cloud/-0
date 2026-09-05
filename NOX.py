@@ -1827,6 +1827,31 @@ def target_path_for(title, video_id, ext):
     return os.path.join(MEDIA_DIR, '%s.%s' % (stem, ext))
 
 
+VK_DIRECT_RE = re.compile(r'url(?:144|240|360|480|720|1080|1440|2160)')
+
+
+def _is_vk_direct(fmt):
+    """
+    Прямой VK-формат urlXXX. Кодеки у него в info часто отсутствуют
+    (yt-dlp -F показывает их как unknown), и это НЕ означает, что поток
+    без звука: yt-dlp -f url480 такой файл качает целиком. Поэтому для
+    urlXXX проверка кодеков не применяется.
+    """
+    if not isinstance(fmt, dict):
+        return False
+    fid = str(fmt.get('format_id') or '')
+    if not VK_DIRECT_RE.fullmatch(fid):
+        return False
+    url = fmt.get('url')
+    if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+        return False
+    proto = str(fmt.get('protocol') or '').lower()
+    for hint in SEGMENTED_HINTS:
+        if hint in proto:
+            return False
+    return True
+
+
 def _is_combined(fmt):
     """Готовый файл со звуком: и видео, и аудио, и обычный HTTP."""
     if not isinstance(fmt, dict):
@@ -1869,19 +1894,23 @@ def pick_direct_format(info, quality):
     formats = entry.get('formats')
     if not isinstance(formats, list):
         formats = []
+
+    # 1) Прямые VK urlXXX ищем в ИСХОДНОМ списке и раньше проверки кодеков:
+    #    отсутствующие vcodec/acodec у них — норма, а не признак video-only.
+    vk_by_id = {}
+    for f in formats:
+        if _is_vk_direct(f):
+            vk_by_id.setdefault(str(f.get('format_id')), f)
+    for fid in VK_DIRECT.get(quality, []):
+        if fid in vk_by_id:
+            return vk_by_id[fid]
+
+    # 2) Иначе обычный combined-путь, где кодеки проверяются строго.
     combined = [f for f in formats if _is_combined(f)]
     if not combined and _is_combined(entry):
         combined = [entry]          # у некоторых экстракторов формат один
     if not combined:
         return None
-    by_id = {}
-    for f in combined:
-        fid = f.get('format_id')
-        if isinstance(fid, str):
-            by_id.setdefault(fid, f)
-    for fid in VK_DIRECT.get(quality, []):
-        if fid in by_id:
-            return by_id[fid]
     cap = HEIGHTS.get(quality)
     pool = combined
     if cap:

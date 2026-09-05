@@ -94,6 +94,10 @@ HISTORY_LIMIT = 200
 # Сколько карточка держится с отметкой «Готово» перед уходом из очереди.
 DONE_LINGER = 0.8
 
+# Через сколько секунд в ST_PREPARING карточка начинает показывать
+# диагностику этапа. Ничего не лечит — только показывает, где встали.
+DIAG_AFTER = 2.0
+
 # Контрольный переключатель A/B. False — рабочий путь ровно как в
 # победившей версии: extract_info -> finished, и ничего больше.
 # True — метаданные и обложка выполняются ПОСЛЕ finished, в отдельном
@@ -1840,6 +1844,11 @@ class DownloadJob(object):
         self.debug_error = ''      # техническая причина, без консоли
         # Состояние дополнительных функций отдельно от статуса видео:
         # их сбой никогда не переводит само задание в error.
+        # Телеметрия этапа: только присваивание Python-строки, ни файлов,
+        # ни консоли, ни потоков.
+        self.debug_stage = 'created'
+        self.debug_stage_time = time.monotonic()
+        self.first_hook_received = False
         self.completed_info = {}
         self.extras_status = EXTRAS_NONE
         self.extras_error = ''
@@ -1849,6 +1858,10 @@ class DownloadJob(object):
         self.started_at = time.time()
         self.finished_at = None
         self.cancel_requested = False
+
+    def set_stage(self, stage):
+        self.debug_stage = stage
+        self.debug_stage_time = time.monotonic()
 
     @property
     def total(self):
@@ -1892,8 +1905,30 @@ class DownloadJob(object):
             return safe_name(self.error, 46)
         return STATUS_TEXT.get(self.status, '')
 
+    def diag_line(self):
+        """
+        Временная телеметрия: если задание висит в «Получение информации...»
+        дольше DIAG_AFTER, существующая строка карточки показывает точный
+        этап, время в нём и состояние рабочего потока. Как только пошла
+        обычная загрузка, строка исчезает сама.
+        """
+        if self.status != ST_PREPARING:
+            return ''
+        try:
+            elapsed = time.monotonic() - float(self.debug_stage_time or 0.0)
+        except Exception:
+            return ''
+        if elapsed <= DIAG_AFTER:
+            return ''
+        alive = 'alive' if DOWNLOADER.worker_alive() else 'dead'
+        return 'Диагностика: %s · %.1f c · worker %s' % (
+            self.debug_stage, elapsed, alive)
+
     def detail_line(self):
         """Вторая строка: процент, скорость, остаток — только реальные."""
+        diag = self.diag_line()
+        if diag:
+            return diag
         if self.status != ST_DOWNLOADING:
             return ''
         bits = []
@@ -1962,6 +1997,14 @@ class DownloadManager(object):
             if j.id == job_id:
                 return j
         return None
+
+    def worker_alive(self):
+        """Только для главного потока: жив ли поток загрузки."""
+        t = self._thread
+        try:
+            return bool(t is not None and t.is_alive())
+        except Exception:
+            return False
 
     def signature(self):
         """
@@ -2053,11 +2096,18 @@ class DownloadManager(object):
                 return
             nxt.status = ST_PREPARING
             self.revision += 1
+            nxt.set_stage('before-thread-create')
             self._thread = threading.Thread(target=self._run, args=(nxt,),
                                             name='nox-download', daemon=True)
             self._thread.start()
+            # Поток мог успеть шагнуть дальше — не затираем более поздний этап.
+            if nxt.debug_stage == 'before-thread-create':
+                nxt.set_stage('thread-start-called')
 
     def _hook(self, job, d):
+        if not job.first_hook_received:
+            job.first_hook_received = True
+            job.set_stage('first-hook')
         if job.cancel_requested:
             raise _cancel_exception()('Загрузка остановлена пользователем')
         # Отдельного metadata-запроса больше нет, поэтому название приходит
@@ -2068,6 +2118,7 @@ class DownloadManager(object):
             job.title = title.strip()
         st = d.get('status')
         if st == 'downloading':
+            job.set_stage('downloading')
             job.status = ST_DOWNLOADING
             job.downloaded_bytes = d.get('downloaded_bytes') or 0
             job.total_bytes = d.get('total_bytes')
@@ -2081,6 +2132,7 @@ class DownloadManager(object):
             if name:
                 job.filename = name
         elif st == 'finished':
+            job.set_stage('hook-finished')
             job.status = ST_PROCESSING
             done = d.get('total_bytes') or d.get('downloaded_bytes')
             if done:
@@ -2156,11 +2208,17 @@ class DownloadManager(object):
         он же выбирает формат, он же качает. Отдельного metadata-запроса,
         на котором раньше выпадал timeout, больше не существует.
         """
+        job.set_stage('before-load-ytdlp')
         mod = _load_yt_dlp()
         if mod is None:
             raise RuntimeError(YTDLP_ERROR or 'Модуль yt-dlp не найден')
+        job.set_stage('ytdlp-loaded')
+        job.set_stage('ytdlp-constructor')
         with mod.YoutubeDL(self._ydl_opts(job, ipv4)) as ydl:
+            job.set_stage('ytdlp-created')
+            job.set_stage('extract-info-enter')
             info = ydl.extract_info(job.url, download=True)
+            job.set_stage('extract-info-returned')
         self._absorb_info(job, info)
         return info
 
@@ -2170,7 +2228,10 @@ class DownloadManager(object):
         yt-dlp и поля DownloadJob. Диагностика копится в job.debug_error,
         а на экран её позже переносит главный поток.
         """
+        job.set_stage('worker-entered')
+        job.set_stage('before-cancel-exception')
         cancel_exc = _cancel_exception()
+        job.set_stage('after-cancel-exception')
         info = None
         try:
             # Попытка 1 — обычная сеть; попытка 2 — та же задача по IPv4,
@@ -2203,8 +2264,10 @@ class DownloadManager(object):
                 # ни UI: рабочий поток заканчивается ровно там же, где в
                 # доказанной версии. Метаданные и обложку сделает потом
                 # отдельный ExtrasManager, уже после смерти этого потока.
+                job.set_stage('before-finished')
                 job.completed_info = safe_metadata_snapshot(info)
                 job.status = ST_FINISHED
+                job.set_stage('finished')
         except cancel_exc:
             job.status = ST_CANCELLED
         except DownloadCancelledByUser:
@@ -2213,6 +2276,7 @@ class DownloadManager(object):
             if job.cancel_requested:
                 job.status = ST_CANCELLED
             else:
+                job.set_stage('exception')
                 job.status = ST_ERROR
                 job.error = short_error(e)
                 if not job.debug_error:
@@ -2576,7 +2640,10 @@ class Screen(ui.View):
                 title.text = text
         sub = row.get('sub')
         if sub is not None:
-            text = job.sub_line()
+            if row.get('detail') is None:
+                text = job.diag_line() or job.sub_line()
+            else:
+                text = job.sub_line()
             if sub.text != text:
                 sub.text = text
         detail = row.get('detail')
@@ -2997,7 +3064,9 @@ class HomeScreen(Screen):
             st_text, st_icon, st_col = 'Не завершено', 'clock', TXT_2
             indeterminate = False
         else:
-            sub = job.sub_line()
+            # У компактной строки второй линии нет: пока висит диагностика,
+            # она занимает место обычной подписи и исчезает вместе с ней.
+            sub = job.diag_line() or job.sub_line()
             bar_value = job.percent
             st_text = job.short_status()
             st_col = ERR_TXT if job.status == ST_ERROR else ACCENT_2

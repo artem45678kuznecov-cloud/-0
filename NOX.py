@@ -94,6 +94,12 @@ HISTORY_LIMIT = 200
 # Сколько карточка держится с отметкой «Готово» перед уходом из очереди.
 DONE_LINGER = 0.8
 
+# Контрольный переключатель A/B. False — рабочий путь ровно как в
+# победившей версии: extract_info -> finished, и ничего больше.
+# True — метаданные и обложка выполняются ПОСЛЕ finished, в отдельном
+# потоке ExtrasManager, когда поток загрузки уже мёртв.
+ENABLE_EXTRAS = True
+
 SORT_OPTIONS = [
     ('new', 'Сначала новые'),
     ('old', 'Сначала старые'),
@@ -111,10 +117,10 @@ QUALITY_FILTERS = [
 ]
 
 VIDEO_EXT   = ('.mp4', '.mov', '.m4v', '.mkv', '.webm')
-# .webp yt-dlp пишет часто, но Pythonista его обычно не декодирует:
-# такой файл найдётся, картинка не откроется — и карточка честно останется
-# минималистичной, без выдуманной обложки.
-IMAGE_EXT   = ('.jpg', '.jpeg', '.png', '.webp')
+# В карточки отдаём только JPEG/PNG. WEBP может лежать рядом от прежних
+# загрузок — он удаляется вместе с видео, но в UI не передаётся.
+IMAGE_EXT   = ('.jpg', '.jpeg', '.png')
+IMAGE_EXT_ALL = ('.jpg', '.jpeg', '.png', '.webp')
 TEMP_EXT    = ('.part', '.ytdl')
 
 QUALITIES = [
@@ -895,6 +901,19 @@ def log_debug(text):
         pass
 
 
+def run_on_main(func):
+    """
+    Одноразовый перенос действия на главный поток. Периодического таймера
+    не создаёт. Всё, что меняет ui.View, обязано идти через него.
+    """
+    if not callable(func):
+        return
+    try:
+        ui.delay(func, 0)
+    except Exception:
+        pass
+
+
 def nox_error(text):
     _LAST_ERROR['text'] = str(text)
     _LAST_ERROR['time'] = time.time()
@@ -1128,15 +1147,24 @@ class MediaItem(object):
                     return
 
     def load_thumb_image(self):
+        """
+        Только данные и только проверенные JPEG/PNG: ui.Image.named для
+        произвольного локального файла не используется. Не распозналось —
+        None, без исключения наружу.
+        """
         if not self.thumb_path:
             return None
         try:
-            return ui.Image.named(self.thumb_path)
-        except Exception:
-            pass
-        try:
             with io.open(self.thumb_path, 'rb') as f:
-                return ui.Image.from_data(f.read())
+                raw = f.read()
+        except Exception:
+            return None
+        if not raw:
+            return None
+        if not (raw[:8] == b'\x89PNG\r\n\x1a\n' or raw[:3] == b'\xff\xd8\xff'):
+            return None
+        try:
+            return ui.Image.from_data(raw)
         except Exception:
             return None
 
@@ -1191,7 +1219,7 @@ class MediaItem(object):
         for stem in stems:
             out.append(os.path.join(folder, stem + SIDECAR_EXT))
             out.append(os.path.join(folder, stem + '.info.json'))
-            for ext in IMAGE_EXT:
+            for ext in IMAGE_EXT_ALL:
                 out.append(os.path.join(folder, stem + ext))
         return out
 
@@ -1442,6 +1470,22 @@ def format_selector(quality):
 SIDECAR_EXT = '.nox.json'
 THUMB_LIMIT = 8 * 1024 * 1024
 
+# Что реально можно отдать в UI Pythonista. WEBP сюда не входит:
+# декодирование чужого формата в карточке — лишний риск, а конвертировать
+# нечем (ffmpeg запрещён). Такая обложка просто пропускается.
+SAFE_IMAGE_TYPES = ('.jpg', '.jpeg', '.png')
+
+EXTRAS_NONE = 'none'
+EXTRAS_PENDING = 'pending'
+EXTRAS_RUNNING = 'running'
+EXTRAS_READY = 'ready'
+EXTRAS_PARTIAL = 'partial'
+EXTRAS_ERROR = 'error'
+
+SNAPSHOT_KEYS = ('id', 'title', 'uploader', 'channel', 'duration', 'width',
+                 'height', 'format_id', 'ext', 'webpage_url', 'thumbnail',
+                 'filesize')
+
 
 def _entry_of(info):
     """Из результата extract_info достаём словарь самого видео."""
@@ -1453,20 +1497,61 @@ def _entry_of(info):
     return info
 
 
-def _media_path_of(job, entry):
-    """Путь к реально скачанному файлу: сначала из info, потом из hook."""
-    for candidate in (entry.get('filepath'), entry.get('_filename'),
-                      job.filename):
-        if isinstance(candidate, str) and candidate and os.path.isfile(candidate):
-            return candidate
-    return ''
+def safe_metadata_snapshot(info):
+    """
+    Маленький обычный dict из уже полученного info. Ни сети, ни файлов —
+    только чтение полей, поэтому вызывать можно и из рабочего потока.
+    Огромный объект yt-dlp не сохраняется.
+    """
+    try:
+        entry = _entry_of(info)
+    except Exception:
+        return {}
+    if not entry:
+        return {}
+    snap = {}
+    for key in SNAPSHOT_KEYS:
+        try:
+            value = entry.get(key)
+        except Exception:
+            value = None
+        if isinstance(value, (str, int, float)):
+            snap[key] = value          # пустые поля не занимают место
+    if snap.get('filesize') is None:
+        try:
+            approx = entry.get('filesize_approx')
+            if isinstance(approx, (int, float)):
+                snap['filesize'] = approx
+        except Exception:
+            pass
+    thumbs = []
+    try:
+        for t in (entry.get('thumbnails') or [])[:20]:
+            if not isinstance(t, dict):
+                continue
+            url = t.get('url')
+            if not isinstance(url, str) or not url.startswith('http'):
+                continue
+            thumbs.append({'url': url,
+                           'width': t.get('width') if isinstance(
+                               t.get('width'), (int, float)) else 0,
+                           'preference': t.get('preference') if isinstance(
+                               t.get('preference'), (int, float)) else 0})
+    except Exception:
+        thumbs = []
+    snap['thumbnails'] = thumbs
+    for key in ('filepath', '_filename'):
+        try:
+            value = entry.get(key)
+        except Exception:
+            value = None
+        if isinstance(value, str) and value:
+            snap[key] = value
+    return snap
 
 
-def _source_of(entry):
-    name = entry.get('extractor_key') or entry.get('extractor') or ''
-    if isinstance(name, str) and name.strip():
-        return name.strip()
-    url = entry.get('webpage_url') or ''
+def _source_of(snap):
+    url = snap.get('webpage_url') or ''
     try:
         from urllib.parse import urlparse
         host = urlparse(url).netloc
@@ -1475,26 +1560,23 @@ def _source_of(entry):
         return ''
 
 
-def write_sidecar(video_path, entry):
-    """
-    Пишет <имя видео>.nox.json из УЖЕ полученного info.
-    Второй extract_info не делается: yt-dlp opts остаются неизменными.
-    """
+def write_sidecar(video_path, snap):
+    """Пишет <имя видео>.nox.json из снимка. Второго extract_info нет."""
     data = {
-        'id': entry.get('id'),
-        'title': entry.get('title'),
-        'uploader': entry.get('uploader'),
-        'channel': entry.get('channel'),
-        'duration': entry.get('duration'),
-        'width': entry.get('width'),
-        'height': entry.get('height'),
-        'format_id': entry.get('format_id'),
-        'ext': entry.get('ext'),
-        'webpage_url': entry.get('webpage_url'),
-        'thumbnail': entry.get('thumbnail'),
-        'filesize': entry.get('filesize') or entry.get('filesize_approx'),
+        'id': snap.get('id'),
+        'title': snap.get('title'),
+        'uploader': snap.get('uploader'),
+        'channel': snap.get('channel'),
+        'duration': snap.get('duration'),
+        'width': snap.get('width'),
+        'height': snap.get('height'),
+        'format_id': snap.get('format_id'),
+        'ext': snap.get('ext'),
+        'webpage_url': snap.get('webpage_url'),
+        'thumbnail': snap.get('thumbnail'),
+        'filesize': snap.get('filesize'),
         'downloaded_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
-        'source': _source_of(entry),
+        'source': _source_of(snap),
     }
     try:
         if not data.get('filesize'):
@@ -1512,83 +1594,168 @@ def write_sidecar(video_path, entry):
     return target
 
 
-def _best_thumb_url(entry):
-    url = entry.get('thumbnail')
-    if isinstance(url, str) and url.startswith('http'):
-        return url
-    thumbs = entry.get('thumbnails')
-    if not isinstance(thumbs, list):
-        return ''
-    best, best_rank = '', None
+def _thumb_candidates(snap):
+    """Все URL обложек, лучшая первой."""
+    out = []
+    main = snap.get('thumbnail')
+    if isinstance(main, str) and main.startswith('http'):
+        out.append(main)
+    thumbs = snap.get('thumbnails') or []
+    ranked = []
     for t in thumbs:
         if not isinstance(t, dict):
             continue
-        u = t.get('url')
-        if not isinstance(u, str) or not u.startswith('http'):
+        url = t.get('url')
+        if isinstance(url, str) and url.startswith('http'):
+            ranked.append(((t.get('preference') or 0, t.get('width') or 0), url))
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    for _, url in ranked:
+        if url not in out:
+            out.append(url)
+    return out[:5]
+
+
+def _safe_image_ext(raw, ctype):
+    """Расширение только для проверенных JPEG/PNG. WEBP -> ничего."""
+    if raw[:8] == b'\x89PNG\r\n\x1a\n':
+        return '.png'
+    if raw[:3] == b'\xff\xd8\xff':
+        return '.jpg'
+    low = (ctype or '').lower()
+    if 'png' in low:
+        return '.png'
+    if 'jpeg' in low or 'jpg' in low:
+        return '.jpg'
+    return ''
+
+
+def fetch_thumbnail(video_path, snap):
+    """
+    Обложка обычным HTTP: ни yt-dlp postprocessor, ни ffmpeg, ни subprocess.
+    Принимаются только JPEG и PNG; WEBP пропускается, конвертации нет.
+    """
+    last = ''
+    for url in _thumb_candidates(snap):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'NOX/1.0'})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                ctype = resp.headers.get('Content-Type') or ''
+                raw = resp.read(THUMB_LIMIT + 1)
+        except Exception as e:
+            last = repr(e)
             continue
-        rank = (t.get('preference') or 0, t.get('width') or 0)
-        if best_rank is None or rank > best_rank:
-            best, best_rank = u, rank
-    return best
+        if not raw or len(raw) > THUMB_LIMIT:
+            last = 'пустой или слишком большой файл'
+            continue
+        ext = _safe_image_ext(raw, ctype)
+        if not ext:
+            last = 'формат не JPEG/PNG (%s)' % (ctype or '?')
+            continue
+        target = os.path.splitext(video_path)[0] + ext
+        tmp = target + '.tmp'
+        with io.open(tmp, 'wb') as f:
+            f.write(raw)
+        if os.path.exists(target):
+            os.remove(target)
+        os.rename(tmp, target)
+        return target
+    if last:
+        raise IOError(last)
+    return ''
 
 
-def fetch_thumbnail(video_path, entry):
-    """
-    Обложка качается обычным Python HTTP — без yt-dlp postprocessor,
-    без ffmpeg и без subprocess. Сбой здесь ничего не значит для MP4.
-    """
-    url = _best_thumb_url(entry)
-    if not url:
-        return ''
-    req = urllib.request.Request(url, headers={'User-Agent': 'NOX/1.0'})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        ctype = (resp.headers.get('Content-Type') or '').lower()
-        raw = resp.read(THUMB_LIMIT + 1)
-    if not raw or len(raw) > THUMB_LIMIT:
-        return ''
-    ext = '.jpg'
-    if 'png' in ctype or raw[:8] == b'\x89PNG\r\n\x1a\n':
-        ext = '.png'
-    elif 'webp' in ctype or raw[8:12] == b'WEBP':
-        ext = '.webp'
-    elif 'jpeg' not in ctype and 'jpg' not in ctype:
-        low = url.split('?')[0].lower()
-        for known in ('.jpg', '.jpeg', '.png', '.webp'):
-            if low.endswith(known):
-                ext = known
-                break
-    target = os.path.splitext(video_path)[0] + ext
-    tmp = target + '.tmp'
-    with io.open(tmp, 'wb') as f:
-        f.write(raw)
-    if os.path.exists(target):
-        os.remove(target)
-    os.rename(tmp, target)
-    return target
+def media_path_of(job):
+    """Путь к скачанному файлу: из снимка info, иначе из progress_hook."""
+    snap = job.completed_info or {}
+    for candidate in (snap.get('filepath'), snap.get('_filename'),
+                      job.filename):
+        if isinstance(candidate, str) and candidate and os.path.isfile(candidate):
+            return candidate
+    return ''
 
 
-def save_extras(job, info):
+class ExtrasManager(object):
     """
-    Метаданные и обложка ПОСЛЕ успешной загрузки. Каждый шаг в своём
-    try/except: ни один сбой не делает готовый MP4 неудачным.
+    Отдельная от DownloadManager сущность. Запускается ТОЛЬКО после того,
+    как рабочий поток загрузки завершился и MP4 уже отмечен finished.
+    Ничего из неё не может изменить статус самого видео.
     """
-    entry = {}
-    path = ''
-    try:
-        entry = _entry_of(info)
-        path = _media_path_of(job, entry)
-    except Exception as e:
-        job.debug_error = 'extras/path: %r' % (e,)
-    if not path:
-        return
-    try:
-        write_sidecar(path, entry)
-    except Exception as e:
-        job.debug_error = 'sidecar: %r' % (e,)
-    try:
-        fetch_thumbnail(path, entry)
-    except Exception as e:
-        job.debug_error = 'thumbnail: %r' % (e,)
+
+    def __init__(self):
+        self.tasks = []
+        self.tick = 0
+        self._lock = threading.RLock()
+        self._thread = None
+
+    def busy(self):
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def pending(self):
+        with self._lock:
+            return len(self.tasks)
+
+    def enqueue(self, job):
+        """Вызывается главным потоком для уже завершённого задания."""
+        if not ENABLE_EXTRAS:
+            job.extras_status = EXTRAS_NONE
+            return False
+        path = media_path_of(job)
+        if not path:
+            job.extras_status = EXTRAS_ERROR
+            job.extras_error = 'файл не найден'
+            return False
+        job.extras_status = EXTRAS_PENDING
+        with self._lock:
+            self.tasks.append({'job': job, 'path': path,
+                               'snap': dict(job.completed_info or {})})
+        return True
+
+    def pump(self, downloads_busy):
+        """
+        Тоже только главный поток. Пока жив рабочий поток загрузки,
+        extras не стартуют — они не должны идти параллельно с yt-dlp.
+        """
+        if downloads_busy or self.busy():
+            return
+        with self._lock:
+            if not self.tasks:
+                return
+            task = self.tasks.pop(0)
+            self._thread = threading.Thread(target=self._run, args=(task,),
+                                            name='nox-extras', daemon=True)
+            self._thread.start()
+
+    def _run(self, task):
+        job = task['job']
+        path = task['path']
+        snap = task['snap']
+        job.extras_status = EXTRAS_RUNNING
+        self.tick += 1
+        # 1) sidecar — маленькая локальная операция
+        try:
+            write_sidecar(path, snap)
+            job.metadata_ready = True
+        except Exception as e:
+            job.extras_error = 'sidecar: %r' % (e,)
+        # 2) обложка — отдельный необязательный этап
+        try:
+            if fetch_thumbnail(path, snap):
+                job.thumbnail_ready = True
+        except Exception as e:
+            job.thumbnail_error = repr(e)
+        if job.metadata_ready and job.thumbnail_ready:
+            job.extras_status = EXTRAS_READY
+        elif job.metadata_ready or job.thumbnail_ready:
+            job.extras_status = EXTRAS_PARTIAL
+        else:
+            job.extras_status = EXTRAS_ERROR
+        with self._lock:
+            self._thread = None
+        self.tick += 1
+
+
+EXTRAS = ExtrasManager()
 
 
 class DownloadCancelledByUser(Exception):
@@ -1671,6 +1838,14 @@ class DownloadJob(object):
         self.filename = ''
         self.error = ''
         self.debug_error = ''      # техническая причина, без консоли
+        # Состояние дополнительных функций отдельно от статуса видео:
+        # их сбой никогда не переводит само задание в error.
+        self.completed_info = {}
+        self.extras_status = EXTRAS_NONE
+        self.extras_error = ''
+        self.thumbnail_error = ''
+        self.metadata_ready = False
+        self.thumbnail_ready = False
         self.started_at = time.time()
         self.finished_at = None
         self.cancel_requested = False
@@ -2024,10 +2199,11 @@ class DownloadManager(object):
             if job.cancel_requested:
                 job.status = ST_CANCELLED
             else:
-                # Дополнительные функции идут ПОСЛЕ успешной загрузки и
-                # не могут превратить готовый MP4 в ошибку: save_extras
-                # ничего не выбрасывает наружу.
-                save_extras(job, info)
+                # Только чистые Python-данные в память. Ни сети, ни файлов,
+                # ни UI: рабочий поток заканчивается ровно там же, где в
+                # доказанной версии. Метаданные и обложку сделает потом
+                # отдельный ExtrasManager, уже после смерти этого потока.
+                job.completed_info = safe_metadata_snapshot(info)
                 job.status = ST_FINISHED
         except cancel_exc:
             job.status = ST_CANCELLED
@@ -2102,16 +2278,12 @@ def load_project_icon():
     _ICON_CACHE['loaded'] = True
     img = None
     if os.path.isfile(ICON_PATH):
+        # Тоже только как данные: ui.Image.named в файле не используется.
         try:
-            img = ui.Image.named(ICON_PATH)
+            with io.open(ICON_PATH, 'rb') as f:
+                img = ui.Image.from_data(f.read())
         except Exception:
             img = None
-        if img is None:
-            try:
-                with io.open(ICON_PATH, 'rb') as f:
-                    img = ui.Image.from_data(f.read())
-            except Exception:
-                img = None
     _ICON_CACHE['image'] = img
     return img
 
@@ -2501,7 +2673,8 @@ class HomeScreen(Screen):
                 if text == title:
                     STATE.set('quality_filter', key)
                     break
-        self.rebuild()
+        # Перестроение — только на главном потоке.
+        run_on_main(self.rebuild)
 
     # ---------------------------------------------------------------
     def build(self):
@@ -3615,6 +3788,9 @@ class NoxApp(ui.View):
         self.indeterminate_phase = 0.0
         self._logged_errors = set()
         self._recorded_history = set()
+        # Синхронизируемся со стартовым значением: иначе первый же такт
+        # принял бы «изменение» за отработавшие extras и сделал reload_all.
+        self._last_extras_tick = EXTRAS.tick
 
         STATE.ensure_folder()
         _load_yt_dlp()
@@ -3734,7 +3910,7 @@ class NoxApp(ui.View):
     def open_media(self, item):
         if not os.path.exists(item.path):
             nox_error('Файл больше не существует')
-            self.reload_all()
+            run_on_main(self.reload_all)
             return
         STATE.remember_opened(item.path)
         started = time.monotonic()
@@ -3749,10 +3925,14 @@ class NoxApp(ui.View):
                              item.duration)
         except Exception as e:
             log_debug('watch_note: %r' % (e,))
+        run_on_main(self._refresh_home_after_watch)
+
+    def _refresh_home_after_watch(self):
+        """Главный поток: обновить «Продолжить просмотр» после просмотра."""
         try:
             self.home.rebuild()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug('refresh home: %r' % (e,))
 
     @ui.in_background
     def item_menu(self, item):
@@ -3813,7 +3993,9 @@ class NoxApp(ui.View):
             nox_ok('Удалено')
         else:
             nox_error('Файл больше не существует')
-        self.reload_all()
+        # Файлы уже удалены в фоне, а перечитывание папки и перестроение
+        # экранов выполняет главный поток.
+        run_on_main(self.reload_all)
 
     def cancel_job(self, job_id):
         """
@@ -3861,13 +4043,15 @@ class NoxApp(ui.View):
         step = IDLE_REFRESH
         try:
             active = DOWNLOADER.active_jobs()
-            if active:
+            if active or EXTRAS.busy() or EXTRAS.pending():
                 step = UI_REFRESH
+            if active:
                 self.indeterminate_phase += 0.08
                 if self.indeterminate_phase > 1.0:
                     self.indeterminate_phase = 0.0
             self._persist_debug()
             self._record_history()
+            self._drive_extras(active)
             sig = DOWNLOADER.signature()
             if sig != self._last_sig:
                 # Состав очереди изменился. Сканируем диск, ТОЛЬКО если
@@ -3905,6 +4089,31 @@ class NoxApp(ui.View):
             self.reload_all()
         else:
             self.rebuild_screens()
+
+    def _drive_extras(self, active_downloads):
+        """
+        Метаданные и обложка ставятся в очередь только для уже finished
+        задания и стартуют, лишь когда поток загрузки мёртв. Всё это —
+        решения главного потока, сам ExtrasManager к UI не обращается.
+        """
+        if not ENABLE_EXTRAS:
+            return
+        try:
+            for job in DOWNLOADER.all_jobs():
+                if job.status != ST_FINISHED:
+                    continue
+                if job.extras_status != EXTRAS_NONE:
+                    continue
+                EXTRAS.enqueue(job)
+            EXTRAS.pump(bool(active_downloads))
+            if EXTRAS.tick != self._last_extras_tick:
+                self._last_extras_tick = EXTRAS.tick
+                if not EXTRAS.busy() and not EXTRAS.pending():
+                    # Обложка и метаданные готовы — перечитываем папку,
+                    # чтобы карточки подхватили их.
+                    self.reload_all()
+        except Exception as e:
+            log_debug('extras: %r' % (e,))
 
     def _record_history(self):
         """

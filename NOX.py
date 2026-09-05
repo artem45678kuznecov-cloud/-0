@@ -35,6 +35,7 @@ import time
 import shutil
 import threading
 import urllib.request
+import urllib.error
 
 import ui
 import console
@@ -91,6 +92,9 @@ IDLE_REFRESH = 3.0
 WATCH_DONE_TAIL = 20.0
 WATCH_MIN_START = 10.0
 HISTORY_LIMIT = 200
+# Ключ сохранённой очереди в state.json. Именно v2: в старом ключе 'jobs'
+# лежал формат прежней архитектуры, и читать его нельзя.
+JOBS_KEY = 'download_jobs_v2'
 # Сколько карточка держится с отметкой «Готово» перед уходом из очереди.
 DONE_LINGER = 0.8
 
@@ -918,6 +922,31 @@ def run_on_main(func):
         pass
 
 
+_IDLE_STATE = {'off': False}
+
+
+def keep_screen_awake(flag):
+    """
+    Пока идёт многочасовая загрузка, экран iPhone гасить нельзя: вместе с
+    ним система усыпляет и Pythonista, а вместе с ним — наш HTTP-поток.
+
+    Вызывается ТОЛЬКО с главного потока (из общего такта). objc_util
+    импортируется лениво и целиком в try/except: если его нет, NOX
+    работает как раньше, просто экран может погаснуть.
+    """
+    flag = bool(flag)
+    if _IDLE_STATE['off'] == flag:
+        return _IDLE_STATE['off']
+    try:
+        import objc_util
+        app = objc_util.ObjCClass('UIApplication').sharedApplication()
+        app.setIdleTimerDisabled_(flag)
+        _IDLE_STATE['off'] = flag
+    except Exception:
+        pass
+    return _IDLE_STATE['off']
+
+
 def nox_error(text):
     _LAST_ERROR['text'] = str(text)
     _LAST_ERROR['time'] = time.time()
@@ -943,6 +972,7 @@ class State(object):
             'quality_filter': 'all',
             'watch_progress': {},
             'download_history': [],
+            JOBS_KEY: [],
         }
         self.load()
 
@@ -1329,14 +1359,16 @@ class Library(object):
         self.items.sort(key=lambda i: i.mtime, reverse=True)
         self.temps.sort(key=lambda i: i.mtime, reverse=True)
 
-    def orphan_temps(self, active_paths):
+    def orphan_temps(self, managed_paths):
         """
-        Незавершённые файлы, за которыми НЕ стоит живой DownloadJob.
-        После перезапуска NOX такие .part показываются как «Не завершено»,
-        а не как идущая прямо сейчас загрузка.
+        Незавершённые файлы, за которыми НЕ стоит карточка загрузки.
+
+        Сюда не попадают файлы приостановленных и упавших заданий: у них
+        уже есть своя карточка с кнопками, и вторая строка «Не завершено»
+        для того же файла была бы дублем.
         """
         busy = set()
-        for p in active_paths or ():
+        for p in managed_paths or ():
             if not p:
                 continue
             busy.add(os.path.normpath(p))
@@ -1752,10 +1784,24 @@ NETWORK_HINTS = (
     'temporary failure in name resolution', 'name or service not known',
     'network is unreachable', 'no route to host', 'getaddrinfo',
     'unable to download webpage', 'eof occurred', 'remote end closed',
+    # Обрыв посреди многочасовой загрузки — обычное дело: следующая попытка
+    # продолжит файл через Range, а не начнёт его заново.
+    'incomplete read', 'соединение оборвалось',
 )
 
 
+# Коды, которые лечит ОБЫЧНЫЙ повтор, а не новый разбор ссылки: сервер
+# занят или временно лёг. Ссылка при этом жива.
+RETRY_CODES = (408, 425, 429, 500, 502, 503, 504)
+
+
 def is_network_error(exc):
+    try:
+        code = int(getattr(exc, 'code', 0) or 0)
+    except Exception:
+        code = 0
+    if code and (code in RETRY_CODES or code >= 500):
+        return True
     text = ('%r %s' % (exc, exc)).lower()
     return any(hint in text for hint in NETWORK_HINTS)
 
@@ -1764,19 +1810,32 @@ ST_QUEUED = 'queued'
 ST_PREPARING = 'preparing'
 ST_QUEUED_DOWNLOAD = 'queued_download'
 ST_DOWNLOADING = 'downloading'
+ST_NEEDS_RESOLVE = 'needs_resolve'
+ST_PAUSED = 'paused'
+ST_DELETING = 'deleting'
 ST_PROCESSING = 'processing'
 ST_FINISHED = 'finished'
 ST_ERROR = 'error'
 ST_CANCELLED = 'cancelled'
 
+# Приостановленное задание живо, но очередь не занимает.
 ACTIVE_STATES = (ST_QUEUED, ST_PREPARING, ST_QUEUED_DOWNLOAD,
-                 ST_DOWNLOADING, ST_PROCESSING)
+                 ST_DOWNLOADING, ST_NEEDS_RESOLVE, ST_DELETING, ST_PROCESSING)
+# Состояния, в которых задание принадлежит менеджеру и его .part не должен
+# показываться отдельной строкой «Не завершено».
+MANAGED_STATES = ACTIVE_STATES + (ST_PAUSED, ST_ERROR, ST_CANCELLED)
+# Пока хоть одно задание здесь, экран iPhone не должен гаснуть.
+AWAKE_STATES = (ST_QUEUED, ST_PREPARING, ST_QUEUED_DOWNLOAD,
+                ST_DOWNLOADING, ST_NEEDS_RESOLVE)
 
 STATUS_TEXT = {
     ST_QUEUED: 'В очереди',
     ST_PREPARING: 'Получение информации...',
     ST_QUEUED_DOWNLOAD: 'В очереди',
     ST_DOWNLOADING: 'Скачивается',
+    ST_NEEDS_RESOLVE: 'Обновление ссылки...',
+    ST_PAUSED: 'Приостановлено',
+    ST_DELETING: 'Удаление...',
     ST_PROCESSING: 'Обработка файла...',
     ST_FINISHED: '✓ Готово',
     ST_ERROR: 'Ошибка загрузки',
@@ -1788,11 +1847,23 @@ STATUS_SHORT = {
     ST_PREPARING: 'Подготовка',
     ST_QUEUED_DOWNLOAD: 'В очереди',
     ST_DOWNLOADING: 'Скачивается',
+    ST_NEEDS_RESOLVE: 'Ссылка',
+    ST_PAUSED: 'Пауза',
+    ST_DELETING: 'Удаление',
     ST_PROCESSING: 'Обработка',
     ST_FINISHED: '✓ Готово',
     ST_ERROR: 'Ошибка',
     ST_CANCELLED: 'Остановлено',
 }
+
+# Коды, означающие «прямая ссылка протухла»: их лечит свежий resolve.
+EXPIRED_CODES = (401, 403, 404, 410)
+MAX_URL_REFRESH = 3
+
+
+class DirectUrlExpired(Exception):
+    """Прямая ссылка перестала работать. Обычное исключение, не yt-dlp."""
+    pass
 
 # Параметры прямой HTTP-загрузки.
 HTTP_CHUNK = 256 * 1024
@@ -1952,7 +2023,13 @@ class DownloadJob(object):
         self.resolved_headers = {}
         self.resolved_format_id = ''
         self.resolved_ext = 'mp4'
+        # expected_size приходит из yt-dlp и может быть filesize_approx —
+        # ПРИБЛИЗИТЕЛЬНЫМ. Проверять по нему целостность файла нельзя.
         self.expected_size = None
+        # Точный размер, полученный от самого сервера (Content-Length или
+        # хвост Content-Range). Только он годится для проверки перед rename.
+        self.exact_total = None
+        self.video_id = ''
         # Состояние дополнительных функций отдельно от статуса видео:
         # их сбой никогда не переводит само задание в error.
         self.completed_info = {}
@@ -1963,7 +2040,14 @@ class DownloadJob(object):
         self.thumbnail_ready = False
         self.started_at = time.time()
         self.finished_at = None
+        # Три РАЗНЫХ намерения, а не одно: остановить поток, встать на паузу,
+        # удалить загрузку целиком. Пауза не равна отмене и не равна удалению.
         self.cancel_requested = False
+        self.pause_requested = False
+        self.delete_requested = False
+        # Сколько раз уже обновляли протухшую прямую ссылку.
+        self.refresh_resolve_attempts = 0
+        self.restored = False
 
     def set_stage(self, stage):
         self.debug_stage = stage
@@ -1975,12 +2059,17 @@ class DownloadJob(object):
 
     @property
     def total(self):
-        """Точный размер, иначе оценка, иначе None. Ничего не выдумываем."""
-        for v in (self.total_bytes, self.total_bytes_estimate,
-                  self.expected_size):
+        """
+        Точный размер от сервера, иначе то, что сказал yt-dlp, иначе None.
+        Ничего не выдумываем. Значения остаются обычными int Python —
+        у него нет 32-битного переполнения, и файл на 20 ГБ считается так же
+        точно, как на 20 МБ.
+        """
+        for v in (self.exact_total, self.total_bytes,
+                  self.total_bytes_estimate, self.expected_size):
             try:
                 if v and float(v) > 0:
-                    return float(v)
+                    return int(v) if float(v).is_integer() else float(v)
             except Exception:
                 continue
         return None
@@ -2001,6 +2090,33 @@ class DownloadJob(object):
         return self.status == ST_QUEUED and not self.resolved_url
 
     @property
+    def needs_refresh(self):
+        """Прямая ссылка протухла: нужен свежий resolve на главном потоке."""
+        return self.status == ST_NEEDS_RESOLVE
+
+    @property
+    def is_managed(self):
+        """Заданием владеет менеджер: его .part — не «ничей» файл."""
+        return self.status in MANAGED_STATES
+
+    @property
+    def can_pause(self):
+        return self.status in (ST_QUEUED, ST_PREPARING, ST_QUEUED_DOWNLOAD,
+                               ST_DOWNLOADING, ST_NEEDS_RESOLVE)
+
+    @property
+    def can_resume(self):
+        return self.status in (ST_PAUSED, ST_ERROR, ST_CANCELLED)
+
+    def action_icon(self):
+        """Какая кнопка нужна карточке: пауза, продолжение или никакой."""
+        if self.can_pause:
+            return 'pause'
+        if self.can_resume:
+            return 'play'
+        return ''
+
+    @property
     def display_title(self):
         if self.title:
             return self.title
@@ -2016,6 +2132,15 @@ class DownloadJob(object):
                 return 'Скачивается  •  %s / %s' % (
                     fmt_size(self.downloaded_bytes), fmt_size(total))
             return 'Скачивается  •  %s' % fmt_size(self.downloaded_bytes)
+        if self.status == ST_PAUSED:
+            # Пауза показывает уже скачанное: это реальный размер .part.
+            total = self.total
+            if total:
+                return 'Приостановлено  •  %s / %s' % (
+                    fmt_size(self.downloaded_bytes), fmt_size(total))
+            if self.downloaded_bytes:
+                return 'Приостановлено  •  %s' % fmt_size(self.downloaded_bytes)
+            return STATUS_TEXT[ST_PAUSED]
         if self.status == ST_ERROR:
             return 'Ошибка: ' + (self.error or 'не удалось скачать')
         return STATUS_TEXT.get(self.status, '')
@@ -2095,8 +2220,15 @@ class DownloadManager(object):
         self.jobs = []
         self.revision = 0        # меняется при структурных изменениях
         self.tick = 0            # меняется на каждом обновлении прогресса
+        # Счётчик «состав очереди надо сохранить на диск». Растёт и из
+        # рабочего потока, но сам файл пишет только главный: так state.json
+        # никогда не пишется двумя потоками сразу.
+        self.dirty = 0
         self._lock = threading.RLock()
         self._thread = None
+
+    def mark_dirty(self):
+        self.dirty += 1
 
     # -- чтение состояния ------------------------------------------
     def all_jobs(self):
@@ -2108,14 +2240,14 @@ class DownloadManager(object):
 
     def visible_jobs(self):
         """
-        Активные, ошибочные и остановленные плюс те, что только что
-        завершились: карточка ~0.8 c показывает «Готово» и уходит.
+        Активные, приостановленные, ошибочные и остановленные плюс те, что
+        только что завершились: карточка ~0.8 c показывает «Готово» и уходит.
         Рабочий поток этим не задерживается — это чисто состояние UI.
         """
         now = time.time()
         out = []
         for j in self.all_jobs():
-            if j.is_active or j.status in (ST_ERROR, ST_CANCELLED):
+            if j.is_active or j.status in (ST_PAUSED, ST_ERROR, ST_CANCELLED):
                 out.append(j)
             elif j.status == ST_FINISHED and \
                     now - float(j.finished_at or 0) < DONE_LINGER:
@@ -2124,6 +2256,15 @@ class DownloadManager(object):
 
     def active_paths(self):
         return [j.filename for j in self.active_jobs() if j.filename]
+
+    def managed_paths(self):
+        """
+        Файлы, за которыми стоит живая карточка: не только качающиеся сейчас,
+        но и поставленные на паузу, упавшие и остановленные. Их .part не
+        должен вторым экземпляром показываться строкой «Не завершено».
+        """
+        return [j.filename for j in self.all_jobs()
+                if j.filename and j.is_managed]
 
     def find(self, job_id):
         for j in self.all_jobs():
@@ -2140,7 +2281,13 @@ class DownloadManager(object):
             return False
 
     def pending_resolve(self):
-        return [j for j in self.all_jobs() if j.needs_resolve]
+        """Новые ссылки и те, чей прямой адрес протух, — вперемешку."""
+        return [j for j in self.all_jobs()
+                if j.needs_resolve or j.needs_refresh]
+
+    def awake_needed(self):
+        """Идёт ли сейчас работа, ради которой экран не должен гаснуть."""
+        return any(j.status in AWAKE_STATES for j in self.all_jobs())
 
     def signature(self):
         """
@@ -2170,33 +2317,129 @@ class DownloadManager(object):
             job = DownloadJob(url, quality)
             self.jobs.append(job)
             self.revision += 1
+        self.mark_dirty()
         # Поток здесь НЕ запускается: сначала разбор ссылки на главном потоке.
         return True, 'Добавлено в очередь'
 
-    def cancel(self, job_id):
-        """Настоящая отмена: рабочий цикл прервётся на ближайшем блоке."""
+    # -- пауза, продолжение, удаление ------------------------------
+    def pause(self, job_id):
+        """
+        Пауза — это НЕ отмена и НЕ удаление. Файл .part остаётся целиком,
+        задание живо, очередь освобождается для следующего.
+        """
         job = self.find(job_id)
-        if job is None:
+        if job is None or not job.can_pause:
             return False
-        if job.is_active:
-            job.cancel_requested = True
-            if job.status in (ST_QUEUED, ST_PREPARING, ST_QUEUED_DOWNLOAD):
-                job.status = ST_CANCELLED
-                job.finished_at = time.time()
+        job.pause_requested = True
+        if job.status == ST_DOWNLOADING and self.worker_alive():
+            # Останавливает рабочий поток сам цикл чтения: он закроет
+            # соединение и файл штатно, .part не тронет.
+            pass
+        else:
+            # Ни соединения, ни файла ещё нет — переводим сразу.
+            job.status = ST_PAUSED
+            job.speed = None
+            job.eta = None
         with self._lock:
             self.revision += 1
-        self._pump()
+        self.tick += 1
+        self.mark_dirty()
         return True
 
-    def remove(self, job_id):
+    def resume(self, job_id):
+        """
+        Продолжение всегда идёт через СВЕЖИЙ resolve: прямая ссылка живёт
+        считанные часы, а .part может пролежать сутки. Уже скачанные байты
+        не теряются — их докачает Range.
+        """
+        job = self.find(job_id)
+        if job is None or not job.can_resume:
+            return False
+        job.pause_requested = False
+        job.cancel_requested = False
+        job.delete_requested = False
+        job.error = ''
+        job.debug_error = ''
+        job.error_stage = ''
+        job.speed = None
+        job.eta = None
+        job.finished_at = None
+        job.refresh_resolve_attempts = 0
+        # Ссылку получаем заново; имя файла и .part сохраняем как есть.
+        job.resolved_url = ''
+        job.exact_total = None
+        job.total_bytes = None
+        job.downloaded_bytes = self.part_size(job)
+        job.status = ST_QUEUED
+        job.set_stage('resume-queued')
+        with self._lock:
+            self.revision += 1
+        self.tick += 1
+        self.mark_dirty()
+        return True
+
+    @staticmethod
+    def part_size(job):
+        """Сколько реально лежит на диске. Единственный источник правды."""
+        part = job.part_path
+        if not part:
+            return 0
+        try:
+            return int(os.path.getsize(part))
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _remove_part(job):
+        """Удаление недокачанного файла. Только файлы, ничего из UI."""
+        part = job.part_path
+        if not part:
+            return False
+        try:
+            if os.path.exists(part):
+                os.remove(part)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _drop_job(self, job_id):
+        with self._lock:
+            before = len(self.jobs)
+            self.jobs = [j for j in self.jobs if j.id != job_id]
+            if len(self.jobs) != before:
+                self.revision += 1
+        self.mark_dirty()
+
+    def delete(self, job_id):
+        """
+        Крестик = удалить загрузку ПОЛНОСТЬЮ: остановить передачу, дождаться,
+        пока рабочий поток закроет соединение и файл, удалить .part, снять
+        задание и его сохранённое состояние.
+
+        Если поток прямо сейчас пишет в файл, удаляем не отсюда: задание
+        уходит в ST_DELETING, а .part убирает сам поток, когда закроет
+        дескриптор. Иначе на iOS можно получить недописанный «висячий» файл.
+        """
         job = self.find(job_id)
         if job is None:
             return False
-        if job.is_active:
-            job.cancel_requested = True
-        with self._lock:
-            self.jobs = [j for j in self.jobs if j.id != job_id]
-            self.revision += 1
+        job.delete_requested = True
+        job.cancel_requested = True
+        job.pause_requested = False
+        if job.status == ST_DOWNLOADING and self.worker_alive():
+            job.status = ST_DELETING
+            job.speed = None
+            job.eta = None
+            with self._lock:
+                self.revision += 1
+            self.tick += 1
+            return True
+        # Ни один поток этот файл не держит — удаляем прямо сейчас.
+        self._remove_part(job)
+        self._drop_job(job_id)
+        self.tick += 1
+        self._pump()
         return True
 
     def clear_finished(self):
@@ -2209,6 +2452,102 @@ class DownloadManager(object):
                          or now - float(j.finished_at or 0) < DONE_LINGER]
             if len(self.jobs) != before:
                 self.revision += 1
+
+    # -- сохранение очереди между запусками ------------------------
+    def snapshot(self):
+        """
+        Что имеет смысл пережить перезапуск. Прямая ссылка НЕ сохраняется:
+        она протухает, и после запуска её всё равно берут заново.
+        """
+        out = []
+        for j in self.all_jobs():
+            if j.status in (ST_FINISHED, ST_DELETING):
+                continue
+            if not j.filename:
+                continue        # ссылку ещё не разобрали — восстанавливать нечего
+            out.append({
+                'id': j.id,
+                'url': j.url,
+                'quality': j.quality,
+                'title': j.title,
+                'filename': j.filename,
+                'video_id': j.video_id,
+                'format_id': j.resolved_format_id,
+                'ext': j.resolved_ext,
+                'expected_size': j.expected_size,
+                'started_at': j.started_at,
+            })
+        return out
+
+    def persist(self, state):
+        """Пишет ТОЛЬКО главный поток и только по структурным событиям."""
+        try:
+            state.set(JOBS_KEY, self.snapshot())
+            return True
+        except Exception:
+            return False
+
+    def restore(self, state):
+        """
+        Восстановление после запуска NOX.
+
+        Правила простые и честные: источник правды — файл .part на диске.
+        Есть .part — задание оживает как приостановленное. Нет — записи
+        не остаётся. Ничего не стартует само: продолжение всегда нажимает
+        человек, и оно всегда идёт через свежий resolve.
+        """
+        try:
+            raw = state.get(JOBS_KEY)
+        except Exception:
+            raw = None
+        if not isinstance(raw, list):
+            return 0
+        known = set(self.managed_paths())
+        restored = 0
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get('url')
+            filename = entry.get('filename')
+            if not url or not filename:
+                continue
+            if filename in known:
+                continue        # у этого файла уже есть живая карточка
+            known.add(filename)
+            part = str(filename) + '.part'
+            try:
+                size = int(os.path.getsize(part))
+            except Exception:
+                continue        # файла нет — восстанавливать нечего
+            if size <= 0:
+                continue
+            quality = entry.get('quality')
+            if quality not in [q[0] for q in QUALITIES]:
+                quality = STATE.get('quality', '720')
+            job = DownloadJob(str(url), quality)
+            job.restored = True
+            job.filename = str(filename)
+            job.title = str(entry.get('title') or '')
+            job.video_id = str(entry.get('video_id') or '')
+            job.resolved_format_id = str(entry.get('format_id') or '')
+            job.resolved_ext = str(entry.get('ext') or 'mp4')
+            size_hint = entry.get('expected_size')
+            if isinstance(size_hint, (int, float)) and size_hint > 0:
+                job.expected_size = size_hint
+            try:
+                job.started_at = float(entry.get('started_at') or time.time())
+            except Exception:
+                job.started_at = time.time()
+            job.downloaded_bytes = size
+            job.status = ST_PAUSED
+            job.set_stage('restored-paused')
+            with self._lock:
+                self.jobs.append(job)
+                self.revision += 1
+            restored += 1
+        if restored:
+            self.mark_dirty()
+        return restored
 
     # -- РАЗБОР ССЫЛКИ: только главный поток ------------------------
     def resolve_opts(self):
@@ -2230,10 +2569,25 @@ class DownloadManager(object):
         download=False. Может подморозить интерфейс на несколько секунд —
         это осознанный размен на надёжность.
         """
-        if not job.needs_resolve:
+        refreshing = job.needs_refresh
+        if not (job.needs_resolve or refreshing):
             return False
+        if refreshing:
+            job.refresh_resolve_attempts += 1
+            if job.refresh_resolve_attempts > MAX_URL_REFRESH:
+                job.status = ST_ERROR
+                job.error = 'Не удалось обновить ссылку'
+                job.error_stage = 'refresh-give-up'
+                job.debug_error = ('refresh: %d попыток подряд не дали рабочую '
+                                   'ссылку' % (job.refresh_resolve_attempts - 1))
+                job.finished_at = time.time()
+                with self._lock:
+                    self.revision += 1
+                self.tick += 1
+                self.mark_dirty()
+                return False
         job.status = ST_PREPARING
-        job.set_stage('resolve-enter')
+        job.set_stage('refresh-enter' if refreshing else 'resolve-enter')
         self.tick += 1
         try:
             mod = _load_yt_dlp()
@@ -2269,11 +2623,18 @@ class DownloadManager(object):
             if job.expected_size:
                 snap['filesize'] = job.expected_size
             job.completed_info = snap
-            job.filename = target_path_for(job.title or entry.get('id') or 'video',
-                                           entry.get('id'), job.resolved_ext)
+            job.video_id = str(entry.get('id') or '')
+            # Имя файла выбирается ОДИН раз. При обновлении протухшей ссылки
+            # и при продолжении после паузы оно обязано совпасть с уже
+            # лежащим .part, иначе докачивать будет нечего.
+            if not job.filename:
+                job.filename = target_path_for(
+                    job.title or entry.get('id') or 'video',
+                    entry.get('id'), job.resolved_ext)
             job.set_stage('format-selected')
             job.status = ST_QUEUED_DOWNLOAD
             job.set_stage('http-queued')
+            self.mark_dirty()
         except Exception as e:
             job.error_stage = job.debug_stage
             job.set_stage('exception')
@@ -2284,6 +2645,7 @@ class DownloadManager(object):
             with self._lock:
                 self.revision += 1
             self.tick += 1
+            self.mark_dirty()
             return False
         with self._lock:
             self.revision += 1
@@ -2303,7 +2665,10 @@ class DownloadManager(object):
                 return
             nxt = None
             for j in self.jobs:
-                if j.status == ST_QUEUED_DOWNLOAD and not j.cancel_requested:
+                # Приостановленное задание очередь не занимает: у него статус
+                # ST_PAUSED, и следующее за ним стартует как обычно.
+                if j.status == ST_QUEUED_DOWNLOAD and not j.cancel_requested \
+                        and not j.pause_requested and not j.delete_requested:
                     nxt = j
                     break
             if nxt is None:
@@ -2348,24 +2713,36 @@ class DownloadManager(object):
         part = job.part_path
         state = {'bytes': 0, 'time': time.monotonic()}
         last_error = None
+        expired = False
         try:
             for attempt in range(1, HTTP_RETRIES + 1):
-                if job.cancel_requested:
+                if job.cancel_requested or job.pause_requested:
                     break
                 if attempt > 1:
                     job.set_stage('http-retry')
                     self.tick += 1
                     slept = 0.0
-                    while slept < HTTP_RETRY_PAUSE and not job.cancel_requested:
+                    while slept < HTTP_RETRY_PAUSE and not job.cancel_requested \
+                            and not job.pause_requested:
                         time.sleep(0.2)
                         slept += 0.2
-                    if job.cancel_requested:
+                    if job.cancel_requested or job.pause_requested:
                         break
                 try:
                     done = self._transfer(job, part, state)
+                except DirectUrlExpired as e:
+                    # Ссылка протухла. Лечит это только новый resolve, а он
+                    # живёт на главном потоке: yt-dlp здесь по-прежнему
+                    # не импортируется и не вызывается.
+                    expired = True
+                    last_error = None
+                    detail = 'expired: %r' % (e,)
+                    job.debug_error = ((job.debug_error + ' | ' + detail)
+                                       if job.debug_error else detail)
+                    break
                 except Exception as e:
                     last_error = e
-                    if job.cancel_requested:
+                    if job.cancel_requested or job.pause_requested:
                         break
                     if not is_network_error(e) and attempt >= 2:
                         raise
@@ -2373,17 +2750,32 @@ class DownloadManager(object):
                 if done:
                     last_error = None
                     break
-            if job.cancel_requested:
-                job.status = ST_CANCELLED           # .part остаётся
+            if job.delete_requested:
+                job.set_stage('deleting')            # .part уберём в finally
+            elif expired:
+                job.resolved_url = ''
+                job.status = ST_NEEDS_RESOLVE
+                job.set_stage('needs-resolve')
+            elif job.pause_requested:
+                job.status = ST_PAUSED               # .part остаётся целиком
+                job.set_stage('paused')
+            elif job.cancel_requested:
+                job.status = ST_CANCELLED            # .part остаётся
             elif last_error is not None:
                 raise last_error
             else:
+                # Переименование — только после сверки с точным размером.
+                self._verify_size(job, part)
                 os.replace(part, final)
                 job.set_stage('http-finished')
                 job.status = ST_FINISHED
                 job.set_stage('finished')
         except Exception as e:
-            if job.cancel_requested:
+            if job.delete_requested:
+                job.set_stage('deleting')
+            elif job.pause_requested:
+                job.status = ST_PAUSED
+            elif job.cancel_requested:
                 job.status = ST_CANCELLED
             else:
                 job.error_stage = job.debug_stage
@@ -2394,18 +2786,43 @@ class DownloadManager(object):
                 job.debug_error = ((job.debug_error + ' | ' + detail)
                                    if job.debug_error else detail)
         finally:
-            job.finished_at = time.time()
+            if job.delete_requested:
+                # Соединение закрыто, файл закрыт — только теперь удаление
+                # недокачанного файла безопасно.
+                self._remove_part(job)
+                self._drop_job(job.id)
+            if job.status in (ST_FINISHED, ST_ERROR, ST_CANCELLED):
+                job.finished_at = time.time()
             job.speed = None
             job.eta = None
             with self._lock:
                 self.revision += 1
                 self._thread = None
             self.tick += 1
+            self.mark_dirty()
             try:
                 self._pump()
             except Exception as e:
                 job.debug_error = (job.debug_error + ' | ') if job.debug_error else ''
                 job.debug_error += 'pump: %r' % (e,)
+
+    @staticmethod
+    def _verify_size(job, part):
+        """
+        Последняя проверка перед rename: столько ли байт на диске, сколько
+        обещал СЕРВЕР. Участвует только exact_total — Content-Length или
+        хвост Content-Range. filesize_approx из yt-dlp сюда не попадает:
+        по приблизительному числу целостность не проверяют.
+        """
+        total = job.exact_total
+        if not total:
+            return
+        try:
+            got = int(os.path.getsize(part))
+        except Exception:
+            raise IOError('файл загрузки исчез до переименования')
+        if got != int(total):
+            raise IOError('размер не сошёлся: %d из %d байт' % (got, int(total)))
 
     def _transfer(self, job, part, state):
         """
@@ -2414,18 +2831,23 @@ class DownloadManager(object):
         начинается заново, чтобы не получить битый MP4.
         """
         job.set_stage('http-opening')
-        offset = 0
-        try:
-            if os.path.exists(part):
-                offset = os.path.getsize(part)
-        except Exception:
-            offset = 0
+        offset = self.part_size(job)
         headers = dict(job.resolved_headers or {})
         headers.setdefault('User-Agent', 'NOX/1.0')
         if offset > 0:
             headers['Range'] = 'bytes=%d-' % offset
         req = urllib.request.Request(job.resolved_url, headers=headers)
-        resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
+        try:
+            resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
+        except urllib.error.HTTPError as e:
+            code = _int_or_none(getattr(e, 'code', None)) or 0
+            if code == 416:
+                return self._handle_416(job, offset, e)
+            if code in EXPIRED_CODES:
+                # 429, таймауты и 5xx сюда НЕ попадают: это обычные сбои,
+                # их лечит обычный повтор, а не новый разбор ссылки.
+                raise DirectUrlExpired('HTTP %d' % code)
+            raise
         try:
             code = resp.getcode()
             mode = 'wb'
@@ -2444,7 +2866,10 @@ class DownloadManager(object):
                 total = _int_or_none(resp.headers.get('Content-Length'))
             job.downloaded_bytes = offset
             if total:
-                job.total_bytes = total
+                # Размер пришёл от сервера — он точный, в отличие от
+                # filesize_approx, и именно по нему проверяем файл в конце.
+                job.total_bytes = int(total)
+                job.exact_total = int(total)
             state['bytes'] = 0
             state['time'] = time.monotonic()
             job.status = ST_DOWNLOADING
@@ -2452,7 +2877,9 @@ class DownloadManager(object):
             self.tick += 1
             with io.open(part, mode) as f:
                 while True:
-                    if job.cancel_requested:
+                    if job.cancel_requested or job.pause_requested:
+                        # Выход из with закрывает файл штатно: на диске
+                        # остаётся ровно то, что успели дописать.
                         return False
                     chunk = resp.read(HTTP_CHUNK)
                     if not chunk:
@@ -2464,13 +2891,40 @@ class DownloadManager(object):
                 resp.close()
             except Exception:
                 pass
-        if job.cancel_requested:
+        if job.cancel_requested or job.pause_requested:
             return False
-        total = job.total_bytes
+        total = job.exact_total or job.total_bytes
         if total and job.downloaded_bytes < total:
             raise IOError('соединение оборвалось: %d из %d байт'
-                          % (job.downloaded_bytes, total))
+                          % (job.downloaded_bytes, int(total)))
         return True
+
+    def _handle_416(self, job, offset, err):
+        """
+        416 Range Not Satisfiable. В заголовке приходит 'bytes */TOTAL'.
+
+        Если на диске уже лежит ровно TOTAL байт — файл дошёл до конца, и
+        серверу просто нечего отдать: это успех. Если .part больше или
+        меньше, он источнику не соответствует, и его надо качать заново.
+        """
+        try:
+            total = _total_from_content_range(err.headers.get('Content-Range'))
+        except Exception:
+            total = None
+        if total and offset == int(total):
+            job.exact_total = int(total)
+            job.total_bytes = int(total)
+            job.downloaded_bytes = offset
+            job.set_stage('http-416-complete')
+            self.tick += 1
+            return True
+        self._remove_part(job)
+        job.downloaded_bytes = 0
+        job.exact_total = None
+        job.total_bytes = None
+        job.set_stage('http-416-restart')
+        self.tick += 1
+        raise IOError('сервер отклонил докачку (416), файл будет скачан заново')
 
 
 def _int_or_none(value):
@@ -2758,29 +3212,62 @@ class Screen(ui.View):
             deactivate_tree(v)
             self.sv.remove_subview(v)
 
-    # -- крестик: настоящая остановка загрузки ------------------------
-    def _dismiss_button(self, job, x, y, w=26.0, h=28.0):
+    # -- две отдельные кнопки карточки: пауза и удаление ---------------
+    @staticmethod
+    def _icon_button(icon_name, color, action, x, y, w=26.0, h=28.0):
         """
-        Хит-таргет — настоящий прозрачный ui.Button, как у кнопки «Скачать».
-        yt-dlp работает внутри NOX, поэтому крестик реально прерывает
-        рабочий поток, а не просто прячет строку.
+        Хит-таргет — настоящий прозрачный ui.Button, как у кнопки «Скачать»:
+        собственный touch_ended у Tappable на устройстве до обработчика
+        не доходил. Возвращает (holder, icon), чтобы значок можно было
+        поменять на месте, не пересобирая карточку.
         """
         holder = ui.View(frame=(x, y, w, h))
         holder.background_color = 'clear'
-        holder.add_subview(Icon('close', TXT_3, 1.5,
-                                frame=(w / 2 - 7, h / 2 - 7, 14, 14)))
+        icon = Icon(icon_name or 'pause', color, 1.5,
+                    frame=(w / 2 - 7, h / 2 - 7, 14, 14))
+        holder.add_subview(icon)
         hit = ui.Button(frame=holder.bounds)
         hit.flex = 'WH'
         hit.background_color = 'clear'
-        hit.action = self._make_dismiss(job)
+        hit.action = action
         holder.add_subview(hit)
+        return holder, icon
+
+    def _toggle_button(self, job, x, y, w=26.0, h=28.0):
+        """⏸ или ▶ — пауза и продолжение, отдельная кнопка от крестика."""
+        name = job.action_icon()
+        holder, icon = self._icon_button(name, TXT_2, self._make_toggle(job),
+                                         x, y, w, h)
+        holder.hidden = not name
+        return holder, icon
+
+    def _dismiss_button(self, job, x, y, w=26.0, h=28.0):
+        """× — удалить загрузку полностью вместе с недокачанным файлом."""
+        holder, _ = self._icon_button('close', TXT_3, self._make_dismiss(job),
+                                      x, y, w, h)
         return holder
+
+    def _temp_button(self, temp, x, y, w=26.0, h=28.0):
+        """× у недокачанного файла без карточки: удаляет сам файл."""
+        path = getattr(temp, 'path', '')
+
+        def _act(sender):
+            self.app.delete_temp(path)
+        holder, _ = self._icon_button('close', TXT_3, _act, x, y, w, h)
+        return holder
+
+    def _make_toggle(self, job):
+        job_id = getattr(job, 'id', None)
+
+        def _act(sender):
+            self.app.toggle_job(job_id)
+        return _act
 
     def _make_dismiss(self, job):
         job_id = getattr(job, 'id', None)
 
         def _act(sender):
-            self.app.cancel_job(job_id)
+            self.app.delete_job(job_id)
         return _act
 
     def rebuild(self):
@@ -2851,6 +3338,16 @@ class Screen(ui.View):
             text = job.short_status()
             if status.text != text:
                 status.text = text
+        # Кнопка ⏸/▶ меняет только значок: карточка не пересобирается.
+        toggle, toggle_icon = row.get('toggle'), row.get('toggle_icon')
+        if toggle is not None and toggle_icon is not None:
+            name = job.action_icon()
+            if not name:
+                toggle.hidden = True
+            else:
+                toggle.hidden = False
+                if toggle_icon.icon_name != name:
+                    toggle_icon.set_icon(name)
         bar = row.get('bar')
         if bar is not None:
             value = job.percent
@@ -3209,7 +3706,7 @@ class HomeScreen(Screen):
     # ---------------------------------------------------------------
     def _build_downloads(self, w, y):
         jobs = DOWNLOADER.visible_jobs()
-        temps = LIB.orphan_temps(DOWNLOADER.active_paths())
+        temps = LIB.orphan_temps(DOWNLOADER.managed_paths())
         head, hh = section_header(w, y, 'Загрузки',
                                   'Все' if (temps or jobs) else None,
                                   lambda s: self.app.select_tab(1))
@@ -3270,6 +3767,12 @@ class HomeScreen(Screen):
             elif job.status == ST_FINISHED:
                 st_icon, st_col = 'check', ACCENT_2
                 bar_value = 1.0
+            elif job.status == ST_PAUSED:
+                st_icon, st_col = 'pause', TXT_2
+            elif job.status == ST_DELETING:
+                st_icon, st_col = 'trash', TXT_2
+            elif job.status == ST_NEEDS_RESOLVE:
+                st_icon, st_col = 'refresh', ACCENT_2
             elif job.status == ST_CANCELLED:
                 st_icon = 'clock'
                 st_col = TXT_2
@@ -3301,9 +3804,15 @@ class HomeScreen(Screen):
         v.add_subview(st)
 
         if job is not None:
-            v.add_subview(self._dismiss_button(job, w - 30, h / 2 - 14))
+            # Две отдельные кнопки: пауза/продолжение сверху, удаление снизу.
+            toggle, toggle_icon = self._toggle_button(job, w - 30, 8, 26, 28)
+            v.add_subview(toggle)
+            v.add_subview(self._dismiss_button(job, w - 30, 38, 26, 28))
             self._job_views[job.id] = {'sub': sl, 'bar': bar, 'status': st,
-                                       'title': tl}
+                                       'title': tl, 'toggle': toggle,
+                                       'toggle_icon': toggle_icon}
+        else:
+            v.add_subview(self._temp_button(temp, w - 30, h / 2 - 14))
 
         ui_line = ui.View(frame=(70, h - 1, w - 82, 1))
         ui_line.background_color = rgba(BORDER, 0.7)
@@ -3529,7 +4038,8 @@ class DownloadsScreen(Screen):
         self.sv.add_subview(btn)
         y += h + 10
         if ytdlp_ready():
-            note, note_col = 'Для больших загрузок не закрывайте NOX.', TXT_4
+            note = 'Для больших загрузок не закрывайте и не сворачивайте NOX.'
+            note_col = TXT_4
         else:
             note = (YTDLP_ERROR or 'Модуль yt-dlp не найден') + \
                    '  •  положите папку yt_dlp рядом с NOX.py'
@@ -3585,7 +4095,7 @@ class DownloadsScreen(Screen):
     # ---------------------------------------------------------------
     def _build_queue(self, w, y):
         jobs = DOWNLOADER.visible_jobs()
-        temps = LIB.orphan_temps(DOWNLOADER.active_paths())
+        temps = LIB.orphan_temps(DOWNLOADER.managed_paths())
         count = len(temps) + len(jobs)
         self.sv.add_subview(make_label('Очередь загрузок', (F_BOLD, 19), TXT,
                                        frame=(PAD, y, w - 140, 26)))
@@ -3644,6 +4154,12 @@ class DownloadsScreen(Screen):
             elif job.status == ST_FINISHED:
                 st_icon, st_col, sub_col = 'check', ACCENT_2, ACCENT_2
                 bar_value = 1.0
+            elif job.status == ST_PAUSED:
+                st_icon, st_col, sub_col = 'pause', TXT_2, TXT_3
+            elif job.status == ST_DELETING:
+                st_icon, st_col, sub_col = 'trash', TXT_2, TXT_3
+            elif job.status == ST_NEEDS_RESOLVE:
+                st_icon, st_col, sub_col = 'refresh', ACCENT_2, TXT_3
             elif job.status == ST_CANCELLED:
                 st_icon, st_col, sub_col = 'clock', TXT_2, TXT_3
             elif job.status == ST_DOWNLOADING and bar_value is not None:
@@ -3679,9 +4195,16 @@ class DownloadsScreen(Screen):
         c.add_subview(st)
 
         if job is not None:
-            c.add_subview(self._dismiss_button(job, cw - 34, 22, 26, 26))
+            # Пауза и удаление — разные кнопки. Высота карточки прежняя.
+            toggle, toggle_icon = self._toggle_button(job, cw - 34, 10, 26, 26)
+            c.add_subview(toggle)
+            c.add_subview(self._dismiss_button(job, cw - 34, 46, 26, 26))
             self._job_views[job.id] = {'sub': sl, 'detail': dl, 'bar': bar,
-                                       'status': st, 'title': tl}
+                                       'status': st, 'title': tl,
+                                       'toggle': toggle,
+                                       'toggle_icon': toggle_icon}
+        else:
+            c.add_subview(self._temp_button(temp, cw - 34, 30, 26, 26))
         return c
 
     # ---------------------------------------------------------------
@@ -4058,12 +4581,19 @@ class NoxApp(ui.View):
         self._logged_errors = set()
         self._recorded_history = set()
         self._resolving = False
+        self._last_dirty = -1
         # Синхронизируемся со стартовым значением: иначе первый же такт
         # принял бы «изменение» за отработавшие extras и сделал reload_all.
         self._last_extras_tick = EXTRAS.tick
 
         STATE.ensure_folder()
         _load_yt_dlp()
+        # Незавершённые загрузки прошлого запуска возвращаются как
+        # приостановленные. Сами по себе они не стартуют никогда.
+        try:
+            DOWNLOADER.restore(STATE)
+        except Exception as e:
+            log_debug('restore: %r' % (e,))
 
         self.body = ui.View(frame=self.bounds)
         self.body.background_color = 'clear'
@@ -4267,28 +4797,72 @@ class NoxApp(ui.View):
         # экранов выполняет главный поток.
         run_on_main(self.reload_all)
 
-    def cancel_job(self, job_id):
+    def toggle_job(self, job_id):
         """
-        Настоящая остановка: менеджер выставляет cancel_requested, ближайший
-        progress_hook поднимает исключение отмены и рабочий поток завершается.
-        Файл .part не удаляется — повторная загрузка продолжит его.
+        ⏸ — приостановить, ▶ — продолжить или повторить.
+
+        Пауза оставляет .part нетронутым и освобождает очередь. Продолжение
+        всегда идёт через СВЕЖИЙ разбор ссылки: прямой адрес живёт часы,
+        а пауза может длиться сутки.
         """
         try:
             job = DOWNLOADER.find(job_id)
             if job is None:
-                DOWNLOADER.remove(job_id)
-            elif job.is_active:
-                DOWNLOADER.cancel(job_id)
-                nox_ok('Останавливаю загрузку')
-            else:
-                DOWNLOADER.remove(job_id)
-                nox_ok('Убрано из очереди')
+                return
+            if job.can_pause:
+                if DOWNLOADER.pause(job_id):
+                    nox_ok('Пауза')
+            elif job.can_resume:
+                if DOWNLOADER.resume(job_id):
+                    nox_ok('Продолжаю' if job.downloaded_bytes else 'Повторяю')
         except Exception as e:
             nox_error(str(e))
             return
-        # Экран нельзя разбирать прямо в обработчике касания его же кнопки:
-        # перестраиваем отложенно, когда touch-событие уже отработало.
-        # Одноразовый delay, не цепочка.
+        self._after_job_button()
+
+    def delete_job(self, job_id):
+        """
+        Крестик = удалить загрузку полностью: остановить передачу, удалить
+        недокачанный файл, убрать задание и его сохранённое состояние.
+        Если поток прямо сейчас пишет в файл, .part удалит он сам, когда
+        закроет дескриптор, — карточка до этого показывает «Удаление...».
+        """
+        try:
+            job = DOWNLOADER.find(job_id)
+            if job is None:
+                return
+            if DOWNLOADER.delete(job_id):
+                nox_ok('Удаляю загрузку' if job.status == ST_DELETING
+                       else 'Загрузка удалена')
+        except Exception as e:
+            nox_error(str(e))
+            return
+        self._after_job_button()
+
+    def delete_temp(self, path):
+        """Крестик у недокачанного файла, за которым нет карточки."""
+        if not path:
+            return
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                nox_ok('Удалено')
+            else:
+                nox_error('Файл больше не существует')
+        except Exception as e:
+            nox_error(str(e))
+            return
+        try:
+            ui.delay(self.reload_all, 0.05)
+        except Exception:
+            self.reload_all()
+
+    def _after_job_button(self):
+        """
+        Экран нельзя разбирать прямо в обработчике касания его же кнопки:
+        перестраиваем отложенно, когда touch-событие уже отработало.
+        Одноразовый delay, не цепочка.
+        """
         try:
             ui.delay(self.after_downloads_changed, 0.05)
         except Exception:
@@ -4319,7 +4893,11 @@ class NoxApp(ui.View):
                 self.indeterminate_phase += 0.08
                 if self.indeterminate_phase > 1.0:
                     self.indeterminate_phase = 0.0
+            # Экран не гасим, только пока что-то реально качается или
+            # разбирается. Пауза, ошибка и пустая очередь его не держат.
+            keep_screen_awake(DOWNLOADER.awake_needed())
             self._resolve_pending()
+            self._persist_jobs()
             self._persist_debug()
             self._record_history()
             self._drive_extras(active)
@@ -4443,6 +5021,22 @@ class NoxApp(ui.View):
             except Exception as e:
                 log_debug('history: %r' % (e,))
 
+    def _persist_jobs(self):
+        """
+        Состав очереди на диск пишет ТОЛЬКО главный поток и только по
+        структурным событиям: добавили, разобрали, поставили на паузу,
+        удалили, завершили. На каждый процент прогресса state.json не
+        трогается — источником правды для «сколько уже скачано» служит
+        размер самого файла .part.
+        """
+        if DOWNLOADER.dirty == self._last_dirty:
+            return
+        self._last_dirty = DOWNLOADER.dirty
+        try:
+            DOWNLOADER.persist(STATE)
+        except Exception as e:
+            log_debug('persist: %r' % (e,))
+
     def _persist_debug(self):
         """
         Техническую причину сбоя пишет ГЛАВНЫЙ поток, и только после ошибки:
@@ -4464,6 +5058,12 @@ class NoxApp(ui.View):
 
     def will_close(self):
         self._alive = False
+        # Очередь сохраняем последний раз и возвращаем экрану право гаснуть.
+        try:
+            DOWNLOADER.persist(STATE)
+        except Exception:
+            pass
+        keep_screen_awake(False)
         try:
             ui.cancel_delays()
         except Exception:

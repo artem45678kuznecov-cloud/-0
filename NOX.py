@@ -788,6 +788,7 @@ DATA_DIR = os.path.join(PROJECT_DIR, 'NOX_Data')
 ICON_PATH = os.path.join(PROJECT_DIR, 'NOX_icon.png')
 YT_DLP_DIR = os.path.join(PROJECT_DIR, 'yt_dlp')
 STATE_PATH = os.path.join(DATA_DIR, 'state.json')
+DEBUG_LOG = os.path.join(DATA_DIR, 'download_debug.txt')
 LEGACY_STATE = os.path.join(os.path.expanduser('~/Documents'), '.nox_state.json')
 
 # Показываем пользователю понятный путь, а не контейнер приложения.
@@ -814,6 +815,7 @@ def ensure_dirs():
 yt_dlp = None
 YTDLP_ERROR = ''
 YTDLP_VERSION = ''
+YTDLP_DEBUG = ''          # диагностика без обращения к консоли
 
 
 def _load_yt_dlp():
@@ -822,7 +824,7 @@ def _load_yt_dlp():
     ставится первым в sys.path. Системные пути не хардкодятся.
     Неудача не роняет приложение — она превращается в понятную ошибку.
     """
-    global yt_dlp, YTDLP_ERROR, YTDLP_VERSION
+    global yt_dlp, YTDLP_ERROR, YTDLP_VERSION, YTDLP_DEBUG
     if yt_dlp is not None:
         return yt_dlp
     if PROJECT_DIR not in sys.path:
@@ -834,11 +836,11 @@ def _load_yt_dlp():
         import yt_dlp as _mod
     except Exception as e:
         YTDLP_ERROR = 'Модуль yt-dlp не найден'
-        print('NOX: не удалось импортировать yt_dlp: %r' % (e,))
+        YTDLP_DEBUG = repr(e)
         return None
     got = os.path.dirname(os.path.abspath(getattr(_mod, '__file__', '') or ''))
     if os.path.normpath(got) != os.path.normpath(YT_DLP_DIR):
-        print('NOX: yt_dlp импортирован не из папки проекта: %s' % got)
+        YTDLP_DEBUG = 'yt_dlp импортирован не из папки проекта: %s' % got
     yt_dlp = _mod
     YTDLP_ERROR = ''
     try:
@@ -853,6 +855,19 @@ def ytdlp_ready():
 
 
 _LAST_ERROR = {'text': '', 'time': 0.0}
+
+
+def log_debug(text):
+    """
+    Диагностика уходит в NOX_Data/download_debug.txt, а не в консоль:
+    консольный мост Pythonista при открытом fullscreen ui.View лучше
+    не трогать вовсе. Вызывается только главным потоком и только на сбое.
+    """
+    try:
+        with io.open(DEBUG_LOG, 'a', encoding='utf-8') as f:
+            f.write('%s\t%s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), text))
+    except Exception:
+        pass
 
 
 def nox_error(text):
@@ -1259,29 +1274,6 @@ def _cancel_exception():
     return DownloadCancelledByUser
 
 
-class _QuietLogger(object):
-    """
-    Интерфейс получает короткий текст, но настоящая причина не теряется:
-    всё, что говорит yt-dlp, печатается в консоль Pythonista.
-    Глушится только служебный поток [debug].
-    """
-
-    def debug(self, msg):
-        text = str(msg)
-        if text.startswith('[debug] '):
-            return
-        print('NOX yt-dlp: %s' % text)
-
-    def info(self, msg):
-        print('NOX yt-dlp: %s' % msg)
-
-    def warning(self, msg):
-        print('NOX yt-dlp: %s' % msg)
-
-    def error(self, msg):
-        print('NOX yt-dlp: %s' % msg)
-
-
 # Признаки сетевого сбоя: после такого делается одна повторная попытка по IPv4.
 NETWORK_HINTS = (
     'timed out', 'timeout', 'urlopen error', 'connection reset',
@@ -1345,6 +1337,7 @@ class DownloadJob(object):
         self.eta = None
         self.filename = ''
         self.error = ''
+        self.debug_error = ''      # техническая причина, без консоли
         self.started_at = time.time()
         self.finished_at = None
         self.cancel_requested = False
@@ -1583,6 +1576,15 @@ class DownloadManager(object):
         self.tick += 1
 
     def _ydl_opts(self, job, ipv4=False):
+        """
+        Ровно тот набор, что дошёл до 100% в контрольном тесте на iPhone.
+
+        Без logger: собственный логгер уводил вывод yt-dlp в консольный мост
+        Pythonista прямо из фонового потока при открытом fullscreen ui.View.
+        Без verbose — он тянул за собой диагностику ffmpeg через subprocess.
+        writeinfojson и writethumbnail временно выключены: в проверенном
+        сценарии их не было, вернём после подтверждения этого пути.
+        """
         opts = {
             'format': format_selector(job.quality),
             'outtmpl': os.path.join(MEDIA_DIR, '%(title)s [%(id)s].%(ext)s'),
@@ -1593,29 +1595,20 @@ class DownloadManager(object):
             'ffmpeg_location': NO_FFMPEG_PATH,
             'fixup': 'never',
 
-            # verbose обязан оставаться выключенным: именно он приводил
-            # yt-dlp к диагностике ffmpeg и к падению Pythonista.
-            'verbose': False,
-
             'socket_timeout': 60,
-            'retries': 10,
-            'fragment_retries': 10,
-            'extractor_retries': 5,
+            'retries': 5,
+            'fragment_retries': 5,
 
             'continuedl': True,
             'noplaylist': True,
-            'noprogress': True,
+
             'quiet': True,
             'no_warnings': True,
 
-            'writeinfojson': True,
-            'writethumbnail': True,
-
-            'logger': _QuietLogger(),
             'progress_hooks': [lambda d, _j=job: self._hook(_j, d)],
         }
         if ipv4:
-            # Только как запасной вариант после сетевого сбоя, не всегда.
+            # Единственное отличие второй попытки; первая идёт 1:1 как в тесте.
             opts['source_address'] = '0.0.0.0'
         return opts
 
@@ -1648,6 +1641,11 @@ class DownloadManager(object):
         self._absorb_info(job, info)
 
     def _run(self, job):
+        """
+        Рабочий поток. Ни print, ни console.*, ни ui.* — только Python-данные,
+        yt-dlp и поля DownloadJob. Диагностика копится в job.debug_error,
+        а на экран её позже переносит главный поток.
+        """
         cancel_exc = _cancel_exception()
         try:
             # Попытка 1 — обычная сеть; попытка 2 — та же задача по IPv4,
@@ -1661,12 +1659,12 @@ class DownloadManager(object):
                 except (cancel_exc, DownloadCancelledByUser):
                     raise
                 except Exception as e:
-                    print('NOX yt-dlp attempt %d (%s) failed: %r'
-                          % (number, 'IPv4' if ipv4 else 'обычная сеть', e))
+                    job.debug_error = 'attempt %d (%s): %r' % (
+                        number, 'IPv4' if ipv4 else 'обычная сеть', e)
                     if job.cancel_requested:
                         raise
                     if number == 1 and is_network_error(e):
-                        print('NOX: retry via IPv4')
+                        job.debug_error += ' -> retry via IPv4'
                         job.status = ST_PREPARING
                         job.speed = None
                         job.eta = None
@@ -1687,7 +1685,8 @@ class DownloadManager(object):
             else:
                 job.status = ST_ERROR
                 job.error = short_error(e)
-                print('NOX: ошибка загрузки %s: %r' % (job.url, e))
+                if not job.debug_error:
+                    job.debug_error = repr(e)
         finally:
             job.finished_at = time.time()
             job.speed = None
@@ -1699,11 +1698,12 @@ class DownloadManager(object):
             try:
                 self._pump()
             except Exception as e:
-                print('NOX: не удалось взять следующее задание: %r' % (e,))
+                job.debug_error = (job.debug_error + ' | ') if job.debug_error else ''
+                job.debug_error += 'pump: %r' % (e,)
 
 
 def short_error(exc):
-    """Короткий человеческий текст. Полный traceback — только в консоль."""
+    """Короткий человеческий текст. Технический repr живёт в job.debug_error."""
     text = str(exc or '').strip()
     text = re.sub(r'\x1b\[[0-9;]*m', '', text)
     text = re.sub(r'^ERROR:\s*', '', text)
@@ -2040,7 +2040,7 @@ class Screen(ui.View):
             try:
                 self._apply_job(job, row, phase)
             except Exception as e:
-                print('NOX: не удалось обновить строку загрузки: %r' % (e,))
+                log_debug('refresh_jobs: %r' % (e,))
 
     def _apply_job(self, job, row, phase=0.0):
         title = row.get('title')
@@ -2121,8 +2121,9 @@ class HomeScreen(Screen):
 
     # ---------------------------------------------------------------
     def build(self):
+        # LIB.scan() здесь НЕ вызывается: экран читает уже собранное
+        # состояние медиатеки. Диск сканируется только в reload_all().
         w = self.width
-        LIB.scan()
         y = 6.0
 
         head, hh = build_header(w, y)
@@ -2455,8 +2456,8 @@ class DownloadsScreen(Screen):
         Screen.__init__(self, app, **kwargs)
 
     def build(self):
+        # LIB.scan() здесь НЕ вызывается — см. комментарий в HomeScreen.build.
         w = self.width
-        LIB.scan()
         self._chips = []
         y = 6.0
 
@@ -2680,11 +2681,9 @@ class DownloadsScreen(Screen):
             self.url_text = ''
             if self._url_field is not None:
                 self._url_field.text = ''
-            # Ровно один rebuild — чтобы появилась новая карточка. Корневой
-            # таймер после этого не станет делать reload_all: состав очереди
-            # он уже видел, а смена queued -> preparing его не касается.
-            self.rebuild()
-            self.app.sync_downloads()
+            # Никакого синхронного rebuild и никакого сканирования диска
+            # в момент старта: карточку добавит единственный корневой такт,
+            # когда увидит новое задание в signature().
         else:
             nox_error(msg)
 
@@ -2841,8 +2840,9 @@ class DownloadsScreen(Screen):
 
 class PlayerScreen(Screen):
     def build(self):
+        # LIB.scan() здесь НЕ вызывается: экран читает уже собранное
+        # состояние медиатеки. Диск сканируется только в reload_all().
         w = self.width
-        LIB.scan()
         y = 6.0
 
         head, hh = build_header(w, y)
@@ -2946,8 +2946,8 @@ class SettingsScreen(Screen):
         Screen.__init__(self, app, **kwargs)
 
     def build(self):
+        # LIB.scan() здесь НЕ вызывается — см. комментарий в HomeScreen.build.
         w = self.width
-        LIB.scan()
         self._chips = []
         y = 6.0
 
@@ -3154,6 +3154,7 @@ class NoxApp(ui.View):
         self._last_sig = ()
         self._last_tick = -1
         self.indeterminate_phase = 0.0
+        self._logged_errors = set()
 
         STATE.ensure_folder()
         _load_yt_dlp()
@@ -3244,13 +3245,8 @@ class NoxApp(ui.View):
         new.on_show()
         animate(lambda: setattr(new, 'alpha', 1.0), 0.22)
 
-    def reload_all(self):
-        """«Обновить медиатеку»: пересканировать папку и перестроить всё."""
-        ensure_dirs()
-        try:
-            LIB.scan()
-        except Exception as e:
-            nox_error(str(e))
+    def rebuild_screens(self):
+        """Перестроить экраны по уже собранному состоянию, без чтения диска."""
         for s in self.screens:
             try:
                 if self.body.width > 40:
@@ -3258,6 +3254,20 @@ class NoxApp(ui.View):
                 s.rebuild()
             except Exception as e:
                 nox_error(str(e))
+
+    def reload_all(self):
+        """
+        ЕДИНСТВЕННОЕ место, где сканируется NoxMedia. Вызывается только на
+        разовых событиях: старт приложения, «Обновить медиатеку», удаление
+        файла и завершение загрузки. Во время активной загрузки диск,
+        в который пишет рабочий поток, не читается.
+        """
+        ensure_dirs()
+        try:
+            LIB.scan()
+        except Exception as e:
+            nox_error(str(e))
+        self.rebuild_screens()
 
     # ---------------------------------------------------------------
     @ui.in_background
@@ -3388,10 +3398,15 @@ class NoxApp(ui.View):
                 self.indeterminate_phase += 0.08
                 if self.indeterminate_phase > 1.0:
                     self.indeterminate_phase = 0.0
+            self._persist_debug()
             sig = DOWNLOADER.signature()
             if sig != self._last_sig:
-                # Состав очереди изменился: строка появилась или ушла.
-                self.after_downloads_changed()
+                # Состав очереди изменился. Сканируем диск, ТОЛЬКО если
+                # задание исчезло (завершилось, снято): при добавлении
+                # нового задания читать папку нельзя — в неё уже пишет
+                # рабочий поток.
+                gone = bool(set(self._last_sig) - set(sig))
+                self.after_downloads_changed(rescan=gone)
             elif self._tab in (0, 1) and active \
                     and DOWNLOADER.tick != self._last_tick:
                 # Смена статуса и прогресс — только точечное обновление,
@@ -3399,7 +3414,7 @@ class NoxApp(ui.View):
                 self._last_tick = DOWNLOADER.tick
                 self.screens[self._tab].refresh_jobs(self.indeterminate_phase)
         except Exception as e:
-            print('NOX: сбой обновления интерфейса: %r' % (e,))
+            log_debug('tick: %r' % (e,))
         try:
             ui.delay(self._tick, step)
         except Exception:
@@ -3410,15 +3425,35 @@ class NoxApp(ui.View):
         self._last_sig = DOWNLOADER.signature()
         self._last_tick = DOWNLOADER.tick
 
-    def after_downloads_changed(self):
+    def after_downloads_changed(self, rescan=True):
         """
         Единичное событие: задание добавилось, ушло или завершилось.
-        Только здесь пересканируется NoxMedia и перестраиваются Главная,
-        Загрузки, Плеер и хранилище.
+        rescan=False — просто показать новую карточку, не трогая диск.
         """
         DOWNLOADER.clear_finished()
         self.sync_downloads()
-        self.reload_all()
+        if rescan:
+            self.reload_all()
+        else:
+            self.rebuild_screens()
+
+    def _persist_debug(self):
+        """
+        Техническую причину сбоя пишет ГЛАВНЫЙ поток, и только после ошибки:
+        NOX_Data/download_debug.txt. Рабочий поток к файлам логов не ходит.
+        """
+        for job in DOWNLOADER.all_jobs():
+            if not job.debug_error or job.id in self._logged_errors:
+                continue
+            self._logged_errors.add(job.id)
+            try:
+                ensure_dirs()
+                with io.open(DEBUG_LOG, 'a', encoding='utf-8') as f:
+                    f.write('%s\t%s\t%s\t%s\n' % (
+                        time.strftime('%Y-%m-%d %H:%M:%S'),
+                        job.url, job.status, job.debug_error))
+            except Exception:
+                pass
 
     def will_close(self):
         self._alive = False

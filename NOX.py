@@ -1268,19 +1268,41 @@ def _cancel_exception():
 
 
 class _QuietLogger(object):
-    """Диагностика уходит в консоль Pythonista, а не в интерфейс."""
+    """
+    Интерфейс получает короткий текст, но настоящая причина не теряется:
+    всё, что говорит yt-dlp, печатается в консоль Pythonista.
+    Глушится только служебный поток [debug].
+    """
 
     def debug(self, msg):
-        pass
+        text = str(msg)
+        if text.startswith('[debug] '):
+            return
+        print('NOX yt-dlp: %s' % text)
 
     def info(self, msg):
-        pass
+        print('NOX yt-dlp: %s' % msg)
 
     def warning(self, msg):
         print('NOX yt-dlp: %s' % msg)
 
     def error(self, msg):
         print('NOX yt-dlp: %s' % msg)
+
+
+# Признаки сетевого сбоя: после такого делается одна повторная попытка по IPv4.
+NETWORK_HINTS = (
+    'timed out', 'timeout', 'urlopen error', 'connection reset',
+    'connection aborted', 'connection refused', 'connection error',
+    'temporary failure in name resolution', 'name or service not known',
+    'network is unreachable', 'no route to host', 'getaddrinfo',
+    'unable to download webpage', 'eof occurred', 'remote end closed',
+)
+
+
+def is_network_error(exc):
+    text = ('%r %s' % (exc, exc)).lower()
+    return any(hint in text for hint in NETWORK_HINTS)
 
 
 ST_QUEUED = 'queued'
@@ -1522,6 +1544,12 @@ class DownloadManager(object):
     def _hook(self, job, d):
         if job.cancel_requested:
             raise _cancel_exception()('Загрузка остановлена пользователем')
+        # Отдельного metadata-запроса больше нет, поэтому название приходит
+        # сюда — с первым же вызовом hook, как только yt-dlp его знает.
+        info = d.get('info_dict') or {}
+        title = info.get('title')
+        if isinstance(title, str) and title.strip():
+            job.title = title.strip()
         st = d.get('status')
         if st == 'downloading':
             job.status = ST_DOWNLOADING
@@ -1554,7 +1582,7 @@ class DownloadManager(object):
                 job.error = 'Загрузка прервана'
         self.tick += 1
 
-    def _ydl_opts(self, job):
+    def _ydl_opts(self, job, ipv4=False):
         allow_merge = ffmpeg_available()
         opts = {
             'format': format_selector(job.quality, allow_merge),
@@ -1566,35 +1594,76 @@ class DownloadManager(object):
             'noplaylist': True,
             'writeinfojson': True,
             'writethumbnail': True,
+            'extractor_retries': 5,
             'retries': 10,
             'fragment_retries': 10,
-            'socket_timeout': 30,
+            # Лимит ОДНОЙ сетевой операции, а не всей загрузки. На сотовой
+            # сети iPhone тридцати секунд не хватало уже на извлечении.
+            'socket_timeout': 120,
             'logger': _QuietLogger(),
             'progress_hooks': [lambda d, _j=job: self._hook(_j, d)],
         }
+        if ipv4:
+            # Только как запасной вариант после сетевого сбоя, не всегда.
+            opts['source_address'] = '0.0.0.0'
         if allow_merge:
             opts['merge_output_format'] = 'mp4'
         return opts
 
+    def _absorb_info(self, job, info):
+        """Название из результата единственного extract_info(download=True)."""
+        if not isinstance(info, dict):
+            return
+        entries = info.get('entries')
+        if isinstance(entries, list) and entries:
+            info = entries[0] or {}
+        title = info.get('title')
+        if isinstance(title, str) and title.strip():
+            job.title = title.strip()
+        path = info.get('filepath') or info.get('_filename')
+        if isinstance(path, str) and path:
+            job.filename = path
+        self.tick += 1
+
+    def _attempt(self, job, ipv4):
+        """
+        ОДИН вызов extract_info(download=True): он же получает метаданные,
+        он же выбирает формат, он же качает. Отдельного metadata-запроса,
+        на котором раньше выпадал timeout, больше не существует.
+        """
+        mod = _load_yt_dlp()
+        if mod is None:
+            raise RuntimeError(YTDLP_ERROR or 'Модуль yt-dlp не найден')
+        with mod.YoutubeDL(self._ydl_opts(job, ipv4)) as ydl:
+            info = ydl.extract_info(job.url, download=True)
+        self._absorb_info(job, info)
+
     def _run(self, job):
         cancel_exc = _cancel_exception()
         try:
-            mod = _load_yt_dlp()
-            if mod is None:
-                raise RuntimeError(YTDLP_ERROR or 'Модуль yt-dlp не найден')
-            with mod.YoutubeDL(self._ydl_opts(job)) as ydl:
-                info = ydl.extract_info(job.url, download=False)
-                if isinstance(info, dict):
-                    entries = info.get('entries')
-                    if isinstance(entries, list) and entries:
-                        info = entries[0] or {}
-                    title = info.get('title')
-                    if isinstance(title, str) and title.strip():
-                        job.title = title.strip()
-                    self.tick += 1
+            # Попытка 1 — обычная сеть; попытка 2 — та же задача по IPv4,
+            # и только если первая упала именно на сети.
+            for number, ipv4 in ((1, False), (2, True)):
                 if job.cancel_requested:
                     raise cancel_exc('Загрузка остановлена пользователем')
-                ydl.download([job.url])
+                try:
+                    self._attempt(job, ipv4)
+                    break
+                except (cancel_exc, DownloadCancelledByUser):
+                    raise
+                except Exception as e:
+                    print('NOX yt-dlp attempt %d (%s) failed: %r'
+                          % (number, 'IPv4' if ipv4 else 'обычная сеть', e))
+                    if job.cancel_requested:
+                        raise
+                    if number == 1 and is_network_error(e):
+                        print('NOX: retry via IPv4')
+                        job.status = ST_PREPARING
+                        job.speed = None
+                        job.eta = None
+                        self.tick += 1
+                        continue
+                    raise
             if job.cancel_requested:
                 job.status = ST_CANCELLED
             else:

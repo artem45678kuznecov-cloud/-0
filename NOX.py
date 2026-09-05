@@ -53,34 +53,71 @@ except ImportError:                                    # pragma: no cover
 APP_NAME = 'NOX'
 APP_VERSION = '1.0'
 
-BG          = '#04050b'
-BG_DEEP     = '#020307'
-NAV_BG      = '#070a13'
-CARD        = '#0a0d17'
-CARD_2      = '#0d111d'
-CARD_3      = '#111524'
-FIELD       = '#080b14'
+# ---------------------------------------------------------------------
+#  NOX Dark Liquid Glass — единственный источник цветов и размеров.
+#  Случайных hex-значений по файлу быть не должно: всё берётся отсюда.
+# ---------------------------------------------------------------------
 
-BORDER      = '#182140'
-BORDER_2    = '#22305a'
-BORDER_HI   = '#3a44a0'
+# Фон: глубокий сине-чёрный с холодным свечением сверху.
+BG            = '#050813'
+BG_DEEP       = '#030611'
+BG_TOP        = '#071024'
+BG_GLOW       = '#28307f'          # рассеянный свет за крупными панелями
 
-ACCENT      = '#7b7bf5'
-ACCENT_2    = '#a5a2ff'
-ACCENT_DEEP = '#5b57e0'
-ACCENT_SOFT = '#8d8bff'
+# Стекло.
+GLASS_BG            = '#0c1226'    # обычная стеклянная поверхность
+GLASS_BG_STRONG     = '#141b38'    # приподнятая (кнопки, поля ввода)
+GLASS_BG_DEEP       = '#070b18'    # утопленная (input, track)
+GLASS_BORDER        = '#222c58'
+GLASS_BORDER_SOFT   = '#1a2245'
+GLASS_BORDER_ACTIVE = '#7d78f2'
+GLASS_HIGHLIGHT     = '#9fb0ff'    # верхний блик
+GLASS_GLOW          = '#5b57e0'    # свечение по краю
 
-TXT         = '#ffffff'
-TXT_2       = '#9aa2ba'
-TXT_3       = '#697089'
-TXT_4       = '#4b5268'
-ERR_TXT     = '#ff6b81'
+# Акцент.
+ACCENT       = '#7b7bf5'
+ACCENT_LIGHT = '#b3b0ff'
+ACCENT_DEEP  = '#4f49d8'
+ACCENT_SOFT  = '#8d8bff'
+DANGER       = '#ff6b81'
+
+# Текст.
+TEXT_PRIMARY   = '#ffffff'
+TEXT_SECONDARY = '#a3abc6'
+TEXT_MUTED     = '#6b7391'
+TEXT_FAINT     = '#4c5470'
+
+# Размеры.
+NAV_HEIGHT   = 64.0        # высота плавающей капсулы навигации
+NAV_SIDE     = 16.0        # отступ капсулы от краёв экрана
+NAV_GAP      = 8.0         # зазор между капсулой и safe area снизу
+CARD_RADIUS  = 18.0
+GLASS_RADIUS = 22.0
+PILL_RADIUS  = 999.0       # «до упора», радиус ограничивается по высоте
 
 F_BOLD      = '<system-bold>'
 F_REG       = '<system>'
 
 PAD         = 20.0
-NAV_H       = 60.0
+
+# --- совместимые псевдонимы ------------------------------------------
+# Старые имена остаются рабочими, чтобы ни один вызов не остался с
+# «случайным» цветом: все они указывают в ту же палитру.
+NAV_BG      = GLASS_BG
+CARD        = GLASS_BG
+CARD_2      = GLASS_BG_STRONG
+CARD_3      = GLASS_BG_STRONG
+FIELD       = GLASS_BG_DEEP
+BORDER      = GLASS_BORDER
+BORDER_2    = GLASS_BORDER
+BORDER_HI   = GLASS_BORDER_ACTIVE
+ACCENT_2    = ACCENT_LIGHT
+TXT         = TEXT_PRIMARY
+TXT_2       = TEXT_SECONDARY
+TXT_3       = TEXT_MUTED
+TXT_4       = TEXT_FAINT
+ERR_TXT     = DANGER
+NAV_H       = NAV_HEIGHT
 
 # Как часто интерфейс перечитывает состояние загрузки. progress_hook
 # дёргается очень часто, поэтому UI обновляется не чаще ~5 раз в секунду.
@@ -171,6 +208,12 @@ def mix(h1, h2, t):
     return (a[0] + (b[0] - a[0]) * t,
             a[1] + (b[1] - a[1]) * t,
             a[2] + (b[2] - a[2]) * t)
+
+
+def mixa(h1, h2, t, alpha):
+    """Смешанный цвет с альфой — для градиентов по стеклу."""
+    c = mix(h1, h2, t)
+    return (c[0], c[1], c[2], alpha)
 
 
 def redraw(view):
@@ -295,6 +338,22 @@ def fmt_eta(seconds):
     return '%02d:%02d' % (m, sec)
 
 
+def fmt_clock(seconds):
+    """12:03 или 1:14:26 для плашки на обложке. Нет данных — пусто."""
+    try:
+        s = int(float(seconds))
+    except Exception:
+        return ''
+    if s <= 0:
+        return ''
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    if h:
+        return '%d:%02d:%02d' % (h, m, sec)
+    return '%02d:%02d' % (m, sec)
+
+
 def safe_name(text, limit=40):
     text = (text or '').strip()
     if len(text) > limit:
@@ -333,13 +392,165 @@ def deactivate_tree(view):
         deactivate_tree(sub)
 
 
-def card_view(frame, bg=CARD, radius=16, border=BORDER, border_w=1):
-    v = ui.View(frame=frame)
-    v.background_color = bg
-    v.corner_radius = radius
-    v.border_width = border_w
-    v.border_color = border
-    return v
+# =====================================================================
+#  СТЕКЛО
+# =====================================================================
+
+# Нативный blur пробуем ровно один раз. Не получилось — весь интерфейс
+# продолжает работать на нарисованном стекле, приложение не падает.
+_BLUR = {'checked': False, 'ok': False}
+
+
+def _attach_native_blur(view, radius):
+    """
+    UIVisualEffectView под содержимым view. Только публичный UIKit,
+    целиком в try/except. Возвращает True, если слой реально встал.
+
+    Живых blur-слоёв в NOX должно быть единицы: каждый такой слой —
+    настоящая работа GPU на каждый кадр, а рядом качается гигабайтный
+    файл. Поэтому его получает только плавающая панель навигации.
+    """
+    if _BLUR['checked'] and not _BLUR['ok']:
+        return False
+    try:
+        import objc_util
+        host = view.objc_instance
+        effect = objc_util.ObjCClass('UIBlurEffect').effectWithStyle_(2)
+        blur = objc_util.ObjCClass('UIVisualEffectView').alloc()
+        blur = blur.initWithEffect_(effect)
+        b = view.bounds
+        blur.setFrame_(objc_util.CGRect(
+            objc_util.CGPoint(0, 0), objc_util.CGSize(b[2], b[3])))
+        blur.setAutoresizingMask_(18)          # гибкие ширина и высота
+        layer = blur.layer()
+        layer.setCornerRadius_(float(radius))
+        layer.setMasksToBounds_(True)
+        host.insertSubview_atIndex_(blur, 0)
+        blur.release()
+        _BLUR['checked'] = True
+        _BLUR['ok'] = True
+        return True
+    except Exception:
+        _BLUR['checked'] = True
+        _BLUR['ok'] = False
+        return False
+
+
+def native_blur_available():
+    """Для отчёта и настроек: удался ли нативный blur в этом запуске."""
+    return bool(_BLUR['ok'])
+
+
+class GlassView(ui.View):
+    """
+    Единый стеклянный слой NOX: скруглённые углы, полупрозрачная заливка,
+    тонкая сине-фиолетовая рамка, верхний блик и мягкое свечение по краю.
+
+    Всё рисуется в draw() один раз на перестроение экрана. Ни таймеров,
+    ни анимаций внутри нет: обновление прогресса стекло не перерисовывает.
+    """
+
+    def __init__(self, radius=CARD_RADIUS, fill=GLASS_BG, fill_alpha=0.78,
+                 border=GLASS_BORDER, border_alpha=0.95, border_w=1.0,
+                 highlight=0.10, glow=0.0, glow_color=GLASS_GLOW,
+                 blur=False, **kwargs):
+        ui.View.__init__(self, **kwargs)
+        self.background_color = 'clear'
+        self.radius = radius
+        self.fill = fill
+        self.fill_alpha = fill_alpha
+        self.border = border
+        self.border_alpha = border_alpha
+        self.border_w = border_w
+        self.highlight = highlight
+        self.glow = glow
+        self.glow_color = glow_color
+        self._blurred = False
+        if blur:
+            self._blurred = _attach_native_blur(self, self._radius())
+            if self._blurred:
+                # Настоящее размытие уже даёт материал — своя заливка
+                # становится лишь лёгкой подкраской поверх него.
+                self.fill_alpha = min(self.fill_alpha, 0.45)
+
+    def _radius(self):
+        w, h = self.width, self.height
+        return min(float(self.radius), max(1.0, min(w, h) / 2.0))
+
+    def set_active(self, flag, active_color=GLASS_BORDER_ACTIVE,
+                   idle_color=GLASS_BORDER, glow=0.30):
+        """Выделение без пересборки карточки: меняются только параметры."""
+        self.border = active_color if flag else idle_color
+        self.border_w = 1.6 if flag else 1.0
+        self.glow = glow if flag else 0.0
+        self.fill = GLASS_BG_STRONG if flag else GLASS_BG
+        redraw(self)
+
+    def draw(self):
+        w, h = self.width, self.height
+        if w <= 0 or h <= 0:
+            return
+        r = self._radius()
+        # 1. Заливка стекла.
+        ui.set_color(rgba(self.fill, self.fill_alpha))
+        ui.Path.rounded_rect(0, 0, w, h, r).fill()
+        # 2. Свечение по краю: несколько вложенных обводок с падающей
+        #    альфой. Наружу выйти нельзя, поэтому свет идёт внутрь.
+        if self.glow > 0:
+            for i in range(4):
+                inset = 0.5 + i * 1.6
+                if w - inset * 2 <= 2 or h - inset * 2 <= 2:
+                    break
+                p = ui.Path.rounded_rect(inset, inset, w - inset * 2,
+                                         h - inset * 2, max(1.0, r - inset))
+                p.line_width = 2.0
+                ui.set_color(rgba(self.glow_color,
+                                  self.glow * (1.0 - i / 4.0) ** 2))
+                p.stroke()
+        # 3. Верхний блик. Полоса заужена на 0.75 радиуса с каждой стороны,
+        #    поэтому в скруглённые углы она не выходит и обрезка не нужна.
+        if self.highlight > 0 and h > 8:
+            band = min(h * 0.45, 22.0)
+            steps = 8
+            inset = r * 0.75 + 1.0
+            bw = w - inset * 2
+            if bw > 4:
+                for i in range(steps):
+                    t = i / float(steps)
+                    ui.set_color(rgba(GLASS_HIGHLIGHT,
+                                      self.highlight * (1.0 - t) ** 2.0))
+                    ui.fill_rect(inset, 1.0 + t * band, bw,
+                                 band / steps + 0.7)
+        # 4. Рамка.
+        if self.border_w > 0:
+            p = ui.Path.rounded_rect(self.border_w / 2.0, self.border_w / 2.0,
+                                     w - self.border_w, h - self.border_w,
+                                     max(1.0, r - self.border_w / 2.0))
+            p.line_width = self.border_w
+            ui.set_color(rgba(self.border, self.border_alpha))
+            p.stroke()
+
+
+def glass_card(frame, radius=CARD_RADIUS, **kwargs):
+    """Обычная стеклянная карточка."""
+    return GlassView(radius=radius, frame=frame, **kwargs)
+
+
+def glass_pill(frame, radius=None, **kwargs):
+    """Капсула: радиус всегда равен половине высоты."""
+    h = frame[3]
+    return GlassView(radius=(radius if radius else h / 2.0),
+                     frame=frame, **kwargs)
+
+
+def card_view(frame, bg=CARD, radius=CARD_RADIUS, border=BORDER, border_w=1):
+    """
+    Старая фабрика карточек: теперь возвращает то же самое стекло.
+    Сохранена, чтобы не переписывать каждый вызов и не разъезжаться
+    по стилям.
+    """
+    return GlassView(radius=radius, fill=bg, border=border,
+                     border_w=border_w, frame=frame)
 
 
 # =====================================================================
@@ -636,6 +847,83 @@ class GradientView(ui.View):
             ui.fill_rect(i * step_w, 0, step_w + 1.0, h)
 
 
+class FadeOverlay(ui.View):
+    """
+    Затемнение поверх обложки. horizontal=True — слева непрозрачно,
+    вправо сходит на нет (hero на главной); иначе тень снизу вверх.
+    """
+
+    def __init__(self, color=BG_DEEP, strength=0.97, horizontal=True,
+                 **kwargs):
+        ui.View.__init__(self, **kwargs)
+        self.color = color
+        self.strength = strength
+        self.horizontal = horizontal
+        self.background_color = 'clear'
+        self.user_interaction_enabled = False
+
+    def draw(self):
+        w, h = self.width, self.height
+        if w <= 0 or h <= 0:
+            return
+        steps = 26
+        if self.horizontal:
+            sw = w / float(steps)
+            for i in range(steps):
+                t = i / float(steps - 1)
+                ui.set_color(rgba(self.color, self.strength * (1.0 - t) ** 1.5))
+                ui.fill_rect(i * sw, 0, sw + 1.0, h)
+        else:
+            sh = h / float(steps)
+            for i in range(steps):
+                t = i / float(steps - 1)
+                ui.set_color(rgba(self.color, self.strength * t ** 1.8))
+                ui.fill_rect(0, i * sh, w, sh + 1.0)
+
+
+class CTAButtonView(ui.View):
+    """
+    Главная кнопка «Скачать»: горизонтальный градиент
+    deep violet -> electric violet -> lavender blue, верхний блик
+    и мягкое свечение по краю. Никакой логики, только отрисовка.
+    """
+
+    def __init__(self, **kwargs):
+        ui.View.__init__(self, **kwargs)
+        self.background_color = 'clear'
+        self.user_interaction_enabled = False
+
+    def draw(self):
+        w, h = self.width, self.height
+        if w <= 0 or h <= 0:
+            return
+        r = h / 2.0
+        steps = 54
+        sw = w / float(steps)
+        for i in range(steps):
+            t = i / float(steps - 1)
+            if t < 0.5:
+                col = mix(ACCENT_DEEP, ACCENT, t * 2.0)
+            else:
+                col = mix(ACCENT, ACCENT_LIGHT, (t - 0.5) * 2.0)
+            ui.set_color(col)
+            if i == 0 or i == steps - 1:
+                ui.Path.rounded_rect(i * sw, 0, sw + 1.0, h, r).fill()
+            else:
+                ui.fill_rect(i * sw, 0, sw + 1.0, h)
+        # верхний highlight
+        ui.set_color(rgba('#ffffff', 0.20))
+        ui.Path.rounded_rect(r * 0.5, 1.5, w - r, h * 0.36, h * 0.18).fill()
+        # тонкое свечение по краю
+        for i in range(3):
+            inset = 0.6 + i * 1.5
+            p = ui.Path.rounded_rect(inset, inset, w - inset * 2,
+                                     h - inset * 2, max(1.0, r - inset))
+            p.line_width = 1.6
+            ui.set_color(rgba(ACCENT_LIGHT, 0.30 * (1.0 - i / 3.0)))
+            p.stroke()
+
+
 class GlowView(ui.View):
     """Мягкое свечение — концентрические круги с малой альфой."""
 
@@ -727,25 +1015,39 @@ class ProgressBar(ui.View):
         """Полосу сняли с экрана: дальше она молчит, даже если её позовут."""
         self._detached = True
 
+    def _fill_segment(self, x, seg, w, h, r):
+        """Светящийся отрезок: тело плюс мягкий ореол на конце."""
+        seg = max(h, min(seg, w - x))
+        ui.set_color(rgba(self.fill_color, 0.30))
+        ui.Path.rounded_rect(max(0.0, x - 1.0), -1.0, seg + 2.0,
+                             h + 2.0, r + 1.0).fill()
+        ui.set_color(self.fill_color)
+        ui.Path.rounded_rect(x, 0, seg, h, r).fill()
+        ui.set_color(rgba(ACCENT_LIGHT, 0.55))
+        ui.Path.rounded_rect(x + seg - min(seg, h * 1.6), 0,
+                             min(seg, h * 1.6), h, r).fill()
+
     def draw(self):
         w, h = self.width, self.height
         if w <= 0 or h <= 0:
             return
         r = h / 2.0
-        ui.set_color(rgba(self.track, 0.85))
+        # Тёмная стеклянная дорожка.
+        ui.set_color(rgba(GLASS_BG_DEEP, 0.9))
         ui.Path.rounded_rect(0, 0, w, h, r).fill()
+        ui.set_color(rgba(GLASS_BORDER, 0.55))
+        p = ui.Path.rounded_rect(0.25, 0.25, w - 0.5, h - 0.5, r)
+        p.line_width = 0.5
+        p.stroke()
         if self.value is None:
             seg = max(28.0, w * 0.28)
             x = (w + seg) * self._phase - seg
             x = max(0.0, min(w - 1.0, x))
-            seg = min(seg, w - x)
-            ui.set_color(rgba(self.fill_color, 0.9))
-            ui.Path.rounded_rect(x, 0, max(4.0, seg), h, r).fill()
+            self._fill_segment(x, seg, w, h, r)
         else:
             v = max(0.0, min(1.0, float(self.value)))
             if v > 0:
-                ui.set_color(self.fill_color)
-                ui.Path.rounded_rect(0, 0, max(h, w * v), h, r).fill()
+                self._fill_segment(0.0, max(h, w * v), w, h, r)
 
 
 class ThumbView(ui.View):
@@ -3002,25 +3304,30 @@ def load_project_icon():
 
 
 def build_header(width, y=0.0):
-    """Шапка NOX + статус справа. Возвращает (view, height)."""
-    h = 58.0
+    """
+    Шапка как на эталонах: слева крупное NOX с разрядкой и подписью,
+    справа объёмная стеклянная капсула статуса. Возвращает (view, height).
+    """
+    h = 62.0
     v = ui.View(frame=(0, y, width, h))
     v.background_color = 'clear'
 
-    logo = make_label(spaced('NOX', ' '), (F_BOLD, 27), TXT,
-                      frame=(PAD, 2, 220, 32))
+    logo = make_label(spaced('NOX', ' '), (F_BOLD, 30), TEXT_PRIMARY,
+                      frame=(PAD, 2, 230, 36))
     v.add_subview(logo)
-
-    sub = make_label(spaced('офлайн-медиатека'), (F_REG, 7.5), TXT_3,
-                     frame=(PAD + 2, 33, 260, 12))
+    sub = make_label(spaced('офлайн-медиатека'), (F_REG, 8), TEXT_MUTED,
+                     frame=(PAD + 3, 38, 260, 12))
     v.add_subview(sub)
 
-    orb_size = 32.0
-    txt_w = 108.0
-    right_w = orb_size + 10 + txt_w
-    ox = width - PAD - right_w
-
-    orb_frame = (ox, (h - orb_size) / 2 - 2, orb_size, orb_size)
+    # Стеклянная капсула статуса.
+    cap_h = 52.0
+    cap_w = min(210.0, max(150.0, width * 0.47))
+    cap_x = width - PAD - cap_w
+    cap = glass_pill((cap_x, (h - cap_h) / 2.0 + 1, cap_w, cap_h),
+                     fill=GLASS_BG, fill_alpha=0.80, border=GLASS_BORDER,
+                     highlight=0.13, glow=0.20)
+    orb_size = 30.0
+    orb_frame = (13, (cap_h - orb_size) / 2.0, orb_size, orb_size)
     icon_img = load_project_icon()
     if icon_img is not None:
         holder = ui.View(frame=orb_frame)
@@ -3032,70 +3339,258 @@ def build_header(width, y=0.0):
         iv.content_mode = ui.CONTENT_SCALE_ASPECT_FILL
         iv.image = icon_img
         holder.add_subview(iv)
-        v.add_subview(holder)
+        cap.add_subview(holder)
     else:
-        v.add_subview(OrbView(frame=orb_frame))
+        cap.add_subview(OrbView(frame=orb_frame))
 
-    t1 = make_label('Рады видеть', (F_REG, 9.5), TXT_3, ui.ALIGN_RIGHT,
-                    frame=(ox + orb_size + 10, 11, txt_w, 12))
-    v.add_subview(t1)
-    t2 = make_label('Всегда офлайн', (F_BOLD, 12.5), ACCENT_2, ui.ALIGN_RIGHT,
-                    frame=(ox + orb_size + 10, 24, txt_w, 16))
-    v.add_subview(t2)
+    tx = 13 + orb_size + 8
+    tw = cap_w - tx - 14
+    cap.add_subview(make_label('Рады видеть', (F_REG, 10), TEXT_MUTED,
+                               ui.ALIGN_RIGHT, frame=(tx, 11, tw, 13)))
+    cap.add_subview(make_label('Всегда офлайн', (F_BOLD, 14), ACCENT_LIGHT,
+                               ui.ALIGN_RIGHT, frame=(tx, 25, tw, 18)))
+    v.add_subview(cap)
     return v, h
 
 
+def big_title(sv, width, y, title, subtitle=None):
+    """Крупный заголовок экрана: «Загрузчик», «Плеер», «Настройки»."""
+    sv.add_subview(make_label(title, (F_BOLD, 32), TEXT_PRIMARY,
+                              frame=(PAD, y, width - 100, 40)))
+    if subtitle:
+        sv.add_subview(make_label(subtitle, (F_REG, 13), TEXT_MUTED,
+                                  frame=(PAD + 1, y + 39, width - 100, 18)))
+        return y + 64
+    return y + 44
+
+
 def section_header(width, y, title, right_text=None, right_action=None):
-    h = 34.0
+    h = 38.0
     v = ui.View(frame=(0, y, width, h))
     v.background_color = 'clear'
-    lb = make_label(title, (F_BOLD, 21), TXT, frame=(PAD, 0, width - PAD * 2 - 90, h))
+    lb = make_label(title, (F_BOLD, 25), TEXT_PRIMARY,
+                    frame=(PAD, 0, width - PAD * 2 - 90, h))
     v.add_subview(lb)
     if right_text and callable(right_action):
         btn_w = 74.0
         b = Tappable(action=right_action, press_scale=0.93,
                      frame=(width - PAD - btn_w, 0, btn_w, h))
         b.background_color = 'clear'
-        rl = make_label(right_text, (F_REG, 13), TXT_2, ui.ALIGN_RIGHT,
+        rl = make_label(right_text, (F_REG, 14), TEXT_SECONDARY, ui.ALIGN_RIGHT,
                         frame=(0, 0, btn_w - 18, h))
         b.add_subview(rl)
-        ic = Icon('chevron', TXT_2, 1.6, frame=(btn_w - 15, h / 2 - 7, 13, 14))
+        ic = Icon('chevron', TEXT_SECONDARY, 1.7,
+                  frame=(btn_w - 15, h / 2 - 7, 13, 14))
         b.add_subview(ic)
         v.add_subview(b)
     return v, h
 
 
-def empty_block(width, y, title, subtitle, icon='film'):
-    h = 150.0
-    v = card_view((PAD, y, width - PAD * 2, h), CARD, 18, BORDER)
-    w = v.width
-    glow = GlowView(ACCENT, 0.20, 8, frame=(w / 2 - 46, 22, 92, 92))
-    v.add_subview(glow)
-    ic = Icon(icon, rgba(ACCENT_2, 0.55), 1.8, frame=(w / 2 - 19, 45, 38, 38))
+def glass_circle(frame, icon_name, color=TEXT_SECONDARY, line=1.8,
+                 icon_size=20.0, action=None, fill=GLASS_BG_STRONG,
+                 fill_alpha=0.85, glow=0.0, border=GLASS_BORDER):
+    """
+    Круглая стеклянная кнопка — шестерёнка, play, пауза, крестик.
+    Хит-таргетом всегда служит настоящий прозрачный ui.Button.
+    """
+    x, y, w, h = frame
+    v = GlassView(radius=min(w, h) / 2.0, fill=fill, fill_alpha=fill_alpha,
+                  border=border, highlight=0.14, glow=glow,
+                  frame=(x, y, w, h))
+    ic = Icon(icon_name, color, line,
+              frame=((w - icon_size) / 2.0, (h - icon_size) / 2.0,
+                     icon_size, icon_size))
     v.add_subview(ic)
-    t = make_label(title, (F_BOLD, 16), TXT, ui.ALIGN_CENTER,
-                   frame=(10, 92, w - 20, 20))
+    if callable(action):
+        hit = ui.Button(frame=(0, 0, w, h))
+        hit.flex = 'WH'
+        hit.background_color = 'clear'
+        hit.action = action
+        v.add_subview(hit)
+    return v, ic
+
+
+def empty_block(width, y, title, subtitle, icon='film'):
+    """Пустое состояние — тоже стекло, а не пустая дыра в композиции."""
+    h = 190.0
+    v = glass_card((PAD, y, width - PAD * 2, h), GLASS_RADIUS,
+                   fill_alpha=0.72, highlight=0.09, glow=0.10)
+    w = v.width
+    ring = GlassView(radius=44.0, fill=GLASS_BG_STRONG, fill_alpha=0.75,
+                     border=GLASS_BORDER, highlight=0.16, glow=0.26,
+                     frame=(w / 2.0 - 44, 30, 88, 88))
+    ring.add_subview(Icon(icon, ACCENT_LIGHT, 2.0, frame=(28, 28, 32, 32)))
+    v.add_subview(ring)
+    t = make_label(title, (F_BOLD, 17), TEXT_PRIMARY, ui.ALIGN_CENTER,
+                   frame=(10, 128, w - 20, 22))
     v.add_subview(t)
-    s = make_label(subtitle, (F_REG, 12), TXT_3, ui.ALIGN_CENTER, lines=2,
-                   frame=(16, 112, w - 32, 30))
+    s = make_label(subtitle, (F_REG, 12.5), TEXT_MUTED, ui.ALIGN_CENTER,
+                   lines=2, frame=(16, 150, w - 32, 32))
     v.add_subview(s)
     return v, h
 
 
-def status_pill(text, icon_name, color, x, y, w=None, h=26.0, bg=None):
+def status_pill(text, icon_name, color, x, y, w=None, h=28.0, bg=None):
     lbl_font = (F_REG, 11.5)
     if w is None:
-        w = 26 + len(text) * 6.4
-    v = ui.View(frame=(x, y, w, h))
-    v.background_color = bg if bg else rgba(ACCENT, 0.13)
-    v.corner_radius = h / 2.0
-    v.border_width = 1
-    v.border_color = rgba(color, 0.35)
+        w = 28 + len(text) * 6.4
+    v = glass_pill((x, y, w, h), fill=(bg or GLASS_BG_STRONG),
+                   fill_alpha=0.85, border=color, border_alpha=0.42,
+                   highlight=0.14)
     v.user_interaction_enabled = False
-    ic = Icon(icon_name, color, 1.5, frame=(7, (h - 14) / 2, 14, 14))
+    ic = Icon(icon_name, color, 1.6, frame=(8, (h - 14) / 2, 14, 14))
     v.add_subview(ic)
-    lb = make_label(text, lbl_font, color, frame=(25, 0, w - 29, h))
+    lb = make_label(text, lbl_font, color, frame=(26, 0, w - 30, h))
     v.add_subview(lb)
+    return v
+
+
+def badge_w(text):
+    """Ширина плашки длительности — чтобы её можно было ставить слева."""
+    return 14.0 + len(text or '') * 7.0
+
+
+def duration_badge(text, x, y):
+    """Тёмная плашка длительности в углу обложки. x — её ПРАВЫЙ край."""
+    w = badge_w(text)
+    v = ui.View(frame=(x - w, y, w, 22))
+    v.background_color = rgba(BG_DEEP, 0.80)
+    v.corner_radius = 7.0
+    v.user_interaction_enabled = False
+    v.add_subview(make_label(text, (F_BOLD, 11), TEXT_PRIMARY, ui.ALIGN_CENTER,
+                             frame=(0, 0, w, 22)))
+    return v
+
+
+def check_badge(x, y, size=26.0):
+    """Фиолетовый круг с галочкой в углу обложки (эталон, фото 1)."""
+    v = ui.View(frame=(x, y, size, size))
+    v.background_color = ACCENT
+    v.corner_radius = size / 2.0
+    v.border_width = 1
+    v.border_color = rgba(ACCENT_LIGHT, 0.75)
+    v.user_interaction_enabled = False
+    v.add_subview(Icon('check', TEXT_PRIMARY, 2.0,
+                       frame=(size * 0.24, size * 0.24,
+                              size * 0.52, size * 0.52)))
+    return v
+
+
+# Диаметр круглых управляющих кнопок карточки загрузки.
+CTRL_SIZE = 40.0
+JOB_CARD_H = 100.0
+
+
+def job_card(screen, w, y, temp, job):
+    """
+    ЕДИНАЯ карточка загрузки для «Главной» и «Загрузок» — композиция с
+    эталона (фото 2): обложка слева, тексты по центру, две круглые
+    стеклянные кнопки в собственной колонке справа.
+
+    Колонка кнопок фиксированная, и текст под неё не заходит никогда:
+    именно на этом раньше налезали друг на друга процент, статус и
+    крестик. Длинные русские названия обрезаются через safe_name.
+    """
+    h = JOB_CARD_H
+    err = (job is not None and job.status == ST_ERROR)
+    paused = (job is not None and job.status == ST_PAUSED)
+    card = glass_card((PAD, y, w - PAD * 2, h), CARD_RADIUS,
+                      fill_alpha=0.70 if paused else 0.78,
+                      border=DANGER if err else GLASS_BORDER,
+                      border_alpha=0.55 if err else 0.95,
+                      highlight=0.09,
+                      glow=0.22 if err else 0.10,
+                      glow_color=DANGER if err else GLASS_GLOW)
+    cw = card.width
+
+    th_s = 62.0
+    thumb = ThumbView(job_thumb_image(job), frame=(12, (h - th_s) / 2.0,
+                                                   th_s, th_s))
+    thumb.corner_radius = 13
+    thumb.border_width = 1
+    thumb.border_color = rgba(GLASS_BORDER, 0.9)
+    card.add_subview(thumb)
+
+    # Правая колонка кнопок — своя территория, тексты сюда не заходят.
+    ctrl_x = cw - 12.0 - CTRL_SIZE
+    left = 12.0 + th_s + 12.0
+    text_w = max(60.0, ctrl_x - 12.0 - left)
+
+    title = temp.title if temp is not None else job.display_title
+    tl = make_label(safe_name(title, 30), (F_BOLD, 14.5), TEXT_PRIMARY,
+                    frame=(left, 13, text_w, 19))
+    card.add_subview(tl)
+
+    if temp is not None:
+        sub = 'Не завершено  •  ' + fmt_size(temp.size)
+        detail = ''
+        bar_value = temp.progress
+        sub_col = TEXT_MUTED
+        indeterminate = False
+    else:
+        sub, detail = job.sub_line(), job.detail_line()
+        bar_value = job.percent
+        sub_col = DANGER if err else (ACCENT_LIGHT
+                                      if job.status == ST_DOWNLOADING
+                                      else TEXT_SECONDARY)
+        indeterminate = (job.status in (ST_PREPARING, ST_PROCESSING) or
+                         (job.status == ST_DOWNLOADING and bar_value is None))
+        if job.status == ST_FINISHED:
+            bar_value = 1.0
+        elif job.status in (ST_ERROR, ST_CANCELLED) and bar_value is None:
+            bar_value = 0.0
+
+    sl = make_label(sub, (F_REG, 12), sub_col, frame=(left, 33, text_w, 16))
+    card.add_subview(sl)
+
+    bar = ProgressBar(bar_value, frame=(left, 56, text_w, 6))
+    card.add_subview(bar)
+    if indeterminate:
+        # Начальная фаза берётся у общего такта приложения; дальше её
+        # двигает NoxApp._tick, собственного таймера у полосы нет.
+        bar.set_phase(screen.app.indeterminate_phase)
+
+    dl = make_label(detail, (F_REG, 11), DANGER if err else TEXT_MUTED,
+                    lines=2, frame=(left, 68, text_w, 26))
+    card.add_subview(dl)
+
+    if job is not None:
+        toggle, toggle_icon = screen._toggle_button(job, ctrl_x, 9)
+        card.add_subview(toggle)
+        card.add_subview(screen._dismiss_button(job, ctrl_x, 9 + CTRL_SIZE + 3))
+        screen._job_views[job.id] = {'sub': sl, 'detail': dl, 'bar': bar,
+                                     'title': tl, 'toggle': toggle,
+                                     'toggle_icon': toggle_icon}
+    else:
+        card.add_subview(screen._temp_button(temp, ctrl_x,
+                                             (h - CTRL_SIZE) / 2.0))
+    return card
+
+
+def job_thumb_image(job):
+    """Обложка задания, если ExtrasManager её уже положил рядом. Иначе None."""
+    if job is None:
+        return None
+    try:
+        item = LIB.find_by_watch_id(job.video_id) if job.video_id else None
+        if item is not None:
+            return item.load_thumb_image()
+    except Exception:
+        pass
+    return None
+
+
+def play_orb(cx, cy, size=54.0):
+    """Стеклянная круглая кнопка play поверх обложки (эталон, фото 3)."""
+    v = GlassView(radius=size / 2.0, fill=GLASS_BG_STRONG, fill_alpha=0.55,
+                  border=GLASS_HIGHLIGHT, border_alpha=0.45,
+                  highlight=0.20, glow=0.22,
+                  frame=(cx - size / 2.0, cy - size / 2.0, size, size))
+    v.user_interaction_enabled = False
+    s = size * 0.40
+    v.add_subview(Icon('play', TEXT_PRIMARY, 1.9,
+                       frame=(size / 2.0 - s * 0.42, size / 2.0 - s / 2.0,
+                              s, s)))
     return v
 
 
@@ -3103,19 +3598,63 @@ def status_pill(text, icon_name, color, x, y, w=None, h=26.0, bg=None):
 #  НИЖНЯЯ НАВИГАЦИЯ
 # =====================================================================
 
+class ActivePill(ui.View):
+    """
+    Светящаяся капсула активной вкладки. Она ОДНА на всю панель и просто
+    переезжает к нужному сегменту: новых view при переключении не
+    создаётся и не удаляется.
+    """
+
+    def __init__(self, **kwargs):
+        ui.View.__init__(self, **kwargs)
+        self.background_color = 'clear'
+        self.user_interaction_enabled = False
+
+    def draw(self):
+        w, h = self.width, self.height
+        if w <= 0 or h <= 0:
+            return
+        r = min(h / 2.0, 22.0)
+        # ореол вокруг капсулы, внутрь собственных границ
+        for i in range(4):
+            inset = i * 1.4
+            p = ui.Path.rounded_rect(inset, inset, w - inset * 2,
+                                     h - inset * 2, max(1.0, r - inset))
+            p.line_width = 2.4
+            ui.set_color(rgba(ACCENT, 0.16 * (1.0 - i / 4.0)))
+            p.stroke()
+        # тело капсулы: мягкий вертикальный градиент
+        steps = 12
+        bh = h / float(steps)
+        for i in range(steps):
+            t = i / float(steps - 1)
+            ui.set_color(mixa(ACCENT, ACCENT_DEEP, t, 0.92))
+            top = i == 0
+            bot = i == steps - 1
+            if top or bot:
+                ui.Path.rounded_rect(0, i * bh, w, bh + 1.0, r).fill()
+            else:
+                ui.fill_rect(0, i * bh, w, bh + 1.0)
+        # верхний блик
+        ui.set_color(rgba('#ffffff', 0.16))
+        ui.Path.rounded_rect(r * 0.6, 1.0, w - r * 1.2, h * 0.34, r * 0.5).fill()
+        p = ui.Path.rounded_rect(0.6, 0.6, w - 1.2, h - 1.2, r)
+        p.line_width = 1.2
+        ui.set_color(rgba(ACCENT_LIGHT, 0.55))
+        p.stroke()
+
+
 class TabItem(Tappable):
     def __init__(self, title, icon_name, index, on_tap, **kwargs):
-        Tappable.__init__(self, action=self._tapped, press_scale=0.9, **kwargs)
+        Tappable.__init__(self, action=self._tapped, press_scale=0.92, **kwargs)
         self.background_color = 'clear'
         self.index = index
         self.on_tap = on_tap
         self.selected = False
-        self.glow = GlowView(ACCENT, 0.26, 7, frame=(0, 0, 54, 54))
-        self.glow.alpha = 0.0
-        self.add_subview(self.glow)
-        self.icon = Icon(icon_name, TXT_3, 1.7, frame=(0, 0, 24, 24))
+        self.icon = Icon(icon_name, TEXT_MUTED, 1.9, frame=(0, 0, 24, 24))
         self.add_subview(self.icon)
-        self.label = make_label(title, (F_REG, 10.5), TXT_3, ui.ALIGN_CENTER)
+        self.label = make_label(title, (F_REG, 10.5), TEXT_MUTED,
+                                ui.ALIGN_CENTER)
         self.add_subview(self.label)
 
     def _tapped(self, sender):
@@ -3125,47 +3664,71 @@ class TabItem(Tappable):
 
     def layout(self):
         w, h = self.width, self.height
-        self.glow.frame = (w / 2 - 27, 1, 54, 54)
-        self.icon.frame = (w / 2 - 12, 9, 24, 24)
-        self.label.frame = (0, 35, w, 14)
+        self.icon.frame = (w / 2 - 12, h * 0.24 - 4, 24, 24)
+        self.label.frame = (0, h * 0.24 + 22, w, 14)
 
     def set_selected(self, flag):
         if self.selected == flag:
             return
         self.selected = flag
-        col = ACCENT_SOFT if flag else TXT_3
+        col = TEXT_PRIMARY if flag else TEXT_MUTED
         self.icon.set_icon(color=col)
+        self.icon.line = 2.1 if flag else 1.9
         self.label.text_color = col
         self.label.font = (F_BOLD if flag else F_REG, 10.5)
-        animate(lambda: setattr(self.glow, 'alpha', 1.0 if flag else 0.0), 0.22)
 
 
 class TabBar(ui.View):
+    """
+    Плавающая стеклянная панель: не касается краёв экрана и не прижата
+    к самому низу. Единственное место в NOX, где просится настоящий
+    UIVisualEffectView — она висит поверх прокручиваемого контента.
+    """
+
     def __init__(self, on_tap, **kwargs):
         ui.View.__init__(self, **kwargs)
-        self.background_color = NAV_BG
+        self.background_color = 'clear'
         self.items = []
+        self.index = 0
+        self.capsule = GlassView(radius=NAV_HEIGHT / 2.0,
+                                 fill=GLASS_BG, fill_alpha=0.82,
+                                 border=GLASS_BORDER, border_w=1.0,
+                                 highlight=0.09, glow=0.16,
+                                 blur=True,
+                                 frame=(NAV_SIDE, 0, 100, NAV_HEIGHT))
+        self.add_subview(self.capsule)
+        self.pill = ActivePill(frame=(0, 6, 10, NAV_HEIGHT - 12))
+        self.capsule.add_subview(self.pill)
         specs = [('Главная', 'home'), ('Загрузки', 'download'),
                  ('Плеер', 'play_circle'), ('Настройки', 'gear')]
         for i, (title, icon) in enumerate(specs):
             it = TabItem(title, icon, i, on_tap)
-            self.add_subview(it)
+            self.capsule.add_subview(it)
             self.items.append(it)
         self.items[0].set_selected(True)
 
-    def draw(self):
-        ui.set_color(rgba(BORDER_2, 0.55))
-        ui.fill_rect(0, 0, self.width, 1)
+    def _slot(self, index):
+        n = max(1, len(self.items))
+        iw = self.capsule.width / float(n)
+        pw = max(48.0, iw - 10.0)
+        return (index * iw + (iw - pw) / 2.0, 6.0, pw, NAV_HEIGHT - 12.0)
 
     def layout(self):
+        w = max(80.0, self.width - NAV_SIDE * 2)
+        self.capsule.frame = (NAV_SIDE, 0, w, NAV_HEIGHT)
         n = max(1, len(self.items))
-        w = self.width / float(n)
+        iw = w / float(n)
         for i, it in enumerate(self.items):
-            it.frame = (i * w, 4, w, min(52.0, self.height - 6))
+            it.frame = (i * iw, 0, iw, NAV_HEIGHT)
+        self.pill.frame = self._slot(self.index)
 
     def select(self, index):
+        self.index = index
         for i, it in enumerate(self.items):
             it.set_selected(i == index)
+        target = self._slot(index)
+        # Капсула ПЕРЕЕЗЖАЕТ, а не создаётся заново.
+        animate(lambda: setattr(self.pill, 'frame', target), 0.27)
 
 
 # =====================================================================
@@ -3214,46 +3777,44 @@ class Screen(ui.View):
 
     # -- две отдельные кнопки карточки: пауза и удаление ---------------
     @staticmethod
-    def _icon_button(icon_name, color, action, x, y, w=26.0, h=28.0):
+    def _icon_button(icon_name, color, action, x, y, w=CTRL_SIZE,
+                     h=CTRL_SIZE, glow=0.0, border=GLASS_BORDER):
         """
-        Хит-таргет — настоящий прозрачный ui.Button, как у кнопки «Скачать»:
-        собственный touch_ended у Tappable на устройстве до обработчика
-        не доходил. Возвращает (holder, icon), чтобы значок можно было
-        поменять на месте, не пересобирая карточку.
+        Круглая стеклянная кнопка, как на эталоне. Хит-таргет — настоящий
+        прозрачный ui.Button: собственный touch_ended у Tappable на
+        устройстве до обработчика не доходил. Возвращает (holder, icon),
+        чтобы значок менялся на месте, без пересборки карточки.
         """
-        holder = ui.View(frame=(x, y, w, h))
-        holder.background_color = 'clear'
-        icon = Icon(icon_name or 'pause', color, 1.5,
-                    frame=(w / 2 - 7, h / 2 - 7, 14, 14))
-        holder.add_subview(icon)
-        hit = ui.Button(frame=holder.bounds)
-        hit.flex = 'WH'
-        hit.background_color = 'clear'
-        hit.action = action
-        holder.add_subview(hit)
+        holder, icon = glass_circle((x, y, w, h), icon_name or 'pause',
+                                    color, 1.9, w * 0.42, action,
+                                    glow=glow, border=border)
         return holder, icon
 
-    def _toggle_button(self, job, x, y, w=26.0, h=28.0):
+    def _toggle_button(self, job, x, y, w=CTRL_SIZE, h=CTRL_SIZE):
         """⏸ или ▶ — пауза и продолжение, отдельная кнопка от крестика."""
         name = job.action_icon()
-        holder, icon = self._icon_button(name, TXT_2, self._make_toggle(job),
-                                         x, y, w, h)
+        resume = (name == 'play')
+        holder, icon = self._icon_button(
+            name, TEXT_PRIMARY if resume else TEXT_SECONDARY,
+            self._make_toggle(job), x, y, w, h,
+            glow=0.28 if resume else 0.10,
+            border=GLASS_BORDER_ACTIVE if resume else GLASS_BORDER)
         holder.hidden = not name
         return holder, icon
 
-    def _dismiss_button(self, job, x, y, w=26.0, h=28.0):
+    def _dismiss_button(self, job, x, y, w=CTRL_SIZE, h=CTRL_SIZE):
         """× — удалить загрузку полностью вместе с недокачанным файлом."""
-        holder, _ = self._icon_button('close', TXT_3, self._make_dismiss(job),
-                                      x, y, w, h)
+        holder, _ = self._icon_button('close', TEXT_SECONDARY,
+                                      self._make_dismiss(job), x, y, w, h)
         return holder
 
-    def _temp_button(self, temp, x, y, w=26.0, h=28.0):
+    def _temp_button(self, temp, x, y, w=CTRL_SIZE, h=CTRL_SIZE):
         """× у недокачанного файла без карточки: удаляет сам файл."""
         path = getattr(temp, 'path', '')
 
         def _act(sender):
             self.app.delete_temp(path)
-        holder, _ = self._icon_button('close', TXT_3, _act, x, y, w, h)
+        holder, _ = self._icon_button('close', TEXT_SECONDARY, _act, x, y, w, h)
         return holder
 
     def _make_toggle(self, job):
@@ -3328,6 +3889,11 @@ class Screen(ui.View):
                 text = job.sub_line()
             if sub.text != text:
                 sub.text = text
+            # Цвет подписи следует за состоянием: красный только у ошибки.
+            col = DANGER if job.status == ST_ERROR else (
+                ACCENT_LIGHT if job.status == ST_DOWNLOADING else TEXT_SECONDARY)
+            if sub.text_color != col:
+                sub.text_color = col
         detail = row.get('detail')
         if detail is not None:
             text = job.detail_line()
@@ -3452,22 +4018,29 @@ class HomeScreen(Screen):
         y = self._build_library(w, y)
         y = self._build_downloads(w, y)
 
-        y += 20 + self.app.bottom_inset + NAV_H
+        # Плавающая панель навигации не должна накрывать последнюю
+        # карточку: к её высоте добавляются safe area и зазор.
+        y += 28 + self.app.bottom_inset + NAV_HEIGHT
         self.sv.content_size = (0, y)
 
     # ---------------------------------------------------------------
     def _build_search(self, w, y):
-        h = 52.0
-        box = card_view((PAD, y, w - PAD * 2, h), CARD, 15, BORDER)
-        ic = Icon('search', TXT_3, 1.8, frame=(16, h / 2 - 10, 20, 20))
-        box.add_subview(ic)
+        """Большая стеклянная строка поиска и отдельная круглая кнопка."""
+        h = 56.0
+        gap = 12.0
+        btn = h
+        box_w = w - PAD * 2 - btn - gap
+        box = glass_pill((PAD, y, box_w, h), fill=GLASS_BG, fill_alpha=0.76,
+                         highlight=0.12, glow=0.08)
+        box.add_subview(Icon('search', TEXT_MUTED, 2.0,
+                             frame=(20, h / 2 - 11, 22, 22)))
 
-        tf = ui.TextField(frame=(46, 6, box.width - 46 - 52, h - 12))
+        tf = ui.TextField(frame=(52, 7, box_w - 52 - 16, h - 14))
         tf.placeholder = 'Поиск в медиатеке...'
         tf.background_color = 'clear'
-        tf.text_color = TXT
+        tf.text_color = TEXT_PRIMARY
         tf.tint_color = ACCENT
-        tf.font = (F_REG, 15)
+        tf.font = (F_REG, 16)
         tf.bordered = False
         tf.clear_button_mode = 'while_editing'
         tf.autocorrection_type = False
@@ -3475,21 +4048,17 @@ class HomeScreen(Screen):
         self._delegate = SearchDelegate(self._on_query)
         tf.delegate = self._delegate
         box.add_subview(tf)
+        self.sv.add_subview(box)
 
-        # Значок и его место прежние; сверху — прозрачный ui.Button.
         active = (STATE.get('sort', 'new') != 'new'
                   or STATE.get('quality_filter', 'all') != 'all')
-        tune_holder = ui.View(frame=(box.width - 50, h / 2 - 18, 36, 36))
-        tune_holder.background_color = 'clear'
-        tune_holder.add_subview(Icon('tune', ACCENT_2 if active else TXT_2, 1.7,
-                                     frame=(7, 7, 22, 22)))
-        tune_hit = ui.Button(frame=tune_holder.bounds)
-        tune_hit.flex = 'WH'
-        tune_hit.background_color = 'clear'
-        tune_hit.action = self._open_filter_menu
-        tune_holder.add_subview(tune_hit)
-        box.add_subview(tune_holder)
-        self.sv.add_subview(box)
+        circle, _ = glass_circle((w - PAD - btn, y, btn, btn), 'tune',
+                                 ACCENT_LIGHT if active else TEXT_SECONDARY,
+                                 1.9, 24.0, self._open_filter_menu,
+                                 glow=0.26 if active else 0.10,
+                                 border=(GLASS_BORDER_ACTIVE if active
+                                         else GLASS_BORDER))
+        self.sv.add_subview(circle)
         return y + h
 
     # ---------------------------------------------------------------
@@ -3497,71 +4066,83 @@ class HomeScreen(Screen):
         item, watch = self._resume_candidate()
         if item is None:
             return y                       # блок полностью скрыт
-        h = 152.0
-        card = card_view((PAD, y, w - PAD * 2, h), CARD, 18, BORDER_2)
+        h = 166.0
+        card = glass_card((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
+                          fill_alpha=0.74, highlight=0.10, glow=0.14)
         cw = card.width
 
         img = item.load_thumb_image()
         if img is not None:
-            holder = ui.View(frame=(cw * 0.42, 0, cw * 0.58, h))
+            # Обложка занимает правую часть карточки, слева её съедает
+            # тёмный градиент — ровно как на эталоне.
+            iw = cw * 0.56
+            holder = ui.View(frame=(cw - iw, 0, iw, h))
             holder.background_color = 'clear'
-            holder.corner_radius = 18
-            holder.alpha = 0.55
+            holder.corner_radius = GLASS_RADIUS
             holder.user_interaction_enabled = False
-            iv = ui.ImageView(frame=holder.bounds)
+            iv = ui.ImageView(frame=(0, 0, iw, h))
             iv.flex = 'WH'
             iv.content_mode = ui.CONTENT_SCALE_ASPECT_FILL
             iv.image = img
             holder.add_subview(iv)
+            holder.add_subview(FadeOverlay(frame=(0, 0, iw, h)))
             card.add_subview(holder)
-        else:
-            glow = GlowView(ACCENT, 0.13, 9, frame=(cw - 190, -50, 220, 220))
-            card.add_subview(glow)
 
-        pill = status_pill('Скачано', 'check', ACCENT_2, 0, 14, w=96)
-        pill.x = cw - 96 - 14
-        card.add_subview(pill)
+        # Капсула «Продолжить» стоит в правом нижнем углу, поэтому текстовая
+        # колонка обязана заканчиваться левее неё — иначе метаданные лезут
+        # под кнопку на узких экранах.
+        bw, bh = min(168.0, cw * 0.48), 46.0
+        text_w = max(90.0, cw - 16.0 - bw - 26.0)
+        row = Tappable(action=lambda s: self.app.open_media(item),
+                       press_scale=0.99, frame=(14, 14, 190, 30))
+        row.background_color = 'clear'
+        circ = GlassView(radius=15.0, fill=GLASS_BG_STRONG, fill_alpha=0.9,
+                         border=GLASS_BORDER, highlight=0.18, glow=0.24,
+                         frame=(0, 0, 30, 30))
+        circ.add_subview(Icon('play', TEXT_PRIMARY, 1.7, frame=(10, 8, 13, 14)))
+        row.add_subview(circ)
+        row.add_subview(make_label('Продолжить просмотр', (F_REG, 13),
+                                   TEXT_SECONDARY, frame=(38, 0, 152, 30)))
+        card.add_subview(row)
 
-        cap = make_label(spaced('Продолжить просмотр'), (F_REG, 8), TXT_3,
-                         frame=(18, 20, cw - 130, 12))
-        card.add_subview(cap)
-
-        title = make_label(safe_name(item.title, 34), (F_REG, 24), TXT,
-                           frame=(18, 36, cw - 130, 32))
+        title = make_label(safe_name(item.title, 40), (F_BOLD, 19),
+                           TEXT_PRIMARY, lines=2,
+                           frame=(16, 50, text_w, 46))
         card.add_subview(title)
-
-        meta_parts = []
-        left = self._remaining(watch)
-        if left:
-            meta_parts.append('Осталось ' + left)
-        q = item.quality_label
-        if q:
-            meta_parts.append(q)
-        meta_parts.append(fmt_size(item.size))
-        if item.uploader:
-            meta_parts.append(safe_name(item.uploader, 16))
-        meta = make_label('  •  '.join([m for m in meta_parts if m]),
-                          (F_REG, 12), TXT_2, frame=(18, 72, cw - 130, 16))
-        card.add_subview(meta)
 
         # Полоса реальная: доля просмотренного из watch_progress.
         fraction = self._watched_fraction(watch)
         if fraction is not None:
             card.add_subview(ProgressBar(fraction,
-                                         frame=(18, 94, cw * 0.52, 5)))
+                                         frame=(16, 106, text_w, 5)))
 
-        btn = Tappable(action=lambda s: self.app.open_media(item),
-                       frame=(18, h - 56, 168, 40))
-        btn.background_color = 'clear'
-        circ = ui.View(frame=(0, 2, 36, 36))
-        circ.background_color = ACCENT_DEEP
-        circ.corner_radius = 18
-        circ.user_interaction_enabled = False
-        pic = Icon('play', TXT, 1.6, frame=(11, 9, 18, 18))
-        circ.add_subview(pic)
-        btn.add_subview(circ)
-        blb = make_label('Продолжить', (F_BOLD, 15), TXT, frame=(48, 2, 118, 36))
-        btn.add_subview(blb)
+        # Строка метаданных живёт слева от капсулы «Продолжить», поэтому
+        # она короткая. Если известно, сколько осталось, — это важнее
+        # размера файла: размер видно на карточке медиатеки ниже.
+        left_time = self._remaining(watch)
+        if left_time:
+            meta_parts = ['Осталось ' + left_time, item.quality_label]
+        else:
+            meta_parts = [fmt_duration(item.duration) if item.duration else '',
+                          item.quality_label, fmt_size(item.size)]
+        meta = make_label(' • '.join([m for m in meta_parts if m]),
+                          (F_REG, 12.5), TEXT_SECONDARY,
+                          frame=(16, 120, text_w, 18))
+        card.add_subview(meta)
+
+        # Капсула «Продолжить» в правом нижнем углу, как на эталоне.
+        btn = GlassView(radius=bh / 2.0, fill=ACCENT, fill_alpha=0.90,
+                        border=ACCENT_LIGHT, border_alpha=0.55,
+                        highlight=0.20, glow=0.30,
+                        frame=(cw - bw - 14, h - bh - 14, bw, bh))
+        btn.add_subview(Icon('play', TEXT_PRIMARY, 1.9, frame=(26, 15, 17, 17)))
+        btn.add_subview(make_label('Продолжить', (F_BOLD, 16), TEXT_PRIMARY,
+                                   frame=(52, 0, bw - 60, bh)))
+        hit = ui.Button(frame=(0, 0, bw, bh))
+        hit.flex = 'WH'
+        hit.background_color = 'clear'
+        hit.action = lambda s: self.app.open_media(item)
+        btn.add_subview(hit)
         card.add_subview(btn)
 
         self.sv.add_subview(card)
@@ -3641,10 +4222,12 @@ class HomeScreen(Screen):
             self.sv.add_subview(v)
             return y + vh + 22
 
-        card_w = 104.0
-        gap = 10.0
-        thumb_h = 122.0
-        row_h = thumb_h + 8 + 17 + 14 + 6 + 26
+        # Три карточки в ширину экрана, как на эталоне; остальное
+        # уезжает горизонтальной прокруткой.
+        gap = 12.0
+        card_w = max(96.0, (w - PAD * 2 - gap * 2) / 3.0)
+        thumb_h = card_w * 1.16
+        row_h = thumb_h + 10 + 17 + 15 + 8 + 30
 
         row = ui.ScrollView(frame=(0, y, w, row_h))
         row.background_color = 'clear'
@@ -3661,45 +4244,41 @@ class HomeScreen(Screen):
 
     def _library_card(self, item, x, y, cw, thumb_h, total_h):
         c = Tappable(action=lambda s: self.app.open_media(item),
-                     frame=(x, y, cw, total_h))
+                     press_scale=0.985, frame=(x, y, cw, total_h))
         c.background_color = 'clear'
 
         th = ThumbView(item.load_thumb_image(), frame=(0, 0, cw, thumb_h))
-        th.corner_radius = 12
+        th.corner_radius = 16
         th.border_width = 1
-        th.border_color = BORDER
+        th.border_color = rgba(GLASS_BORDER, 0.9)
         c.add_subview(th)
+        c.add_subview(check_badge(cw - 32, 6))
+        dur = fmt_clock(item.duration)
+        if dur:
+            c.add_subview(duration_badge(dur, cw - 6, thumb_h - 28))
 
-        badge = Icon('check_badge', ACCENT, 1.5, frame=(cw - 24, 6, 18, 18))
-        c.add_subview(badge)
-
-        ty = thumb_h + 8
-        t = make_label(safe_name(item.title, 22), (F_BOLD, 11.5), TXT,
-                       frame=(1, ty, cw - 2, 15))
+        ty = thumb_h + 10
+        t = make_label(safe_name(item.title, 18), (F_BOLD, 13), TEXT_PRIMARY,
+                       frame=(1, ty, cw - 2, 17))
         c.add_subview(t)
-
-        m = make_label(item.meta_line or item.fmt_label, (F_REG, 9.5), TXT_3,
-                       frame=(1, ty + 16, cw - 2, 13))
+        m = make_label(item.meta_line or item.fmt_label, (F_REG, 10.5),
+                       TEXT_MUTED, frame=(1, ty + 17, cw - 2, 14))
         c.add_subview(m)
 
-        py = ty + 34
-        pill = ui.View(frame=(0, py, 66, 24))
-        pill.background_color = rgba(ACCENT, 0.12)
-        pill.corner_radius = 12
-        pill.border_width = 1
-        pill.border_color = rgba(ACCENT, 0.30)
+        py = ty + 40
+        pill = glass_pill((0, py, min(84.0, cw - 26), 30),
+                          fill=GLASS_BG_STRONG, fill_alpha=0.85,
+                          border=ACCENT, border_alpha=0.40, highlight=0.14)
         pill.user_interaction_enabled = False
-        pi = Icon('check', ACCENT_2, 1.5, frame=(6, 6, 12, 12))
-        pill.add_subview(pi)
-        pl = make_label('Офлайн', (F_REG, 10), ACCENT_2, frame=(21, 0, 44, 24))
-        pill.add_subview(pl)
+        pill.add_subview(Icon('check', ACCENT_LIGHT, 1.8, frame=(10, 9, 12, 12)))
+        pill.add_subview(make_label('Офлайн', (F_REG, 11), ACCENT_LIGHT,
+                                    frame=(26, 0, pill.width - 30, 30)))
         c.add_subview(pill)
 
         dots = Tappable(action=lambda s: self.app.item_menu(item),
-                        press_scale=0.85, frame=(cw - 22, py, 22, 24))
+                        press_scale=0.85, frame=(cw - 24, py, 24, 30))
         dots.background_color = 'clear'
-        di = Icon('dots', TXT_3, 1.4, frame=(7, 5, 8, 14))
-        dots.add_subview(di)
+        dots.add_subview(Icon('dots', TEXT_MUTED, 1.5, frame=(8, 8, 8, 14)))
         c.add_subview(dots)
         return c
 
@@ -3719,106 +4298,15 @@ class HomeScreen(Screen):
             self.sv.add_subview(v)
             return y + vh
 
-        box = card_view((PAD, y, w - PAD * 2, 0), CARD, 16, BORDER)
-        by = 0.0
         for j in jobs[:4]:
-            r = self._download_row(box.width, by, None, j)
-            box.add_subview(r)
-            by += r.height
+            card = job_card(self, w, y, None, j)
+            self.sv.add_subview(card)
+            y += card.height + 10
         for t in temps[:3]:
-            r = self._download_row(box.width, by, t, None)
-            box.add_subview(r)
-            by += r.height
-        box.height = max(60.0, by)
-        self.sv.add_subview(box)
-        return y + box.height
-
-    def _download_row(self, w, y, temp, job):
-        h = 74.0
-        v = ui.View(frame=(0, y, w, h))
-        v.background_color = 'clear'
-
-        th = ThumbView(None, frame=(12, 12, 48, 50))
-        th.corner_radius = 9
-        th.border_width = 1
-        th.border_color = BORDER
-        v.add_subview(th)
-
-        title = temp.title if temp is not None else job.display_title
-        tl = make_label(safe_name(title, 26), (F_BOLD, 13), TXT,
-                        frame=(70, 14, w - 70 - 118, 17))
-        v.add_subview(tl)
-
-        if temp is not None:
-            # Незавершённый файл прошлого запуска: сейчас он никуда не качается.
-            sub = 'Не завершено  •  ' + fmt_size(temp.size)
-            bar_value = temp.progress
-            st_text, st_icon, st_col = 'Не завершено', 'clock', TXT_2
-            indeterminate = False
-        else:
-            # У компактной строки второй линии нет: пока висит диагностика,
-            # она занимает место обычной подписи и исчезает вместе с ней.
-            sub = job.diag_line() or job.sub_line()
-            bar_value = job.percent
-            st_text = job.short_status()
-            st_col = ERR_TXT if job.status == ST_ERROR else ACCENT_2
-            if job.status == ST_ERROR:
-                st_icon = 'close'
-            elif job.status == ST_FINISHED:
-                st_icon, st_col = 'check', ACCENT_2
-                bar_value = 1.0
-            elif job.status == ST_PAUSED:
-                st_icon, st_col = 'pause', TXT_2
-            elif job.status == ST_DELETING:
-                st_icon, st_col = 'trash', TXT_2
-            elif job.status == ST_NEEDS_RESOLVE:
-                st_icon, st_col = 'refresh', ACCENT_2
-            elif job.status == ST_CANCELLED:
-                st_icon = 'clock'
-                st_col = TXT_2
-            elif job.status == ST_DOWNLOADING and bar_value is not None:
-                st_icon = 'download'
-            else:
-                st_icon = 'ring'
-            indeterminate = (job.status in (ST_PREPARING, ST_PROCESSING) or
-                             (job.status == ST_DOWNLOADING and bar_value is None))
-            if job.status in (ST_ERROR, ST_CANCELLED) and bar_value is None:
-                bar_value = 0.0
-
-        sl = make_label(sub, (F_REG, 10.5),
-                        ERR_TXT if (job is not None and job.status == ST_ERROR)
-                        else TXT_3,
-                        frame=(70, 31, w - 70 - 118, 14))
-        v.add_subview(sl)
-        bar = ProgressBar(bar_value, frame=(70, 50, w - 70 - 118, 5))
-        v.add_subview(bar)
-        if indeterminate:
-            # Начальная фаза берётся у общего такта приложения; дальше её
-            # двигает NoxApp._tick, собственного таймера у полосы нет.
-            bar.set_phase(self.app.indeterminate_phase)
-
-        ic = Icon(st_icon, st_col, 1.6, frame=(w - 112, h / 2 - 10, 20, 20))
-        v.add_subview(ic)
-        st = make_label(st_text, (F_REG, 11), st_col,
-                        frame=(w - 88, h / 2 - 9, 58, 18))
-        v.add_subview(st)
-
-        if job is not None:
-            # Две отдельные кнопки: пауза/продолжение сверху, удаление снизу.
-            toggle, toggle_icon = self._toggle_button(job, w - 30, 8, 26, 28)
-            v.add_subview(toggle)
-            v.add_subview(self._dismiss_button(job, w - 30, 38, 26, 28))
-            self._job_views[job.id] = {'sub': sl, 'bar': bar, 'status': st,
-                                       'title': tl, 'toggle': toggle,
-                                       'toggle_icon': toggle_icon}
-        else:
-            v.add_subview(self._temp_button(temp, w - 30, h / 2 - 14))
-
-        ui_line = ui.View(frame=(70, h - 1, w - 82, 1))
-        ui_line.background_color = rgba(BORDER, 0.7)
-        ui_line.user_interaction_enabled = False
-        v.add_subview(ui_line)
-        return v
+            card = job_card(self, w, y, t, None)
+            self.sv.add_subview(card)
+            y += card.height + 10
+        return y
 
 
 # =====================================================================
@@ -3874,43 +4362,42 @@ class DownloadsScreen(Screen):
         y = self._build_queue(w, y)
         y = self._build_storage(w, y)
 
-        y += 20 + self.app.bottom_inset + NAV_H
+        # Плавающая панель навигации не должна накрывать последнюю
+        # карточку: к её высоте добавляются safe area и зазор.
+        y += 28 + self.app.bottom_inset + NAV_HEIGHT
         self.sv.content_size = (0, y)
 
     # ---------------------------------------------------------------
     def _build_title(self, w, y):
-        t = make_label('Загрузчик', (F_BOLD, 29), TXT, frame=(PAD, y, w - 100, 36))
-        self.sv.add_subview(t)
-        s = make_label('Сохраняйте видео для тишины', (F_REG, 12.5), TXT_3,
-                       frame=(PAD + 1, y + 36, w - 100, 17))
-        self.sv.add_subview(s)
-
-        g = Tappable(action=lambda x: self.app.select_tab(3), press_scale=0.92,
-                     frame=(w - PAD - 46, y + 6, 46, 46))
-        g.background_color = CARD
-        g.corner_radius = 14
-        g.border_width = 1
-        g.border_color = BORDER
-        g.add_subview(Icon('gear', TXT_2, 1.5, frame=(13, 13, 20, 20)))
+        big_title(self.sv, w, y, 'Загрузчик', 'Сохраняйте видео для тишины')
+        # Круглая стеклянная шестерёнка, как на эталоне. Действие прежнее.
+        g, _ = glass_circle((w - PAD - 52, y + 4, 52, 52), 'gear',
+                            TEXT_SECONDARY, 1.8, 24.0,
+                            lambda x: self.app.select_tab(3), glow=0.14)
         self.sv.add_subview(g)
-        return y + 62
+        return y + 70
 
     # ---------------------------------------------------------------
     def _build_url_box(self, w, y):
-        h = 118.0
-        box = card_view((PAD, y, w - PAD * 2, h), CARD, 16, BORDER)
+        h = 132.0
+        box = glass_card((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
+                         fill_alpha=0.72, highlight=0.10, glow=0.12)
         bw = box.width
 
-        field = card_view((14, 14, bw - 28, 52), FIELD, 13, BORDER_2)
-        field.add_subview(Icon('link', TXT_3, 1.6, frame=(14, 16, 20, 20)))
+        fh = 58.0
+        field = GlassView(radius=fh / 2.0, fill=GLASS_BG_DEEP, fill_alpha=0.92,
+                          border=GLASS_BORDER, highlight=0.06,
+                          frame=(14, 14, bw - 28, fh))
+        field.add_subview(Icon('link', TEXT_MUTED, 1.8, frame=(16, 19, 22, 20)))
 
-        paste_w = 90.0
-        tf = ui.TextField(frame=(42, 8, field.width - 42 - paste_w - 16, 36))
+        paste_w = 108.0
+        pbh = 42.0
+        tf = ui.TextField(frame=(46, 11, field.width - 46 - paste_w - 18, 36))
         tf.placeholder = 'Вставьте ссылку на видео...'
         tf.background_color = 'clear'
-        tf.text_color = TXT
+        tf.text_color = TEXT_PRIMARY
         tf.tint_color = ACCENT
-        tf.font = (F_REG, 14)
+        tf.font = (F_REG, 15)
         tf.bordered = False
         tf.autocorrection_type = False
         tf.autocapitalization_type = ui.AUTOCAPITALIZE_NONE
@@ -3921,24 +4408,28 @@ class DownloadsScreen(Screen):
         self._url_field = tf
         field.add_subview(tf)
 
-        pb = Tappable(action=self._paste, press_scale=0.92,
-                      frame=(field.width - paste_w - 8, 8, paste_w, 36))
-        pb.background_color = CARD_3
-        pb.corner_radius = 10
-        pb.border_width = 1
-        pb.border_color = BORDER_2
-        pb.add_subview(Icon('clip', TXT, 1.5, frame=(12, 10, 16, 16)))
-        pb.add_subview(make_label('Вставить', (F_REG, 12.5), TXT,
-                                  frame=(33, 0, paste_w - 36, 36)))
+        # Отдельная стеклянная кнопка «Вставить» внутри поля.
+        pb = GlassView(radius=pbh / 2.0, fill=GLASS_BG_STRONG, fill_alpha=0.95,
+                       border=GLASS_BORDER, highlight=0.18, glow=0.14,
+                       frame=(field.width - paste_w - 8, (fh - pbh) / 2.0,
+                              paste_w, pbh))
+        pb.add_subview(Icon('clip', TEXT_PRIMARY, 1.7, frame=(14, 13, 16, 16)))
+        pb.add_subview(make_label('Вставить', (F_REG, 13.5), TEXT_PRIMARY,
+                                  frame=(36, 0, paste_w - 40, pbh)))
+        phit = ui.Button(frame=(0, 0, paste_w, pbh))
+        phit.flex = 'WH'
+        phit.background_color = 'clear'
+        phit.action = self._paste
+        pb.add_subview(phit)
         field.add_subview(pb)
         box.add_subview(field)
 
-        box.add_subview(Icon('info', TXT_4, 1.5, frame=(15, 80, 15, 15)))
+        box.add_subview(Icon('info', TEXT_FAINT, 1.6, frame=(16, 90, 17, 17)))
         box.add_subview(make_label('Поддерживает VK, YouTube, Vimeo и другие',
-                                   (F_REG, 11.5), TXT_3,
-                                   frame=(38, 78, bw - 50, 18)))
+                                   (F_REG, 12.5), TEXT_MUTED,
+                                   frame=(41, 88, bw - 54, 20)))
         self.sv.add_subview(box)
-        return y + h + 18
+        return y + h + 20
 
     def _paste(self, sender):
         if clipboard is None:
@@ -3957,38 +4448,39 @@ class DownloadsScreen(Screen):
 
     # ---------------------------------------------------------------
     def _build_quality(self, w, y):
-        self.sv.add_subview(make_label('Качество', (F_BOLD, 19), TXT,
-                                       frame=(PAD, y, 160, 26)))
+        self.sv.add_subview(make_label('Качество', (F_BOLD, 23), TEXT_PRIMARY,
+                                       frame=(PAD, y, 180, 30)))
         self.sv.add_subview(make_label('Выше качество — больше файл',
-                                       (F_REG, 10.5), TXT_3, ui.ALIGN_RIGHT,
-                                       frame=(w - PAD - 210, y + 5, 210, 18)))
-        y += 34
+                                       (F_REG, 11.5), TEXT_MUTED,
+                                       ui.ALIGN_RIGHT,
+                                       frame=(w - PAD - 220, y + 8, 220, 18)))
+        y += 40
 
         gap = 10.0
         cw = (w - PAD * 2 - gap * 3) / 4.0
-        ch = 66.0
+        ch = 78.0
         for i, (key, top, bottom) in enumerate(QUALITIES):
             x = PAD + i * (cw + gap)
-            chip = Tappable(action=self._make_pick(key), press_scale=0.94,
-                            frame=(x, y, cw, ch))
-            chip.background_color = CARD
-            chip.corner_radius = 14
-            chip.border_width = 1
-            chip.border_color = BORDER
-            glow = GlowView(ACCENT, 0.30, 7, frame=(-cw * 0.25, -ch * 0.25,
-                                                    cw * 1.5, ch * 1.5))
-            glow.alpha = 0.0
-            chip.add_subview(glow)
-            t = make_label(top, (F_BOLD, 15.5), TXT, ui.ALIGN_CENTER,
-                           frame=(0, 14, cw, 20))
-            chip.add_subview(t)
-            b = make_label(bottom, (F_REG, 10), TXT_3, ui.ALIGN_CENTER,
-                           frame=(0, 36, cw, 14))
-            chip.add_subview(b)
-            self.sv.add_subview(chip)
-            self._chips.append((key, chip, t, b, glow))
+            # Плитка — стекло, а не просто синяя рамка: у активной меняются
+            # и поверхность, и край, и внутреннее свечение.
+            tile = GlassView(radius=16.0, fill=GLASS_BG, fill_alpha=0.78,
+                             border=GLASS_BORDER, highlight=0.10,
+                             frame=(x, y, cw, ch))
+            t = make_label(top, (F_BOLD, 17), TEXT_PRIMARY, ui.ALIGN_CENTER,
+                           frame=(0, 20, cw, 22))
+            tile.add_subview(t)
+            b = make_label(bottom, (F_REG, 10.5), TEXT_MUTED, ui.ALIGN_CENTER,
+                           frame=(0, 44, cw, 14))
+            tile.add_subview(b)
+            hit = ui.Button(frame=(0, 0, cw, ch))
+            hit.flex = 'WH'
+            hit.background_color = 'clear'
+            hit.action = self._make_pick(key)
+            tile.add_subview(hit)
+            self.sv.add_subview(tile)
+            self._chips.append((key, tile, t, b, None))
         self._refresh_chips()
-        return y + ch + 20
+        return y + ch + 22
 
     def _make_pick(self, key):
         def _pick(sender):
@@ -3998,56 +4490,52 @@ class DownloadsScreen(Screen):
         return _pick
 
     def _refresh_chips(self):
-        for key, chip, t, b, glow in self._chips:
+        """Выделение меняет параметры стекла, а не пересобирает плитки."""
+        for key, tile, t, b, _unused in self._chips:
             sel = (key == self.quality)
-            def apply(chip=chip, t=t, b=b, glow=glow, sel=sel):
-                chip.border_color = ACCENT if sel else BORDER
-                chip.border_width = 1.6 if sel else 1.0
-                chip.background_color = '#12142c' if sel else CARD
-                t.text_color = TXT if sel else TXT_2
-                b.text_color = ACCENT_2 if sel else TXT_3
-                glow.alpha = 1.0 if sel else 0.0
-            animate(apply, 0.18)
+            tile.set_active(sel)
+            t.text_color = TEXT_PRIMARY if sel else TEXT_SECONDARY
+            b.text_color = ACCENT_LIGHT if sel else TEXT_MUTED
 
     # ---------------------------------------------------------------
     def _build_button(self, w, y):
-        h = 62.0
-        # Визуал остаётся прежним, но действие снято с Tappable: на устройстве
-        # его touch_ended до обработчика не доходил. Хит-таргетом служит
-        # настоящий прозрачный ui.Button поверх всей кнопки (см. ниже).
+        h = 70.0
+        # Действие снято с Tappable: на устройстве его touch_ended до
+        # обработчика не доходил. Хит-таргет — прозрачный ui.Button.
         btn = Tappable(action=None, press_scale=0.97,
                        frame=(PAD, y, w - PAD * 2, h))
-        btn.background_color = ACCENT_DEEP
-        btn.corner_radius = h / 2.0
-        grad = GradientView(ACCENT_DEEP, ACCENT_2, frame=btn.bounds)
+        btn.background_color = 'clear'
+        bw = btn.width
+        # Градиент deep violet -> electric violet -> lavender blue плюс
+        # верхний блик и мягкое свечение по краю.
+        grad = CTAButtonView(frame=(0, 0, bw, h))
         grad.flex = 'WH'
         btn.add_subview(grad)
-        bw = btn.width
-        btn.add_subview(Icon('download', TXT, 2.0,
-                             frame=(bw / 2 - 78, h / 2 - 13, 26, 26)))
-        btn.add_subview(make_label('Скачать', (F_BOLD, 20), TXT,
-                                   frame=(bw / 2 - 44, 0, 160, h)))
+        btn.add_subview(Icon('download', TEXT_PRIMARY, 2.2,
+                             frame=(bw / 2 - 84, h / 2 - 14, 28, 28)))
+        btn.add_subview(make_label('Скачать', (F_BOLD, 22), TEXT_PRIMARY,
+                                   frame=(bw / 2 - 46, 0, 180, h)))
         self._dl_button = btn
 
-        hit = ui.Button(frame=btn.bounds)
+        hit = ui.Button(frame=(0, 0, bw, h))
         hit.flex = 'WH'
         hit.background_color = 'clear'
         hit.action = self._download
         btn.add_subview(hit)
 
         self.sv.add_subview(btn)
-        y += h + 10
+        y += h + 12
         if ytdlp_ready():
             note = 'Для больших загрузок не закрывайте и не сворачивайте NOX.'
-            note_col = TXT_4
+            note_col = TEXT_MUTED
         else:
             note = (YTDLP_ERROR or 'Модуль yt-dlp не найден') + \
                    '  •  положите папку yt_dlp рядом с NOX.py'
-            note_col = ERR_TXT
-        self.sv.add_subview(make_label(note, (F_REG, 10.5), note_col,
-                                       ui.ALIGN_CENTER,
-                                       frame=(PAD, y, w - PAD * 2, 16)))
-        return y + 26
+            note_col = DANGER
+        self.sv.add_subview(make_label(note, (F_REG, 11.5), note_col,
+                                       ui.ALIGN_CENTER, lines=2,
+                                       frame=(PAD, y, w - PAD * 2, 32)))
+        return y + 42
 
     def _pulse_download_button(self):
         """Прежняя press-анимация 0.97 -> 1.0: касание теперь ловит ui.Button."""
@@ -4097,12 +4585,14 @@ class DownloadsScreen(Screen):
         jobs = DOWNLOADER.visible_jobs()
         temps = LIB.orphan_temps(DOWNLOADER.managed_paths())
         count = len(temps) + len(jobs)
-        self.sv.add_subview(make_label('Очередь загрузок', (F_BOLD, 19), TXT,
-                                       frame=(PAD, y, w - 140, 26)))
+        self.sv.add_subview(make_label('Очередь загрузок', (F_BOLD, 23),
+                                       TEXT_PRIMARY,
+                                       frame=(PAD, y, w - 140, 30)))
         right = ('%d элем.' % count) if count else 'Пусто'
-        self.sv.add_subview(make_label(right, (F_REG, 12), TXT_3, ui.ALIGN_RIGHT,
-                                       frame=(w - PAD - 120, y + 5, 120, 18)))
-        y += 36
+        self.sv.add_subview(make_label(right, (F_REG, 12.5), TEXT_MUTED,
+                                       ui.ALIGN_RIGHT,
+                                       frame=(w - PAD - 120, y + 8, 120, 18)))
+        y += 42
 
         if not count:
             v, vh = empty_block(w, y, 'Очередь пуста',
@@ -4121,139 +4611,59 @@ class DownloadsScreen(Screen):
         return y + 10
 
     def _queue_card(self, w, y, temp, job):
-        h = 86.0
-        c = card_view((PAD, y, w - PAD * 2, h), CARD, 14, BORDER)
-        cw = c.width
-
-        th = ThumbView(None, frame=(10, 12, 62, 62))
-        th.corner_radius = 10
-        th.border_width = 1
-        th.border_color = BORDER
-        c.add_subview(th)
-
-        left = 82.0
-        right_w = 120.0
-        title = temp.title if temp is not None else job.display_title
-        tl = make_label(safe_name(title, 24), (F_BOLD, 14), TXT,
-                        frame=(left, 14, cw - left - right_w, 18))
-        c.add_subview(tl)
-
-        if temp is not None:
-            # Файл прошлого запуска: NOX его сейчас не качает и не притворяется.
-            sub, detail = 'Не завершено  •  ' + fmt_size(temp.size), ''
-            bar_value = temp.progress
-            indeterminate = False
-            st_text, st_icon, st_col = 'Не завершено', 'clock', TXT_2
-            sub_col = TXT_3
-        else:
-            sub, detail = job.sub_line(), job.detail_line()
-            bar_value = job.percent
-            st_text = job.short_status()
-            if job.status == ST_ERROR:
-                st_icon, st_col, sub_col = 'close', ERR_TXT, ERR_TXT
-            elif job.status == ST_FINISHED:
-                st_icon, st_col, sub_col = 'check', ACCENT_2, ACCENT_2
-                bar_value = 1.0
-            elif job.status == ST_PAUSED:
-                st_icon, st_col, sub_col = 'pause', TXT_2, TXT_3
-            elif job.status == ST_DELETING:
-                st_icon, st_col, sub_col = 'trash', TXT_2, TXT_3
-            elif job.status == ST_NEEDS_RESOLVE:
-                st_icon, st_col, sub_col = 'refresh', ACCENT_2, TXT_3
-            elif job.status == ST_CANCELLED:
-                st_icon, st_col, sub_col = 'clock', TXT_2, TXT_3
-            elif job.status == ST_DOWNLOADING and bar_value is not None:
-                st_icon, st_col, sub_col = 'download', ACCENT_2, TXT_3
-            else:
-                st_icon, st_col, sub_col = 'ring', ACCENT_2, TXT_3
-            indeterminate = (job.status in (ST_PREPARING, ST_PROCESSING) or
-                             (job.status == ST_DOWNLOADING and bar_value is None))
-            if job.status in (ST_ERROR, ST_CANCELLED) and bar_value is None:
-                bar_value = 0.0
-
-        sl = make_label(sub, (F_REG, 11), sub_col,
-                        frame=(left, 33, cw - left - right_w, 15))
-        c.add_subview(sl)
-        bar = ProgressBar(bar_value, frame=(left, 56, cw - left - 16, 5))
-        c.add_subview(bar)
-        if indeterminate:
-            # Начальная фаза берётся у общего такта приложения; дальше её
-            # двигает NoxApp._tick, собственного таймера у полосы нет.
-            bar.set_phase(self.app.indeterminate_phase)
-        # Вторая строка занимает уже существовавшее пустое место под полосой,
-        # ни один элемент карточки не сдвинут. Две строки нужны техническому
-        # тексту ошибки — обычные подписи в одну строку выглядят как прежде.
-        dl = make_label(detail, (F_REG, 9.5),
-                        ERR_TXT if (job is not None and job.status == ST_ERROR)
-                        else TXT_4, lines=2,
-                        frame=(left, 61, cw - left - 16, 24))
-        c.add_subview(dl)
-
-        st = make_label(st_text, (F_REG, 12), st_col,
-                        frame=(cw - 118, 24, 76, 20))
-        c.add_subview(Icon(st_icon, st_col, 1.6, frame=(cw - 142, 24, 20, 20)))
-        c.add_subview(st)
-
-        if job is not None:
-            # Пауза и удаление — разные кнопки. Высота карточки прежняя.
-            toggle, toggle_icon = self._toggle_button(job, cw - 34, 10, 26, 26)
-            c.add_subview(toggle)
-            c.add_subview(self._dismiss_button(job, cw - 34, 46, 26, 26))
-            self._job_views[job.id] = {'sub': sl, 'detail': dl, 'bar': bar,
-                                       'status': st, 'title': tl,
-                                       'toggle': toggle,
-                                       'toggle_icon': toggle_icon}
-        else:
-            c.add_subview(self._temp_button(temp, cw - 34, 30, 26, 26))
-        return c
+        """Та же карточка, что и на «Главной»: одна композиция на всё NOX."""
+        return job_card(self, w, y, temp, job)
 
     # ---------------------------------------------------------------
     def _build_storage(self, w, y):
-        h = 96.0
-        c = Tappable(action=lambda s: self.app.select_tab(3), press_scale=0.985,
-                     frame=(PAD, y, w - PAD * 2, h))
-        c.background_color = CARD
-        c.corner_radius = 16
-        c.border_width = 1
-        c.border_color = BORDER
+        h = 108.0
+        c = glass_card((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
+                       fill_alpha=0.74, highlight=0.10, glow=0.10)
         cw = c.width
 
-        box = ui.View(frame=(14, 20, 48, 48))
-        box.background_color = rgba(ACCENT, 0.12)
-        box.corner_radius = 12
-        box.user_interaction_enabled = False
-        box.add_subview(Icon('drive', ACCENT_2, 1.7, frame=(12, 12, 24, 24)))
+        box = GlassView(radius=15.0, fill=GLASS_BG_STRONG, fill_alpha=0.9,
+                        border=GLASS_BORDER, highlight=0.16, glow=0.22,
+                        frame=(14, 22, 54, 54))
+        box.add_subview(Icon('drive', ACCENT_LIGHT, 1.9, frame=(14, 14, 26, 26)))
         c.add_subview(box)
 
         total, free = LIB.disk()
         used = LIB.used_bytes()
+        left = 82.0
+        right_w = 132.0
 
-        c.add_subview(make_label('Офлайн-хранилище', (F_BOLD, 15), TXT,
-                                 frame=(74, 20, cw - 74 - 120, 20)))
+        c.add_subview(make_label('Офлайн-хранилище', (F_BOLD, 16.5),
+                                 TEXT_PRIMARY,
+                                 frame=(left, 24, cw - left - right_w, 22)))
         if total:
             sub = '%s из %s занято' % (fmt_size(used), fmt_size(total))
         else:
             sub = '%s в медиатеке' % fmt_size(used)
-        c.add_subview(make_label(sub, (F_REG, 11.5), TXT_3,
-                                 frame=(74, 40, cw - 74 - 120, 16)))
+        c.add_subview(make_label(sub, (F_REG, 12), TEXT_MUTED,
+                                 frame=(left, 46, cw - left - right_w, 17)))
 
         if total and free is not None:
-            c.add_subview(make_label(fmt_size(free), (F_BOLD, 17), TXT,
+            c.add_subview(make_label(fmt_size(free), (F_BOLD, 19),
+                                     TEXT_PRIMARY, ui.ALIGN_RIGHT,
+                                     frame=(cw - right_w - 6, 24, right_w, 24)))
+            c.add_subview(make_label('Свободно', (F_REG, 11), TEXT_MUTED,
                                      ui.ALIGN_RIGHT,
-                                     frame=(cw - 138, 22, 116, 22)))
-            c.add_subview(make_label('Свободно', (F_REG, 10.5), TXT_3,
-                                     ui.ALIGN_RIGHT,
-                                     frame=(cw - 138, 44, 116, 15)))
-            c.add_subview(Icon('chevron', TXT_3, 1.5, frame=(cw - 20, 38, 12, 14)))
+                                     frame=(cw - right_w - 6, 48, right_w, 16)))
+            c.add_subview(Icon('chevron', TEXT_MUTED, 1.6,
+                               frame=(cw - 22, 40, 13, 15)))
             ratio = 0.0
             if total > 0:
                 ratio = max(0.0, min(1.0, (total - free) / total))
-            bar = ProgressBar(ratio, frame=(74, 66, cw - 90, 5))
-            c.add_subview(bar)
+            c.add_subview(ProgressBar(ratio, frame=(left, 76, cw - left - 16, 6)))
         else:
-            c.add_subview(make_label('Объём тома недоступен', (F_REG, 11),
-                                     TXT_4, ui.ALIGN_RIGHT,
-                                     frame=(cw - 160, 34, 146, 18)))
+            c.add_subview(make_label('Объём тома недоступен', (F_REG, 11.5),
+                                     TEXT_FAINT, ui.ALIGN_RIGHT,
+                                     frame=(cw - 170, 40, 156, 18)))
+        hit = ui.Button(frame=(0, 0, cw, h))
+        hit.flex = 'WH'
+        hit.background_color = 'clear'
+        hit.action = lambda s: self.app.select_tab(3)
+        c.add_subview(hit)
         self.sv.add_subview(c)
         return y + h
 
@@ -4272,12 +4682,7 @@ class PlayerScreen(Screen):
         head, hh = build_header(w, y)
         self.sv.add_subview(head)
         y += hh + 12
-
-        self.sv.add_subview(make_label('Плеер', (F_BOLD, 29), TXT,
-                                       frame=(PAD, y, w - 80, 36)))
-        self.sv.add_subview(make_label('Только локальные файлы', (F_REG, 12.5),
-                                       TXT_3, frame=(PAD + 1, y + 36, w - 80, 17)))
-        y += 68
+        y = big_title(self.sv, w, y, 'Плеер', 'Только локальные файлы') + 6
 
         items = LIB.items
         if LIB.error:
@@ -4291,53 +4696,111 @@ class PlayerScreen(Screen):
             self.sv.add_subview(v)
             y += vh
         else:
-            for item in items:
+            # Первое видео — крупной карточкой, как на эталоне (фото 3).
+            hero = self._featured(w, y, items[0])
+            self.sv.add_subview(hero)
+            y += hero.height + 12
+            for item in items[1:]:
                 row = self._row(w, y, item)
                 self.sv.add_subview(row)
                 y += row.height + 10
 
-        y += 20 + self.app.bottom_inset + NAV_H
+        # Плавающая панель навигации не должна накрывать последнюю
+        # карточку: к её высоте добавляются safe area и зазор.
+        y += 28 + self.app.bottom_inset + NAV_HEIGHT
         self.sv.content_size = (0, y)
 
-    def _row(self, w, y, item):
-        h = 92.0
-        c = Tappable(action=lambda s: self.app.open_media(item),
-                     press_scale=0.985, frame=(PAD, y, w - PAD * 2, h))
-        c.background_color = CARD
-        c.corner_radius = 14
-        c.border_width = 1
-        c.border_color = BORDER
-        cw = c.width
+    def _featured(self, w, y, item):
+        """Большая карточка: обложка, круглый play, метаданные под ней."""
+        cw = w - PAD * 2
+        th_h = cw * 0.56
+        h = th_h + 92.0
+        c = glass_card((PAD, y, cw, h), GLASS_RADIUS, fill_alpha=0.74,
+                       highlight=0.10, glow=0.14)
 
-        th = ThumbView(item.load_thumb_image(), frame=(10, 10, 112, 72))
-        th.corner_radius = 10
+        th = ThumbView(item.load_thumb_image(), frame=(8, 8, cw - 16, th_h))
+        th.corner_radius = 15
         th.border_width = 1
-        th.border_color = BORDER
+        th.border_color = rgba(GLASS_BORDER, 0.9)
         c.add_subview(th)
+        c.add_subview(play_orb(cw / 2.0, 8 + th_h / 2.0, 74.0))
+        dur = fmt_clock(item.duration)
+        if dur:
+            # Плашка всегда НИЖЕ круга play: они не пересекаются ни при
+            # какой длительности и ни на какой ширине экрана.
+            c.add_subview(duration_badge(dur, cw - 20, 8 + th_h - 28))
 
-        ov = ui.View(frame=(52, 34, 28, 28))
-        ov.background_color = rgba('#000000', 0.45)
-        ov.corner_radius = 14
-        ov.user_interaction_enabled = False
-        ov.add_subview(Icon('play', TXT, 1.4, frame=(9, 7, 14, 14)))
-        c.add_subview(ov)
+        ty = th_h + 20
+        right = 44.0
+        c.add_subview(make_label(safe_name(item.title, 34), (F_BOLD, 17),
+                                 TEXT_PRIMARY,
+                                 frame=(16, ty, cw - 16 - right, 22)))
+        c.add_subview(make_label(item.meta_line or item.fmt_label,
+                                 (F_REG, 12.5), TEXT_SECONDARY,
+                                 frame=(16, ty + 23, cw - 16 - right, 17)))
+        tail = item.uploader or ''
+        if tail:
+            c.add_subview(make_label(safe_name(tail, 30), (F_REG, 11.5),
+                                     TEXT_FAINT,
+                                     frame=(16, ty + 42, cw - 16 - right, 16)))
 
-        left = 132.0
-        c.add_subview(make_label(safe_name(item.title, 30), (F_BOLD, 14.5), TXT,
-                                 frame=(left, 16, cw - left - 40, 19)))
-        c.add_subview(make_label(item.meta_line, (F_REG, 11.5), TXT_2,
-                                 frame=(left, 37, cw - left - 40, 16)))
-        tail = item.uploader or item.fmt_label
-        c.add_subview(make_label(safe_name(tail, 26), (F_REG, 10.5), TXT_4,
-                                 frame=(left, 55, cw - left - 40, 15)))
+        hit = ui.Button(frame=(8, 8, cw - 16, th_h))
+        hit.background_color = 'clear'
+        hit.action = lambda s: self.app.open_media(item)
+        c.add_subview(hit)
 
         dots = Tappable(action=lambda s: self.app.item_menu(item),
-                        press_scale=0.85, frame=(cw - 34, h / 2 - 16, 30, 32))
+                        press_scale=0.85, frame=(cw - 38, ty - 2, 30, 34))
         dots.background_color = 'clear'
-        dots.add_subview(Icon('dots', TXT_3, 1.4, frame=(11, 8, 8, 16)))
+        dots.add_subview(Icon('dots', TEXT_MUTED, 1.5, frame=(11, 9, 8, 16)))
         c.add_subview(dots)
         return c
 
+    def _row(self, w, y, item):
+        h = 108.0
+        c = Tappable(action=lambda s: self.app.open_media(item),
+                     press_scale=0.985, frame=(PAD, y, w - PAD * 2, h))
+        c.background_color = 'clear'
+        cw = c.width
+        c.add_subview(glass_card((0, 0, cw, h), CARD_RADIUS, fill_alpha=0.74,
+                                 highlight=0.09, glow=0.08))
+
+        tw, th_h, orb = 138.0, 88.0, 34.0
+        ty = (h - th_h) / 2.0
+        th = ThumbView(item.load_thumb_image(), frame=(10, ty, tw, th_h))
+        th.corner_radius = 13
+        th.border_width = 1
+        th.border_color = rgba(GLASS_BORDER, 0.9)
+        c.add_subview(th)
+        c.add_subview(play_orb(10 + tw / 2.0, h / 2.0, orb))
+        dur = fmt_clock(item.duration)
+        if dur:
+            # Как на эталоне — в левом нижнем углу обложки. Плашка живёт
+            # строго ниже круга play (тот занимает ty+(th_h-orb)/2 ..
+            # ty+(th_h+orb)/2), поэтому пересечься они не могут.
+            c.add_subview(duration_badge(dur, 10 + 6 + badge_w(dur),
+                                         ty + th_h - 26))
+
+        left = 10.0 + tw + 14.0
+        right = 40.0
+        tw_text = max(50.0, cw - left - right)
+        c.add_subview(make_label(safe_name(item.title, 26), (F_BOLD, 15),
+                                 TEXT_PRIMARY, frame=(left, 24, tw_text, 20)))
+        c.add_subview(make_label(item.meta_line or item.fmt_label,
+                                 (F_REG, 12), TEXT_SECONDARY,
+                                 frame=(left, 46, tw_text, 17)))
+        tail = item.uploader or ''
+        if tail:
+            c.add_subview(make_label(safe_name(tail, 24), (F_REG, 11),
+                                     TEXT_FAINT,
+                                     frame=(left, 65, tw_text, 16)))
+
+        dots = Tappable(action=lambda s: self.app.item_menu(item),
+                        press_scale=0.85, frame=(cw - 36, h / 2 - 17, 30, 34))
+        dots.background_color = 'clear'
+        dots.add_subview(Icon('dots', TEXT_MUTED, 1.5, frame=(11, 9, 8, 16)))
+        c.add_subview(dots)
+        return c
 
 # =====================================================================
 #  ЭКРАН 4 — НАСТРОЙКИ
@@ -4379,12 +4842,8 @@ class SettingsScreen(Screen):
         self.sv.add_subview(head)
         y += hh + 12
 
-        self.sv.add_subview(make_label('Настройки', (F_BOLD, 29), TXT,
-                                       frame=(PAD, y, w - 80, 36)))
-        self.sv.add_subview(make_label('Общая папка и параметры загрузки',
-                                       (F_REG, 12.5), TXT_3,
-                                       frame=(PAD + 1, y + 36, w - 60, 17)))
-        y += 70
+        y = big_title(self.sv, w, y, 'Настройки',
+                      'Общая папка и параметры загрузки') + 8
 
         y = self._quality_block(w, y)
         y = self._folder_block(w, y)
@@ -4392,39 +4851,62 @@ class SettingsScreen(Screen):
         y = self._setup_block(w, y)
         y = self._about_block(w, y)
 
-        y += 20 + self.app.bottom_inset + NAV_H
+        # Плавающая панель навигации не должна накрывать последнюю
+        # карточку: к её высоте добавляются safe area и зазор.
+        y += 28 + self.app.bottom_inset + NAV_HEIGHT
         self.sv.content_size = (0, y)
 
     # ---------------------------------------------------------------
     def _card(self, w, y, h, title):
-        c = card_view((PAD, y, w - PAD * 2, h), CARD, 16, BORDER)
-        c.add_subview(make_label(title, (F_BOLD, 15), TXT,
-                                 frame=(16, 14, c.width - 32, 20)))
+        """Раздел настроек — такая же стеклянная группа, как карточки."""
+        c = glass_card((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
+                       fill_alpha=0.72, highlight=0.09, glow=0.08)
+        c.add_subview(make_label(title, (F_BOLD, 16.5), TEXT_PRIMARY,
+                                 frame=(16, 14, c.width - 32, 22)))
         return c
 
+    def _row_button(self, cw, y, h, icon, title, action):
+        """Строка-действие внутри раздела: стекло плюс прозрачный ui.Button."""
+        b = GlassView(radius=13.0, fill=GLASS_BG_STRONG, fill_alpha=0.9,
+                      border=GLASS_BORDER, highlight=0.14, glow=0.10,
+                      frame=(16, y, cw - 32, h))
+        b.add_subview(Icon(icon, ACCENT_LIGHT, 1.7,
+                           frame=(15, h / 2.0 - 9, 18, 18)))
+        b.add_subview(make_label(title, (F_REG, 14), TEXT_PRIMARY,
+                                 frame=(42, 0, cw - 74, h)))
+        hit = ui.Button(frame=(0, 0, cw - 32, h))
+        hit.flex = 'WH'
+        hit.background_color = 'clear'
+        hit.action = action
+        b.add_subview(hit)
+        return b
+
     def _quality_block(self, w, y):
-        h = 116.0
+        h = 132.0
         c = self._card(w, y, h, 'Качество по умолчанию')
         cw = c.width
         gap = 8.0
         chw = (cw - 32 - gap * 3) / 4.0
         cur = STATE.get('quality', '720')
         for i, (key, top, bottom) in enumerate(QUALITIES):
-            chip = Tappable(action=self._make_pick(key), press_scale=0.94,
-                            frame=(16 + i * (chw + gap), 48, chw, 52))
-            chip.background_color = '#12142c' if key == cur else CARD_2
-            chip.corner_radius = 12
-            chip.border_width = 1.6 if key == cur else 1.0
-            chip.border_color = ACCENT if key == cur else BORDER
-            t = make_label(top, (F_BOLD, 14), TXT if key == cur else TXT_2,
-                           ui.ALIGN_CENTER, frame=(0, 10, chw, 18))
-            chip.add_subview(t)
-            b = make_label(bottom, (F_REG, 9.5),
-                           ACCENT_2 if key == cur else TXT_3,
-                           ui.ALIGN_CENTER, frame=(0, 28, chw, 14))
-            chip.add_subview(b)
-            c.add_subview(chip)
-            self._chips.append(chip)
+            # Ровно та же плитка, что на экране «Загрузки».
+            sel = (key == cur)
+            tile = GlassView(radius=14.0, frame=(16 + i * (chw + gap), 48,
+                                                 chw, 62))
+            tile.set_active(sel)
+            tile.add_subview(make_label(top, (F_BOLD, 15),
+                                        TEXT_PRIMARY if sel else TEXT_SECONDARY,
+                                        ui.ALIGN_CENTER, frame=(0, 14, chw, 20)))
+            tile.add_subview(make_label(bottom, (F_REG, 10),
+                                        ACCENT_LIGHT if sel else TEXT_MUTED,
+                                        ui.ALIGN_CENTER, frame=(0, 34, chw, 14)))
+            hit = ui.Button(frame=(0, 0, chw, 62))
+            hit.flex = 'WH'
+            hit.background_color = 'clear'
+            hit.action = self._make_pick(key)
+            tile.add_subview(hit)
+            c.add_subview(tile)
+            self._chips.append(tile)
         self.sv.add_subview(c)
         return y + h + 14
 
@@ -4437,7 +4919,7 @@ class SettingsScreen(Screen):
 
     # ---------------------------------------------------------------
     def _folder_block(self, w, y):
-        h = 194.0
+        h = 208.0
         c = self._card(w, y, h, 'Папка медиатеки')
         cw = c.width
 
@@ -4464,8 +4946,8 @@ class SettingsScreen(Screen):
                                  frame=(16, 151, cw - 150, 18)))
         c.add_subview(make_label('Пакет yt_dlp лежит рядом с NOX.py — '
                                  'загрузка идёт внутри приложения',
-                                 (F_REG, 10), TXT_4, lines=2,
-                                 frame=(16, 170, cw - 32, 16)))
+                                 (F_REG, 10.5), TEXT_FAINT, lines=2,
+                                 frame=(16, 172, cw - 32, 30)))
         c.add_subview(status_pill('Готов' if ready else 'Нет модуля',
                                   'check' if ready else 'close',
                                   ACCENT_2 if ready else ERR_TXT,
@@ -4475,7 +4957,7 @@ class SettingsScreen(Screen):
 
     # ---------------------------------------------------------------
     def _storage_block(self, w, y):
-        h = 150.0
+        h = 176.0
         c = self._card(w, y, h, 'Хранилище')
         cw = c.width
         total, free = LIB.disk()
@@ -4486,7 +4968,7 @@ class SettingsScreen(Screen):
             ('Занято медиатекой', fmt_size(used)),
             ('Свободно на устройстве', fmt_size(free) if free else '—'),
         ]
-        ry = 42.0
+        ry = 46.0
         for name, value in rows:
             c.add_subview(make_label(name, (F_REG, 12.5), TXT_2,
                                      frame=(16, ry, cw - 150, 18)))
@@ -4494,16 +4976,8 @@ class SettingsScreen(Screen):
                                      frame=(cw - 150, ry, 134, 18)))
             ry += 24
 
-        rb = Tappable(action=self._refresh, press_scale=0.95,
-                      frame=(16, h - 46, cw - 32, 34))
-        rb.background_color = CARD_3
-        rb.corner_radius = 11
-        rb.border_width = 1
-        rb.border_color = BORDER_2
-        rb.add_subview(Icon('refresh', ACCENT_2, 1.6, frame=(14, 9, 16, 16)))
-        rb.add_subview(make_label('Обновить медиатеку', (F_REG, 13), TXT,
-                                  frame=(38, 0, cw - 70, 34)))
-        c.add_subview(rb)
+        c.add_subview(self._row_button(cw, h - 52, 40, 'refresh',
+                                       'Обновить медиатеку', self._refresh))
         self.sv.add_subview(c)
         return y + h + 14
 
@@ -4517,22 +4991,15 @@ class SettingsScreen(Screen):
         body_w = w - PAD * 2 - 32
         lines = SETUP_TEXT.count('\n') + 1
         body_h = lines * 16.0 + 46
-        h = 44 + body_h + 58
+        h = 44 + body_h + 64
         c = self._card(w, y, h, 'Разовая настройка')
         cw = c.width
         c.add_subview(make_label(SETUP_TEXT, (F_REG, 11), TXT_2, lines=0,
                                  frame=(16, 40, body_w, body_h)))
 
-        cb = Tappable(action=self._copy_setup, press_scale=0.95,
-                      frame=(16, h - 46, cw - 32, 34))
-        cb.background_color = CARD_3
-        cb.corner_radius = 11
-        cb.border_width = 1
-        cb.border_color = BORDER_2
-        cb.add_subview(Icon('clip', ACCENT_2, 1.5, frame=(14, 9, 16, 16)))
-        cb.add_subview(make_label('Скопировать инструкцию', (F_REG, 13), TXT,
-                                  frame=(38, 0, cw - 70, 34)))
-        c.add_subview(cb)
+        c.add_subview(self._row_button(cw, h - 52, 40, 'clip',
+                                       'Скопировать инструкцию',
+                                       self._copy_setup))
         self.sv.add_subview(c)
         return y + h + 14
 
@@ -4643,16 +5110,31 @@ class NoxApp(ui.View):
         self.tabbar.frame = (0, self.height - nav_total, self.width, nav_total)
 
     def draw(self):
-        # мягкая подсветка сверху, как на референсах
+        """
+        Многослойный фон: вертикальный градиент плюс два очень слабых
+        размытых пятна света. Рисуется один раз на изменение размера,
+        такт обновления загрузок его не трогает.
+        """
         w, h = self.width, self.height
-        if w <= 0:
+        if w <= 0 or h <= 0:
             return
-        steps = 22
-        band = h * 0.42 / steps
+        steps = 26
+        band = h / float(steps)
         for i in range(steps):
             t = i / float(steps - 1)
-            ui.set_color(rgba('#131a3a', 0.30 * (1.0 - t)))
+            # сверху холоднее и светлее, к низу уходит в почти чёрный
+            ui.set_color(mix(BG_TOP, BG_DEEP, t ** 0.75))
             ui.fill_rect(0, i * band, w, band + 1.0)
+        # Рассеянный свет: круги с очень малой альфой, без текстуры и шума.
+        for cx, cy, rad, a in ((w * 0.16, h * 0.05, w * 0.95, 0.13),
+                               (w * 0.95, h * 0.30, w * 0.80, 0.07),
+                               (w * 0.50, h * 0.97, w * 0.85, 0.09)):
+            rings = 9
+            for i in range(rings, 0, -1):
+                t = i / float(rings)
+                r = rad * t
+                ui.set_color(rgba(BG_GLOW, a * (1.0 - t) ** 2.0))
+                ui.Path.oval(cx - r, cy - r, r * 2, r * 2).fill()
 
     # ---------------------------------------------------------------
     def select_tab(self, index):

@@ -811,7 +811,9 @@ class DownloadJob(object):
             return ''
         if elapsed <= DIAG_AFTER:
             return ''
-        alive = 'alive' if DOWNLOADER.worker_alive() else 'dead'
+        # Состояние потока ИМЕННО этого задания: при трёх параллельных
+        # загрузках общий ответ ничего не говорит про эту карточку.
+        alive = 'alive' if DOWNLOADER.worker_alive(self.id) else 'dead'
         return 'Диагностика: %s · %.1f c · worker %s' % (
             self.debug_stage, elapsed, alive)
 
@@ -880,6 +882,9 @@ class DownloadManager(object):
         # ТОЛЬКО живым HTTP-потоком конкретного задания, а не статусом
         # задания: приостановленные и ошибочные слот не держат.
         self._workers = {}
+        # Последний сбой заполнения очереди, если он вообще был. Строка,
+        # а не запись в файл: pump() зовут и рабочие потоки.
+        self.pump_error = ''
 
     def mark_dirty(self):
         self.dirty += 1
@@ -972,12 +977,27 @@ class DownloadManager(object):
             self._workers.pop(job_id, None)
 
     def queue_position(self, job):
-        """Какой по счёту в очереди ожидания. 0 — не ждёт."""
+        """
+        Какой по счёту в очереди ожидания. 0 — не ждёт.
+
+        Реестр снимается ОДИН раз: строку рисует главный поток для каждой
+        карточки, и брать замок на каждое задание значило бы толкаться с
+        рабочими потоками на каждом такте.
+        """
         if job.status != ST_QUEUED_DOWNLOAD:
             return 0
+        with self._lock:
+            running = set()
+            for job_id, t in self._workers.items():
+                try:
+                    if t is not None and t.is_alive():
+                        running.add(job_id)
+                except Exception:
+                    continue
+            jobs = list(self.jobs)
         n = 0
-        for j in self.all_jobs():
-            if j.status == ST_QUEUED_DOWNLOAD and not self.worker_alive(j.id):
+        for j in jobs:
+            if j.status == ST_QUEUED_DOWNLOAD and j.id not in running:
                 n += 1
                 if j.id == job.id:
                     return n
@@ -1047,6 +1067,9 @@ class DownloadManager(object):
             self.revision += 1
         self.tick += 1
         self.mark_dirty()
+        # Слот мог освободиться прямо сейчас — следующее задание из
+        # очереди обязано стартовать немедленно, а не ждать чужого события.
+        self.pump()
         return True
 
     def resume(self, job_id):
@@ -1079,6 +1102,9 @@ class DownloadManager(object):
             self.revision += 1
         self.tick += 1
         self.mark_dirty()
+        # Соседей это не трогает: их потоки продолжают качать свои файлы.
+        # Само задание уходит за свежей ссылкой и встаёт в общую очередь.
+        self.pump()
         return True
 
     @staticmethod
@@ -1137,12 +1163,14 @@ class DownloadManager(object):
             with self._lock:
                 self.revision += 1
             self.tick += 1
+            # Слот этого задания освободит его собственный поток, когда
+            # закроет файл; очередь тронется там же, в его finally.
             return True
         # Ни один поток этот файл не держит — удаляем прямо сейчас.
         self._remove_part(job)
         self._drop_job(job_id)
         self.tick += 1
-        self._pump()
+        self.pump()
         return True
 
     def clear_finished(self):
@@ -1353,10 +1381,51 @@ class DownloadManager(object):
         with self._lock:
             self.revision += 1
         self.tick += 1
-        self._pump()
+        self.pump()
         return True
 
     # -- рабочий поток: только HTTP --------------------------------
+    def pump(self):
+        """
+        Занять все свободные слоты. Единственная публичная точка входа.
+
+        Наружу отсюда не уходит НИ ОДНО исключение: сорванный запуск
+        одного задания не имеет права остановить очередь целиком. Вызов
+        дешёвый и идемпотентный, поэтому его делает и каждое изменение
+        очереди, и единственный периодический такт интерфейса — так
+        освободившийся слот занимается независимо от того, кто именно его
+        освободил.
+        """
+        try:
+            self._pump()
+        except Exception as e:
+            # Причину запоминаем строкой, а не пишем в файл: pump()
+            # вызывают и рабочие потоки, а log_debug — только главный.
+            self.pump_error = 'pump: %r' % (e,)
+
+    def _next_queued(self, skip):
+        """
+        Первое задание очереди, которое можно запустить прямо сейчас.
+        FIFO по порядку добавления. Только под _lock.
+        """
+        for j in self.jobs:
+            if j.id in skip:
+                continue
+            if j.status != ST_QUEUED_DOWNLOAD:
+                continue
+            if j.cancel_requested or j.pause_requested \
+                    or j.delete_requested:
+                continue
+            if j.id in self._workers:
+                continue
+            if self._path_busy(j):
+                # Два задания не должны писать в один и тот же .part:
+                # второе ждёт, пока первое освободит файл. Остальным
+                # заданиям это ожидание не мешает — цикл идёт дальше.
+                continue
+            return j
+        return None
+
     def _pump(self):
         """
         Заполняет ВСЕ свободные слоты, а не один.
@@ -1366,34 +1435,40 @@ class DownloadManager(object):
         задания: приостановленные, упавшие и ждущие разбора ссылки слот
         не держат. yt-dlp здесь по-прежнему не вызывается — поток
         получает уже готовый resolved_url.
+
+        Регистрация в реестре и старт потока идут под одним и тем же
+        _lock: иначе между ними успел бы вклиниться _reap_workers, увидеть
+        ещё не запущенный поток мёртвым и отдать тот же слот второй раз.
         """
         started = []
+        skip = set()
         with self._lock:
             self._reap_workers()
             free = MAX_CONCURRENT_DOWNLOADS - len(self._workers)
             while free > 0:
-                nxt = None
-                for j in self.jobs:
-                    if j.status != ST_QUEUED_DOWNLOAD:
-                        continue
-                    if j.cancel_requested or j.pause_requested \
-                            or j.delete_requested:
-                        continue
-                    if j.id in self._workers:
-                        continue
-                    if self._path_busy(j):
-                        # Два задания не должны писать в один и тот же
-                        # .part: второе ждёт, пока первое освободит файл.
-                        continue
-                    nxt = j
-                    break
+                nxt = self._next_queued(skip)
                 if nxt is None:
                     break
                 nxt.set_stage('before-thread-create')
                 t = threading.Thread(target=self._run, args=(nxt,),
                                      name='nox-download', daemon=True)
                 self._workers[nxt.id] = t
-                t.start()
+                try:
+                    t.start()
+                except Exception as e:
+                    # Поток не создался — на iOS такое бывает под нехваткой
+                    # памяти. Слот при этом НЕ занят: снимаем регистрацию,
+                    # задание остаётся в очереди и поедет на следующем
+                    # такте. Остальные свободные слоты заполняем дальше —
+                    # раньше исключение выходило наружу и вся очередь
+                    # вставала до следующего разбора ссылки.
+                    self._workers.pop(nxt.id, None)
+                    nxt.set_stage('thread-start-failed')
+                    detail = 'thread: %r' % (e,)
+                    nxt.debug_error = ((nxt.debug_error + ' | ' + detail)
+                                       if nxt.debug_error else detail)
+                    skip.add(nxt.id)
+                    continue
                 started.append(nxt)
                 free -= 1
         for job in started:
@@ -1542,11 +1617,10 @@ class DownloadManager(object):
                 self._workers.pop(job.id, None)
             self.tick += 1
             self.mark_dirty()
-            try:
-                self._pump()
-            except Exception as e:
-                job.debug_error = (job.debug_error + ' | ') if job.debug_error else ''
-                job.debug_error += 'pump: %r' % (e,)
+            # Слот освобождён — следующее задание стартует отсюда же.
+            # Ошибка этого задания на очередь не влияет: pump() исключения
+            # наружу не выпускает.
+            self.pump()
 
     @staticmethod
     def _verify_size(job, part):

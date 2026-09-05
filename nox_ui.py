@@ -3963,6 +3963,10 @@ class NoxApp(ui.View):
                 # этот же единственный такт.
                 step = UI_REFRESH
                 PLAYER.tick()
+            # Свободный слот занимается на том же такте, кто бы его ни
+            # освободил. Своего таймера у очереди нет и не появляется:
+            # три загрузки по-прежнему обслуживает один этот цикл.
+            DOWNLOADER.pump()
             self._resolve_pending()
             self._persist_jobs()
             self._persist_debug()
@@ -4045,6 +4049,10 @@ class NoxApp(ui.View):
         Метаданные и обложка ставятся в очередь только для уже finished
         задания и стартуют, лишь когда поток загрузки мёртв. Всё это —
         решения главного потока, сам ExtrasManager к UI не обращается.
+
+        Ждём именно ЖИВЫЕ HTTP-потоки, а не «активные задания»: иначе
+        одно задание, стоящее в очереди за свободным слотом, откладывало
+        бы обложку и метаданные бесконечно.
         """
         if not ENABLE_EXTRAS:
             return
@@ -4055,7 +4063,7 @@ class NoxApp(ui.View):
                 if job.extras_status != EXTRAS_NONE:
                     continue
                 EXTRAS.enqueue(job)
-            EXTRAS.pump(bool(active_downloads))
+            EXTRAS.pump(DOWNLOADER.live_workers() > 0)
             if EXTRAS.tick != self._last_extras_tick:
                 self._last_extras_tick = EXTRAS.tick
                 if not EXTRAS.busy() and not EXTRAS.pending():

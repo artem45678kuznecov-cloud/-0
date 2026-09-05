@@ -14,9 +14,15 @@ NOX - офлайн-медиатека для iPhone (Pythonista 3).
         -> общая папка NoxMedia
         -> NOX видит файлы напрямую
 
-Общая папка: ~/Documents/NoxMedia внутри Pythonista.
-Эта папка видна в приложении Files ("На iPhone" -> "Pythonista 3" -> NoxMedia)
-и один раз выдаётся a-Shell командой pickFolder (закладка NoxMedia).
+Все пути считаются от самого NOX.py, никаких путей контейнера в коде нет:
+
+    Файлы -> На iPhone -> NOX          <- PROJECT_DIR (папка с NOX.py)
+        NOX.py
+        NOX_icon.png                   <- необязательно
+        NoxMedia/                      <- медиатека (одна для NOX и a-Shell)
+        NOX_Data/state.json            <- настройки и состояние
+
+a-Shell получает доступ к той же самой NoxMedia один раз командой pickFolder.
 
 Инструкция по разовой настройке - на вкладке "Настройки" внутри приложения.
 """
@@ -133,19 +139,50 @@ def redraw(view):
         pass
 
 
+def _noop():
+    """Пустой callable для completion-блока ui.animate."""
+    pass
+
+
 def animate(func, duration=0.2, delay=0.0, completion=None):
-    try:
-        ui.animate(func, duration, delay, completion)
-    except Exception:
+    """
+    Безопасная обёртка над ui.animate.
+
+    ПРИЧИНА БАГА 'NoneType' object is not callable:
+    раньше сюда передавался completion=None, и это None уходило
+    четвёртым позиционным аргументом в ui.animate(). UIKit вызывает
+    completion-блок ПОСЛЕ окончания анимации, уже вне нашего try/except,
+    и вызов None() падал отдельным traceback'ом на каждое нажатие.
+
+    Теперь в ui.animate всегда уходит настоящий callable, а сам ui.animate
+    вызывается только с той сигнатурой, которую поддерживает устройство.
+    """
+    if not callable(func):
+        return
+    cb = completion if callable(completion) else _noop
+    variants = (
+        lambda: ui.animate(func, duration, delay, cb),
+        lambda: ui.animate(func, duration, delay),
+        lambda: ui.animate(func, duration),
+    )
+    for variant in variants:
         try:
-            func()
+            variant()
+            return
+        except TypeError:
+            continue
+        except Exception:
+            break
+    # Анимация недоступна — применяем изменение мгновенно.
+    try:
+        func()
+    except Exception:
+        pass
+    if callable(completion):
+        try:
+            completion()
         except Exception:
             pass
-        if completion:
-            try:
-                completion()
-            except Exception:
-                pass
 
 
 def spaced(text, gap=' '):
@@ -289,8 +326,8 @@ class Icon(ui.View):
         if s <= 1:
             return
         n = self.icon_name
-        fn = getattr(self, '_i_' + n, None)
-        if fn is None:
+        fn = getattr(self, '_i_' + str(n), None)
+        if not callable(fn):
             fn = self._i_film
         try:
             fn(s, ox, oy)
@@ -479,11 +516,15 @@ class Tappable(ui.View):
         sx, sy = self._start
         if abs(x - sx) > 12 or abs(y - sy) > 12:
             return
-        if 0 <= x <= self.width and 0 <= y <= self.height and self.action:
-            try:
-                self.action(self)
-            except Exception as e:
-                nox_error(str(e))
+        if not (0 <= x <= self.width and 0 <= y <= self.height):
+            return
+        handler = self.action
+        if not callable(handler):
+            return                      # кнопка без обработчика молчит
+        try:
+            handler(self)
+        except Exception as e:
+            nox_error(str(e))
 
 
 class GradientView(ui.View):
@@ -673,9 +714,51 @@ class ThumbView(ui.View):
 #  СОСТОЯНИЕ / ХРАНИЛИЩЕ
 # =====================================================================
 
-DOCS = os.path.expanduser('~/Documents')
-STATE_PATH = os.path.join(DOCS, '.nox_state.json')
-DEFAULT_MEDIA = os.path.join(DOCS, 'NoxMedia')
+def _project_dir():
+    """
+    Папка проекта = папка, в которой лежит сам NOX.py.
+
+    При открытии NOX.py из «Файлы → На iPhone → NOX» через External Files
+    Pythonista это папка NOX, поэтому NoxMedia и NOX_Data оказываются
+    ровно рядом со скриптом. Никаких путей AppGroup в коде нет.
+    """
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        pass
+    try:
+        argv0 = sys.argv[0]
+        if argv0:
+            return os.path.dirname(os.path.abspath(argv0))
+    except Exception:
+        pass
+    return os.path.abspath(os.getcwd())
+
+
+PROJECT_DIR = _project_dir()
+MEDIA_DIR = os.path.join(PROJECT_DIR, 'NoxMedia')
+DATA_DIR = os.path.join(PROJECT_DIR, 'NOX_Data')
+ICON_PATH = os.path.join(PROJECT_DIR, 'NOX_icon.png')
+STATE_PATH = os.path.join(DATA_DIR, 'state.json')
+JOB_PATH = os.path.join(DATA_DIR, 'nox_job.json')
+LEGACY_STATE = os.path.join(os.path.expanduser('~/Documents'), '.nox_state.json')
+
+# Показываем пользователю понятный путь, а не контейнер приложения.
+MEDIA_LABEL = 'На iPhone / %s / NoxMedia' % os.path.basename(PROJECT_DIR)
+
+
+def ensure_dirs():
+    """Создаёт NoxMedia и NOX_Data рядом с NOX.py. True, если обе на месте."""
+    ok = True
+    for path in (MEDIA_DIR, DATA_DIR):
+        try:
+            os.makedirs(path, exist_ok=True)
+        except Exception:
+            ok = False
+        if not os.path.isdir(path):
+            ok = False
+    return ok
+
 
 _LAST_ERROR = {'text': '', 'time': 0.0}
 
@@ -700,7 +783,6 @@ class State(object):
     def __init__(self):
         self.data = {
             'quality': '720',
-            'folder': DEFAULT_MEDIA,
             'bookmark': 'NoxMedia',
             'use_shortcut': True,
             'last_opened': None,
@@ -709,18 +791,20 @@ class State(object):
         self.load()
 
     def load(self):
+        ensure_dirs()
+        source = STATE_PATH if os.path.exists(STATE_PATH) else LEGACY_STATE
         try:
-            if os.path.exists(STATE_PATH):
-                with io.open(STATE_PATH, 'r', encoding='utf-8') as f:
+            if os.path.exists(source):
+                with io.open(source, 'r', encoding='utf-8') as f:
                     raw = json.load(f)
                 if isinstance(raw, dict):
+                    raw.pop('folder', None)      # путь больше не настраивается
                     self.data.update(raw)
         except Exception:
             pass
-        if not self.data.get('folder'):
-            self.data['folder'] = DEFAULT_MEDIA
 
     def save(self):
+        ensure_dirs()
         try:
             tmp = STATE_PATH + '.tmp'
             with io.open(tmp, 'w', encoding='utf-8') as f:
@@ -741,16 +825,11 @@ class State(object):
 
     @property
     def folder(self):
-        return self.data.get('folder') or DEFAULT_MEDIA
+        """Медиатека всегда одна: PROJECT_DIR/NoxMedia рядом с NOX.py."""
+        return MEDIA_DIR
 
     def ensure_folder(self):
-        path = self.folder
-        try:
-            if not os.path.isdir(path):
-                os.makedirs(path)
-            return True
-        except Exception:
-            return False
+        return ensure_dirs()
 
     # --- последний открытый файл ---
     def remember_opened(self, path):
@@ -1008,7 +1087,7 @@ class Library(object):
         """(total, free) реального тома или (None, None)."""
         try:
             u = shutil.disk_usage(self.state.folder if os.path.isdir(self.state.folder)
-                                  else DOCS)
+                                  else PROJECT_DIR)
             return float(u.total), float(u.free)
         except Exception:
             return None, None
@@ -1065,12 +1144,12 @@ def build_command(url, quality, bookmark):
 
 
 def write_job_file(url, quality, folder):
-    """Дублируем задание в файл — на случай ручного запуска."""
+    """Дублируем задание в NOX_Data — на случай ручного запуска."""
     try:
+        ensure_dirs()
         payload = {'url': url, 'quality': quality, 'folder': folder,
                    'created': time.time()}
-        p = os.path.join(folder, '.nox_job.json')
-        with io.open(p, 'w', encoding='utf-8') as f:
+        with io.open(JOB_PATH, 'w', encoding='utf-8') as f:
             f.write(json.dumps(payload, ensure_ascii=False, indent=1))
     except Exception:
         pass
@@ -1115,6 +1194,34 @@ def start_download(url, quality):
 #  ОБЩИЕ БЛОКИ ИНТЕРФЕЙСА
 # =====================================================================
 
+_ICON_CACHE = {'loaded': False, 'image': None}
+
+
+def load_project_icon():
+    """
+    NOX_icon.png рядом с NOX.py, если пользователь его положил.
+    Файла нет — возвращаем None, интерфейс просто рисует шар как раньше.
+    Никаких подставных иконок не создаётся.
+    """
+    if _ICON_CACHE['loaded']:
+        return _ICON_CACHE['image']
+    _ICON_CACHE['loaded'] = True
+    img = None
+    if os.path.isfile(ICON_PATH):
+        try:
+            img = ui.Image.named(ICON_PATH)
+        except Exception:
+            img = None
+        if img is None:
+            try:
+                with io.open(ICON_PATH, 'rb') as f:
+                    img = ui.Image.from_data(f.read())
+            except Exception:
+                img = None
+    _ICON_CACHE['image'] = img
+    return img
+
+
 def build_header(width, y=0.0):
     """Шапка NOX + статус справа. Возвращает (view, height)."""
     h = 58.0
@@ -1134,8 +1241,21 @@ def build_header(width, y=0.0):
     right_w = orb_size + 10 + txt_w
     ox = width - PAD - right_w
 
-    orb = OrbView(frame=(ox, (h - orb_size) / 2 - 2, orb_size, orb_size))
-    v.add_subview(orb)
+    orb_frame = (ox, (h - orb_size) / 2 - 2, orb_size, orb_size)
+    icon_img = load_project_icon()
+    if icon_img is not None:
+        holder = ui.View(frame=orb_frame)
+        holder.background_color = 'clear'
+        holder.corner_radius = orb_size / 2.0
+        holder.user_interaction_enabled = False
+        iv = ui.ImageView(frame=(0, 0, orb_size, orb_size))
+        iv.flex = 'WH'
+        iv.content_mode = ui.CONTENT_SCALE_ASPECT_FILL
+        iv.image = icon_img
+        holder.add_subview(iv)
+        v.add_subview(holder)
+    else:
+        v.add_subview(OrbView(frame=orb_frame))
 
     t1 = make_label('Рады видеть', (F_REG, 9.5), TXT_3, ui.ALIGN_RIGHT,
                     frame=(ox + orb_size + 10, 11, txt_w, 12))
@@ -1152,7 +1272,7 @@ def section_header(width, y, title, right_text=None, right_action=None):
     v.background_color = 'clear'
     lb = make_label(title, (F_BOLD, 21), TXT, frame=(PAD, 0, width - PAD * 2 - 90, h))
     v.add_subview(lb)
-    if right_text:
+    if right_text and callable(right_action):
         btn_w = 74.0
         b = Tappable(action=right_action, press_scale=0.93,
                      frame=(width - PAD - btn_w, 0, btn_w, h))
@@ -1220,8 +1340,9 @@ class TabItem(Tappable):
         self.add_subview(self.label)
 
     def _tapped(self, sender):
-        if self.on_tap:
-            self.on_tap(self.index)
+        handler = self.on_tap
+        if callable(handler):
+            handler(self.index)
 
     def layout(self):
         w, h = self.width, self.height
@@ -1275,6 +1396,7 @@ class TabBar(ui.View):
 class Screen(ui.View):
     _ready = False
     _built_w = -1.0
+    _building = False
     app = None
     sv = None
 
@@ -1289,6 +1411,7 @@ class Screen(ui.View):
         self.sv.shows_vertical_scroll_indicator = False
         self.add_subview(self.sv)
         self._built_w = -1.0
+        self._building = False
         self._ready = True
 
     def layout(self):
@@ -1296,7 +1419,6 @@ class Screen(ui.View):
             return
         self.sv.frame = self.bounds
         if self.width > 40 and abs(self.width - self._built_w) > 0.5:
-            self._built_w = self.width
             self.rebuild()
 
     def clear(self):
@@ -1304,6 +1426,25 @@ class Screen(ui.View):
             self.sv.remove_subview(v)
 
     def rebuild(self):
+        """Перестроение атомарно: сначала очистка, потом сборка."""
+        if self._building or not self._ready:
+            return
+        if self.width <= 40:
+            return
+        self._building = True
+        try:
+            self.clear()
+            self.build()
+            self._built_w = self.width
+        except Exception as e:
+            self.clear()
+            self._built_w = -1.0
+            nox_error(str(e))
+        finally:
+            self._building = False
+
+    def build(self):
+        """Наполнение экрана. Переопределяется наследниками."""
         pass
 
     def on_show(self):
@@ -1319,8 +1460,11 @@ class SearchDelegate(object):
         self.cb = cb
 
     def textfield_did_change(self, textfield):
+        handler = self.cb
+        if not callable(handler):
+            return
         try:
-            self.cb(textfield.text or '')
+            handler(textfield.text or '')
         except Exception:
             pass
 
@@ -1346,12 +1490,9 @@ class HomeScreen(Screen):
         self.rebuild()
 
     # ---------------------------------------------------------------
-    def rebuild(self):
+    def build(self):
         w = self.width
-        if w < 40:
-            return
         LIB.scan()
-        self.clear()
         y = 6.0
 
         head, hh = build_header(w, y)
@@ -1675,12 +1816,9 @@ class DownloadsScreen(Screen):
         self._delegate = None
         Screen.__init__(self, app, **kwargs)
 
-    def rebuild(self):
+    def build(self):
         w = self.width
-        if w < 40:
-            return
         LIB.scan()
-        self.clear()
         self._chips = []
         y = 6.0
 
@@ -2013,12 +2151,9 @@ class DownloadsScreen(Screen):
 # =====================================================================
 
 class PlayerScreen(Screen):
-    def rebuild(self):
+    def build(self):
         w = self.width
-        if w < 40:
-            return
         LIB.scan()
-        self.clear()
         y = 6.0
 
         head, hh = build_header(w, y)
@@ -2096,19 +2231,23 @@ class PlayerScreen(Screen):
 # =====================================================================
 
 SETUP_TEXT = (
-    '1.  В NOX уже создана общая папка:\n'
-    '     Файлы → На iPhone → Pythonista 3 → NoxMedia\n\n'
+    '1.  NOX сам создал рядом с NOX.py две папки:\n'
+    '     Файлы → На iPhone → NOX → NoxMedia\n'
+    '     Файлы → На iPhone → NOX → NOX_Data\n\n'
     '2.  Откройте a-Shell и выполните:  pickFolder\n'
-    '     Выберите ту самую папку NoxMedia и нажмите «Открыть».\n'
+    '     Выберите именно На iPhone → NOX → NoxMedia\n'
+    '     и нажмите «Открыть».\n'
     '     Проверьте имя закладки командой:  showmarks\n'
-    '     Если имя другое — впишите его ниже в поле «Закладка a-Shell».\n\n'
+    '     Если имя другое — впишите его в поле «Закладка a-Shell».\n\n'
     '3.  Создайте Ярлык (приложение «Быстрые команды»):\n'
     '     • Новый ярлык, имя ровно:  NOX Download\n'
     '     • Добавьте одно действие приложения a-Shell — «Execute Command»\n'
     '       («Выполнить команду»).\n'
     '     • В поле команды вставьте переменную «Вход ярлыка»\n'
     '       (Shortcut Input) и сохраните.\n\n'
-    '4.  Готово. Кнопка «Скачать» передаёт команду в a-Shell.\n'
+    '4.  Уже скачанное ранее видео перенесите в NOX → NoxMedia\n'
+    '     вместе с его .info.json и нажмите «Обновить медиатеку».\n\n'
+    '5.  Готово. Кнопка «Скачать» передаёт команду в a-Shell.\n'
     '     Команда также всегда копируется в буфер обмена —\n'
     '     её можно вставить в a-Shell вручную.'
 )
@@ -2121,12 +2260,9 @@ class SettingsScreen(Screen):
         self._chips = []
         Screen.__init__(self, app, **kwargs)
 
-    def rebuild(self):
+    def build(self):
         w = self.width
-        if w < 40:
-            return
         LIB.scan()
-        self.clear()
         self._chips = []
         y = 6.0
 
@@ -2192,35 +2328,32 @@ class SettingsScreen(Screen):
 
     # ---------------------------------------------------------------
     def _folder_block(self, w, y):
-        h = 186.0
-        c = self._card(w, y, h, 'Общая папка')
+        h = 194.0
+        c = self._card(w, y, h, 'Папка медиатеки')
         cw = c.width
 
-        c.add_subview(make_label(STATE.folder, (F_REG, 11), TXT_2, lines=2,
-                                 frame=(16, 38, cw - 32, 32)))
-        exists = os.path.isdir(STATE.folder)
+        c.add_subview(make_label(MEDIA_LABEL, (F_BOLD, 13), TXT,
+                                 frame=(16, 40, cw - 32, 20)))
+        c.add_subview(make_label('Рядом с NOX.py — одна папка для NOX и a-Shell',
+                                 (F_REG, 10.5), TXT_3, lines=2,
+                                 frame=(16, 60, cw - 32, 28)))
+        exists = os.path.isdir(MEDIA_DIR)
         c.add_subview(status_pill('Доступна' if exists else 'Недоступна',
                                   'check' if exists else 'close',
                                   ACCENT_2 if exists else '#ff6b81',
-                                  16, 74, w=104))
-
-        chb = Tappable(action=self._change_folder, press_scale=0.94,
-                       frame=(cw - 16 - 108, 74, 108, 30))
-        chb.background_color = CARD_3
-        chb.corner_radius = 10
-        chb.border_width = 1
-        chb.border_color = BORDER_2
-        chb.add_subview(make_label('Изменить путь', (F_REG, 11.5), TXT,
-                                   ui.ALIGN_CENTER, frame=(0, 0, 108, 30)))
-        c.add_subview(chb)
+                                  16, 92, w=104))
 
         c.add_subview(make_label('Закладка a-Shell', (F_REG, 12.5), TXT_2,
-                                 frame=(16, 118, cw - 150, 18)))
+                                 frame=(16, 132, cw - 150, 18)))
         c.add_subview(make_label(STATE.get('bookmark', 'NoxMedia'),
                                  (F_BOLD, 12.5), ACCENT_2,
-                                 frame=(16, 137, cw - 150, 18)))
+                                 frame=(16, 151, cw - 150, 18)))
+        # Проверить bookmark из Pythonista невозможно — статус не выдумываем.
+        c.add_subview(make_label('Настраивается один раз через a-Shell → pickFolder',
+                                 (F_REG, 10), TXT_4, lines=2,
+                                 frame=(16, 170, cw - 32, 16)))
         bmb = Tappable(action=self._change_bookmark, press_scale=0.94,
-                       frame=(cw - 16 - 108, 124, 108, 30))
+                       frame=(cw - 16 - 108, 138, 108, 30))
         bmb.background_color = CARD_3
         bmb.corner_radius = 10
         bmb.border_width = 1
@@ -2230,29 +2363,6 @@ class SettingsScreen(Screen):
         c.add_subview(bmb)
         self.sv.add_subview(c)
         return y + h + 14
-
-    @ui.in_background
-    def _change_folder(self, sender):
-        try:
-            new = console.input_alert('Общая папка',
-                                      'Полный путь к папке NoxMedia',
-                                      STATE.folder, 'Сохранить')
-        except KeyboardInterrupt:
-            return
-        except Exception:
-            return
-        new = (new or '').strip()
-        if not new:
-            return
-        new = os.path.expanduser(new)
-        try:
-            if not os.path.isdir(new):
-                os.makedirs(new)
-        except Exception:
-            nox_error('Папка NOX недоступна')
-            return
-        STATE.set('folder', new)
-        self.app.reload_all()
 
     @ui.in_background
     def _change_bookmark(self, sender):
@@ -2292,7 +2402,7 @@ class SettingsScreen(Screen):
                                      frame=(cw - 150, ry, 134, 18)))
             ry += 24
 
-        rb = Tappable(action=lambda s: self.app.reload_all(), press_scale=0.95,
+        rb = Tappable(action=self._refresh, press_scale=0.95,
                       frame=(16, h - 46, cw - 32, 34))
         rb.background_color = CARD_3
         rb.corner_radius = 11
@@ -2304,6 +2414,11 @@ class SettingsScreen(Screen):
         c.add_subview(rb)
         self.sv.add_subview(c)
         return y + h + 14
+
+    def _refresh(self, sender):
+        """Пересканировать NoxMedia и обновить все четыре экрана."""
+        self.app.reload_all()
+        nox_ok('Найдено файлов: %d' % len(LIB.items))
 
     # ---------------------------------------------------------------
     def _setup_block(self, w, y):
@@ -2334,7 +2449,7 @@ class SettingsScreen(Screen):
             nox_error('Буфер обмена недоступен')
             return
         try:
-            clipboard.set(SETUP_TEXT + '\n\nПапка: ' + STATE.folder)
+            clipboard.set(SETUP_TEXT + '\n\nПапка медиатеки: ' + MEDIA_DIR)
             nox_ok('Скопировано')
         except Exception:
             nox_error('Не удалось скопировать')
@@ -2408,8 +2523,14 @@ class NoxApp(ui.View):
         nav_total = NAV_H + self.bottom_inset
         self.body.frame = (0, self.top_inset, self.width,
                            max(50.0, self.height - self.top_inset))
+        # Каждый экран получает размер независимо: сбой перестроения одного
+        # экрана не должен оставлять остальные с дефолтным кадром 100x100
+        # (именно так на скриншоте узкая «Загрузки» легла поверх «Главной»).
         for s in self.screens:
-            s.frame = self.body.bounds
+            try:
+                s.frame = self.body.bounds
+            except Exception as e:
+                nox_error(str(e))
         self.tabbar.frame = (0, self.height - nav_total, self.width, nav_total)
 
     def draw(self):
@@ -2426,25 +2547,42 @@ class NoxApp(ui.View):
 
     # ---------------------------------------------------------------
     def select_tab(self, index):
+        try:
+            index = int(index)
+        except Exception:
+            return
+        if not (0 <= index < len(self.screens)):
+            return
         if index == self._tab:
             self.screens[index].rebuild()
             return
-        old = self.screens[self._tab]
-        new = self.screens[index]
         self._tab = index
         self.tabbar.select(index)
+        new = self.screens[index]
+        # Видимость выставляется синхронно и не зависит от completion-блока
+        # анимации: раньше старый экран прятался только в completion, и когда
+        # тот падал, экран оставался на виду поверх нового.
+        for i, s in enumerate(self.screens):
+            if i == index:
+                continue
+            s.alpha = 0.0
+            s.hidden = True
         new.hidden = False
         new.alpha = 0.0
         new.on_show()
         animate(lambda: setattr(new, 'alpha', 1.0), 0.22)
 
-        def hide_old():
-            old.hidden = True
-        animate(lambda: setattr(old, 'alpha', 0.0), 0.16, 0.0, hide_old)
-
     def reload_all(self):
+        """«Обновить медиатеку»: пересканировать папку и перестроить всё."""
+        ensure_dirs()
+        try:
+            LIB.scan()
+        except Exception as e:
+            nox_error(str(e))
         for s in self.screens:
             try:
+                if self.body.width > 40:
+                    s.frame = self.body.bounds
                 s.rebuild()
             except Exception as e:
                 nox_error(str(e))

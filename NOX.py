@@ -2517,6 +2517,10 @@ class DirectUrlExpired(Exception):
     """Прямая ссылка перестала работать. Обычное исключение, не yt-dlp."""
     pass
 
+# Сколько видео реально качается ОДНОВРЕМЕННО. Очередь при этом не
+# ограничена: остальные задания ждут свободного слота.
+MAX_CONCURRENT_DOWNLOADS = 3
+
 # Параметры прямой HTTP-загрузки.
 HTTP_CHUNK = 256 * 1024
 HTTP_TIMEOUT = 60
@@ -2795,6 +2799,15 @@ class DownloadJob(object):
             return STATUS_TEXT[ST_PAUSED]
         if self.status == ST_ERROR:
             return 'Ошибка: ' + (self.error or 'не удалось скачать')
+        if self.status == ST_QUEUED_DOWNLOAD:
+            # Четвёртое и следующие задания ждут свободного слота — это
+            # должно быть видно, иначе карточка выглядит зависшей.
+            try:
+                n = DOWNLOADER.queue_position(self)
+            except Exception:
+                n = 0
+            if n > 0:
+                return 'В очереди  ·  %d' % n
         return STATUS_TEXT.get(self.status, '')
 
     def diag_line(self):
@@ -2877,7 +2890,10 @@ class DownloadManager(object):
         # никогда не пишется двумя потоками сразу.
         self.dirty = 0
         self._lock = threading.RLock()
-        self._thread = None
+        # Реестр рабочих потоков: job.id -> threading.Thread. Слот занят
+        # ТОЛЬКО живым HTTP-потоком конкретного задания, а не статусом
+        # задания: приостановленные и ошибочные слот не держат.
+        self._workers = {}
 
     def mark_dirty(self):
         self.dirty += 1
@@ -2924,13 +2940,62 @@ class DownloadManager(object):
                 return j
         return None
 
-    def worker_alive(self):
-        """Только для главного потока: жив ли поток загрузки."""
-        t = self._thread
-        try:
-            return bool(t is not None and t.is_alive())
-        except Exception:
-            return False
+    def worker_alive(self, job_id=None):
+        """
+        job_id задан — жив ли поток ИМЕННО этого задания.
+        job_id не задан — жив ли хоть один поток загрузки.
+
+        При трёх параллельных загрузках общего ответа мало: пауза A не
+        должна зависеть от того, качается ли сейчас B.
+        """
+        with self._lock:
+            if job_id is not None:
+                t = self._workers.get(job_id)
+                try:
+                    return bool(t is not None and t.is_alive())
+                except Exception:
+                    return False
+            items = list(self._workers.values())
+        for t in items:
+            try:
+                if t is not None and t.is_alive():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def live_workers(self):
+        """Сколько слотов занято прямо сейчас. Только живые потоки."""
+        with self._lock:
+            self._reap_workers()
+            return len(self._workers)
+
+    def free_slots(self):
+        return max(0, MAX_CONCURRENT_DOWNLOADS - self.live_workers())
+
+    def _reap_workers(self):
+        """Убрать из реестра завершившиеся потоки. Только под _lock."""
+        dead = []
+        for job_id, t in self._workers.items():
+            try:
+                if t is None or not t.is_alive():
+                    dead.append(job_id)
+            except Exception:
+                dead.append(job_id)
+        for job_id in dead:
+            self._workers.pop(job_id, None)
+
+    def queue_position(self, job):
+        """Какой по счёту в очереди ожидания. 0 — не ждёт."""
+        if job.status != ST_QUEUED_DOWNLOAD:
+            return 0
+        n = 0
+        for j in self.all_jobs():
+            if j.status == ST_QUEUED_DOWNLOAD and not self.worker_alive(j.id):
+                n += 1
+                if j.id == job.id:
+                    return n
+        return 0
 
     def pending_resolve(self):
         """Новые ссылки и те, чей прямой адрес протух, — вперемешку."""
@@ -2983,7 +3048,7 @@ class DownloadManager(object):
         if job is None or not job.can_pause:
             return False
         job.pause_requested = True
-        if job.status == ST_DOWNLOADING and self.worker_alive():
+        if job.status == ST_DOWNLOADING and self.worker_alive(job.id):
             # Останавливает рабочий поток сам цикл чтения: он закроет
             # соединение и файл штатно, .part не тронет.
             pass
@@ -3079,7 +3144,7 @@ class DownloadManager(object):
         job.delete_requested = True
         job.cancel_requested = True
         job.pause_requested = False
-        if job.status == ST_DOWNLOADING and self.worker_alive():
+        if job.status == ST_DOWNLOADING and self.worker_alive(job.id):
             job.status = ST_DELETING
             job.speed = None
             job.eta = None
@@ -3308,31 +3373,68 @@ class DownloadManager(object):
     # -- рабочий поток: только HTTP --------------------------------
     def _pump(self):
         """
-        Запускает следующее разобранное задание, если поток свободен.
-        Вызывается из resolve/cancel и из самого потока по завершении,
-        поэтому перестроение интерфейса второй поток создать не может.
+        Заполняет ВСЕ свободные слоты, а не один.
+
+        За один вызов может стартовать до MAX_CONCURRENT_DOWNLOADS
+        заданий. Слот считается занятым только живым потоком конкретного
+        задания: приостановленные, упавшие и ждущие разбора ссылки слот
+        не держат. yt-dlp здесь по-прежнему не вызывается — поток
+        получает уже готовый resolved_url.
         """
+        started = []
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            nxt = None
-            for j in self.jobs:
-                # Приостановленное задание очередь не занимает: у него статус
-                # ST_PAUSED, и следующее за ним стартует как обычно.
-                if j.status == ST_QUEUED_DOWNLOAD and not j.cancel_requested \
-                        and not j.pause_requested and not j.delete_requested:
+            self._reap_workers()
+            free = MAX_CONCURRENT_DOWNLOADS - len(self._workers)
+            while free > 0:
+                nxt = None
+                for j in self.jobs:
+                    if j.status != ST_QUEUED_DOWNLOAD:
+                        continue
+                    if j.cancel_requested or j.pause_requested \
+                            or j.delete_requested:
+                        continue
+                    if j.id in self._workers:
+                        continue
+                    if self._path_busy(j):
+                        # Два задания не должны писать в один и тот же
+                        # .part: второе ждёт, пока первое освободит файл.
+                        continue
                     nxt = j
                     break
-            if nxt is None:
-                self._thread = None
-                return
-            nxt.set_stage('before-thread-create')
-            self._thread = threading.Thread(target=self._run, args=(nxt,),
-                                            name='nox-download', daemon=True)
-            self._thread.start()
+                if nxt is None:
+                    break
+                nxt.set_stage('before-thread-create')
+                t = threading.Thread(target=self._run, args=(nxt,),
+                                     name='nox-download', daemon=True)
+                self._workers[nxt.id] = t
+                t.start()
+                started.append(nxt)
+                free -= 1
+        for job in started:
             # Поток мог успеть шагнуть дальше — не затираем более поздний этап.
-            if nxt.debug_stage == 'before-thread-create':
-                nxt.set_stage('thread-start-called')
+            if job.debug_stage == 'before-thread-create':
+                job.set_stage('thread-start-called')
+
+    def _path_busy(self, job):
+        """
+        Пишет ли уже кто-то в этот же файл. Только под _lock.
+
+        Обычно video id в имени такое исключает, но одинаковое имя
+        возможно (два разных URL одного видео), и параллельная запись
+        двух потоков в один .part испортила бы файл.
+        """
+        if not job.filename:
+            return False
+        for other in self.jobs:
+            if other.id == job.id or other.filename != job.filename:
+                continue
+            t = self._workers.get(other.id)
+            try:
+                if t is not None and t.is_alive():
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _note_progress(self, job, state, chunk_len):
         """Скорость по окну ~1.2 c, а не по одному блоку."""
@@ -3449,7 +3551,9 @@ class DownloadManager(object):
             job.eta = None
             with self._lock:
                 self.revision += 1
-                self._thread = None
+                # Освобождается слот ИМЕННО этого задания. Общего
+                # self._thread больше нет: чужие потоки продолжают жить.
+                self._workers.pop(job.id, None)
             self.tick += 1
             self.mark_dirty()
             try:
@@ -6273,8 +6377,18 @@ class NoxApp(ui.View):
         self.add_subview(self.backdrop)
 
     def _layout_backdrop(self):
+        """
+        ui.Rect в Pythonista — НЕ кортеж: срез b.frame[2:] поднимал
+        TypeError: sequence index must be integer, not 'slice'.
+        Исключение прилетало из layout(), и до строки, которая ставит
+        нижнюю панель на место, выполнение уже не доходило — TabBar так
+        и оставалась со своим стартовым кадром в левом верхнем углу.
+        Сравниваем обычные числовые свойства.
+        """
         b = self.backdrop
-        if b is not None and b.frame[2:] != (self.width, self.height):
+        if b is None:
+            return
+        if b.width != self.width or b.height != self.height:
             b.frame = (0, 0, self.width, self.height)
 
     # ---------------------------------------------------------------

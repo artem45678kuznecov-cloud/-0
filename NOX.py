@@ -1196,28 +1196,15 @@ def validate_url(url):
     return url, None
 
 
-def ffmpeg_available():
-    """
-    Склейка video-only + audio-only допустима только при наличии ffmpeg.
-    В Pythonista его, как правило, нет — тогда такие форматы не выбираются.
-    """
-    mod = _load_yt_dlp()
-    if mod is not None:
-        try:
-            from yt_dlp.postprocessor.ffmpeg import FFmpegPostProcessor
-            pp = FFmpegPostProcessor()
-            if getattr(pp, 'available', False):
-                return True
-        except Exception:
-            pass
-    try:
-        return bool(shutil.which('ffmpeg'))
-    except Exception:
-        return False
-
+# Pythonista на iOS не поддерживает subprocess: любая попытка yt-dlp
+# определить или запустить ffmpeg заканчивалась
+# RuntimeError: Subprocesses are not supported on ios.
+# Поэтому ffmpeg для NOX не существует — ни проверок, ни склейки.
+FFMPEG_AVAILABLE = False
+NO_FFMPEG_PATH = os.path.join(PROJECT_DIR, '__NO_FFMPEG__')
 
 HEIGHTS = {'360': 360, '480': 480, '720': 720}
-# Прямые combined-форматы VK: они уже содержат звук.
+# Прямые combined-форматы VK: в них уже есть и видео, и звук.
 VK_DIRECT = {
     '360': ['url360', 'url240', 'url144'],
     '480': ['url480', 'url360', 'url240', 'url144'],
@@ -1227,27 +1214,20 @@ VK_DIRECT = {
 }
 
 
-def format_selector(quality, allow_merge=None):
+def format_selector(quality):
     """
-    Сначала готовый файл со звуком (progressive/combined), только потом —
-    склейка, и лишь если ffmpeg реально доступен.
-    'best' в yt-dlp по определению возвращает формат с видео И аудио.
+    Только combined-форматы: и видео, и аудио в одном файле.
+    bestvideo+bestaudio не используется никогда, даже как запасной вариант,
+    потому что объединить их на Pythonista нечем.
     """
-    if allow_merge is None:
-        allow_merge = ffmpeg_available()
     h = HEIGHTS.get(quality)
     parts = list(VK_DIRECT.get(quality, []))
     if h:
-        parts.append('best[height<=%d][ext=mp4]' % h)
-        parts.append('best[height<=%d]' % h)
+        parts.append('best[height<=%d][ext=mp4][vcodec!=none][acodec!=none]' % h)
+        parts.append('best[height<=%d][vcodec!=none][acodec!=none]' % h)
     else:
-        parts.append('best[ext=mp4]')
-    if allow_merge:
-        if h:
-            parts.append('bestvideo[height<=%d]+bestaudio' % h)
-        else:
-            parts.append('bestvideo+bestaudio')
-    parts.append('best')
+        parts.append('best[ext=mp4][vcodec!=none][acodec!=none]')
+    parts.append('best[vcodec!=none][acodec!=none]')
     return '/'.join(parts)
 
 
@@ -1583,31 +1563,40 @@ class DownloadManager(object):
         self.tick += 1
 
     def _ydl_opts(self, job, ipv4=False):
-        allow_merge = ffmpeg_available()
         opts = {
-            'format': format_selector(job.quality, allow_merge),
+            'format': format_selector(job.quality),
             'outtmpl': os.path.join(MEDIA_DIR, '%(title)s [%(id)s].%(ext)s'),
+
+            # Путь заведомо несуществующий — так yt-dlp считает ffmpeg
+            # недоступным и не пытается его прощупать через subprocess,
+            # которого на iOS нет. fixup выключен по той же причине.
+            'ffmpeg_location': NO_FFMPEG_PATH,
+            'fixup': 'never',
+
+            # verbose обязан оставаться выключенным: именно он приводил
+            # yt-dlp к диагностике ffmpeg и к падению Pythonista.
+            'verbose': False,
+
+            'socket_timeout': 60,
+            'retries': 10,
+            'fragment_retries': 10,
+            'extractor_retries': 5,
+
             'continuedl': True,
+            'noplaylist': True,
             'noprogress': True,
             'quiet': True,
             'no_warnings': True,
-            'noplaylist': True,
+
             'writeinfojson': True,
             'writethumbnail': True,
-            'extractor_retries': 5,
-            'retries': 10,
-            'fragment_retries': 10,
-            # Лимит ОДНОЙ сетевой операции, а не всей загрузки. На сотовой
-            # сети iPhone тридцати секунд не хватало уже на извлечении.
-            'socket_timeout': 120,
+
             'logger': _QuietLogger(),
             'progress_hooks': [lambda d, _j=job: self._hook(_j, d)],
         }
         if ipv4:
             # Только как запасной вариант после сетевого сбоя, не всегда.
             opts['source_address'] = '0.0.0.0'
-        if allow_merge:
-            opts['merge_output_format'] = 'mp4'
         return opts
 
     def _absorb_info(self, job, info):

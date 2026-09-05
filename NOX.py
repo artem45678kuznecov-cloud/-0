@@ -58,23 +58,27 @@ APP_VERSION = '1.0'
 #  Случайных hex-значений по файлу быть не должно: всё берётся отсюда.
 # ---------------------------------------------------------------------
 
-# Фон: глубокий сине-чёрный с холодным свечением сверху.
-BG            = '#050813'
-BG_DEEP       = '#030611'
-BG_TOP        = '#071024'
-BG_GLOW       = '#28307f'          # рассеянный свет за крупными панелями
+# Фон: почти чёрный. Синева — только локальным свечением, а не заливкой.
+BG            = '#04060E'
+BG_DEEP       = '#03050D'
+BG_TOP        = '#050711'
+BG_GLOW       = '#3b3fa8'          # локальное пятно света, очень слабое
 
-# Стекло.
-GLASS_BG            = '#0c1226'    # обычная стеклянная поверхность
-GLASS_BG_STRONG     = '#141b38'    # приподнятая (кнопки, поля ввода)
-GLASS_BG_DEEP       = '#070b18'    # утопленная (input, track)
-GLASS_BORDER        = '#222c58'
-GLASS_BORDER_SOFT   = '#1a2245'
+# Стекло. Оно графитово-чёрное и прозрачное: цвет даёт материал, а не
+# заливка, поэтому оттенки здесь тёмные и почти нейтральные.
+GLASS_TINT          = '#0A0E1C'    # базовый оттенок стекла
+GLASS_TINT_A        = 0.55         # альфа оттенка для настоящего материала
+GLASS_THIN_A        = 0.62         # альфа дешёвого материала карточек
+GLASS_BG            = GLASS_TINT   # совместимость со старым именем
+GLASS_BG_STRONG     = '#131829'    # приподнятая поверхность
+GLASS_BG_DEEP       = '#05070F'    # утопленная (поле ввода, дорожка)
+GLASS_BORDER        = '#232a45'    # очень тонкая, почти незаметная
+GLASS_BORDER_SOFT   = '#191e33'
 GLASS_BORDER_ACTIVE = '#7d78f2'
-GLASS_HIGHLIGHT     = '#9fb0ff'    # верхний блик
-GLASS_GLOW          = '#5b57e0'    # свечение по краю
+GLASS_HIGHLIGHT     = '#ffffff'    # верхний блик — белый, не синий
+GLASS_GLOW          = '#5b57e0'
 
-# Акцент.
+# Акцент — только интерактив.
 ACCENT       = '#7b7bf5'
 ACCENT_LIGHT = '#b3b0ff'
 ACCENT_DEEP  = '#4f49d8'
@@ -83,9 +87,9 @@ DANGER       = '#ff6b81'
 
 # Текст.
 TEXT_PRIMARY   = '#ffffff'
-TEXT_SECONDARY = '#a3abc6'
-TEXT_MUTED     = '#6b7391'
-TEXT_FAINT     = '#4c5470'
+TEXT_SECONDARY = '#9aa2bd'
+TEXT_MUTED     = '#646b87'
+TEXT_FAINT     = '#474e68'
 
 # Размеры.
 NAV_HEIGHT   = 64.0        # высота плавающей капсулы навигации
@@ -94,6 +98,7 @@ NAV_GAP      = 8.0         # зазор между капсулой и safe area
 CARD_RADIUS  = 18.0
 GLASS_RADIUS = 22.0
 PILL_RADIUS  = 999.0       # «до упора», радиус ограничивается по высоте
+CTRL_ZONE    = 40.0        # ширина колонки ⋯ и круглых кнопок карточки
 
 F_BOLD      = '<system-bold>'
 F_REG       = '<system>'
@@ -398,141 +403,425 @@ def deactivate_tree(view):
 
 # Нативный blur пробуем ровно один раз. Не получилось — весь интерфейс
 # продолжает работать на нарисованном стекле, приложение не падает.
-_BLUR = {'checked': False, 'ok': False}
+# ---------------------------------------------------------------------
+#  НАТИВНЫЙ МАТЕРИАЛ: Liquid Glass, CAGradientLayer, тени CALayer.
+#
+#  ПОЧЕМУ ЭТО ЗДЕСЬ. Прошлая версия рисовала стекло, градиенты и фон
+#  десятками ui.fill_rect подряд. На устройстве соседние прямоугольники
+#  ложатся на дробные границы пикселей, и швы между ними видны как
+#  горизонтальные полосы (scanline). Никакая настройка альфы это не
+#  лечит — лечит только отказ от полос: настоящий материал UIKit и
+#  непрерывный CAGradientLayer.
+#
+#  Всё ниже — публичный API Apple, каждый вызов в try/except, и на любом
+#  отказе NOX спускается на уровень ниже, но не падает.
+# ---------------------------------------------------------------------
+
+# Уровни материала:
+#   1 — UIGlassEffect / UIGlassContainerEffect (настоящий Liquid Glass)
+#   2 — UIBlurEffect + UIVisualEffectView
+#   3 — обычная полупрозрачная подкрашенная ui.View
+GLASS_L1, GLASS_L2, GLASS_L3 = 1, 2, 3
+GLASS_LEVEL_NAMES = {
+    GLASS_L1: 'UIGlassEffect',
+    GLASS_L2: 'UIBlurEffect',
+    GLASS_L3: 'tinted view',
+}
+
+# UIBlurEffectStyle: сначала пробуем тёмный «ultra thin material»,
+# затем обычный dark.
+BLUR_STYLES = (9, 2)
+
+_OBJC = {'checked': False, 'mod': None, 'level': GLASS_L3,
+         'effectview': None, 'glass': None, 'container': None,
+         'blur': None, 'gradient': None, 'color': None,
+         'surfaces': 0, 'gradients': 0, 'shadows': 0}
 
 
-def _attach_native_blur(view, radius):
-    """
-    UIVisualEffectView под содержимым view. Только публичный UIKit,
-    целиком в try/except. Возвращает True, если слой реально встал.
-
-    Живых blur-слоёв в NOX должно быть единицы: каждый такой слой —
-    настоящая работа GPU на каждый кадр, а рядом качается гигабайтный
-    файл. Поэтому его получает только плавающая панель навигации.
-    """
-    if _BLUR['checked'] and not _BLUR['ok']:
-        return False
+def _objc():
+    """Однократно выясняем, что реально доступно на этом устройстве."""
+    if _OBJC['checked']:
+        return _OBJC['mod']
+    _OBJC['checked'] = True
     try:
         import objc_util
+    except Exception:
+        return None
+
+    def cls(name):
+        try:
+            return objc_util.ObjCClass(name)
+        except Exception:
+            return None
+
+    try:
+        objc_util.load_framework('QuartzCore')
+    except Exception:
+        pass
+    _OBJC['mod'] = objc_util
+    _OBJC['effectview'] = cls('UIVisualEffectView')
+    _OBJC['glass'] = cls('UIGlassEffect')            # iOS 26+
+    _OBJC['container'] = cls('UIGlassContainerEffect')
+    _OBJC['blur'] = cls('UIBlurEffect')
+    _OBJC['gradient'] = cls('CAGradientLayer')
+    _OBJC['color'] = cls('UIColor')
+    if _OBJC['effectview'] is not None and _OBJC['glass'] is not None:
+        _OBJC['level'] = GLASS_L1
+    elif _OBJC['effectview'] is not None and _OBJC['blur'] is not None:
+        _OBJC['level'] = GLASS_L2
+    else:
+        _OBJC['level'] = GLASS_L3
+    return objc_util
+
+
+def glass_level():
+    """Какой материал реально используется в этом запуске."""
+    _objc()
+    return _OBJC['level']
+
+
+def glass_report():
+    """Строка для экрана «Настройки» и для отчёта."""
+    lvl = glass_level()
+    name = GLASS_LEVEL_NAMES.get(lvl, 'tinted view')
+    if lvl == GLASS_L1 and _OBJC['container'] is not None:
+        name += ' + UIGlassContainerEffect'
+    return name
+
+
+def _uicolor(hex_color, alpha=1.0):
+    m = _OBJC['mod']
+    if m is None or _OBJC['color'] is None:
+        return None
+    r, g, b = parse_hex(hex_color)
+    return _OBJC['color'].colorWithRed_green_blue_alpha_(r, g, b, alpha)
+
+
+def _no_implicit_animation(func):
+    """
+    CALayer по умолчанию анимирует смену frame. При раскладке это даёт
+    «плывущие» слои, поэтому неявные анимации выключаются.
+    """
+    m = _OBJC['mod']
+    if m is None:
+        return func()
+    try:
+        ca = m.ObjCClass('CATransaction')
+        ca.begin()
+        ca.setDisableActions_(True)
+        try:
+            return func()
+        finally:
+            ca.commit()
+    except Exception:
+        return func()
+
+
+def attach_material(view, radius, tint=None, tint_alpha=0.0,
+                    interactive=False, container=False):
+    """
+    Кладёт ПОД содержимое view лучший доступный материал и возвращает
+    уровень (1/2) либо 0, если нативного слоя нет.
+
+    LEVEL 1 — UIGlassEffect (для панели навигации UIGlassContainerEffect),
+    LEVEL 2 — UIBlurEffect. Прозрачность самой effect view не трогаем:
+    затемнение и оттенок делает отдельный тонкий слой поверх неё.
+    """
+    m = _objc()
+    if m is None or _OBJC['effectview'] is None:
+        return 0
+    try:
         host = view.objc_instance
-        effect = objc_util.ObjCClass('UIBlurEffect').effectWithStyle_(2)
-        blur = objc_util.ObjCClass('UIVisualEffectView').alloc()
-        blur = blur.initWithEffect_(effect)
+    except Exception:
+        return 0
+    effect, level = None, 0
+    if container and _OBJC['container'] is not None:
+        try:
+            effect = _OBJC['container'].alloc().init()
+            level = GLASS_L1
+        except Exception:
+            effect = None
+    if effect is None and _OBJC['glass'] is not None:
+        try:
+            g = _OBJC['glass'].alloc().init()
+            if interactive:
+                try:
+                    g.setInteractive_(True)
+                except Exception:
+                    pass
+            if tint:
+                col = _uicolor(tint, tint_alpha if tint_alpha else 0.22)
+                if col is not None:
+                    try:
+                        g.setTintColor_(col)
+                    except Exception:
+                        pass
+            effect, level = g, GLASS_L1
+        except Exception:
+            effect = None
+    if effect is None and _OBJC['blur'] is not None:
+        for style in BLUR_STYLES:
+            try:
+                effect = _OBJC['blur'].effectWithStyle_(style)
+                if effect is not None:
+                    level = GLASS_L2
+                    break
+            except Exception:
+                effect = None
+    if effect is None:
+        return 0
+    try:
+        ev = _OBJC['effectview'].alloc().initWithEffect_(effect)
         b = view.bounds
-        blur.setFrame_(objc_util.CGRect(
-            objc_util.CGPoint(0, 0), objc_util.CGSize(b[2], b[3])))
-        blur.setAutoresizingMask_(18)          # гибкие ширина и высота
-        layer = blur.layer()
-        layer.setCornerRadius_(float(radius))
-        layer.setMasksToBounds_(True)
-        host.insertSubview_atIndex_(blur, 0)
-        blur.release()
-        _BLUR['checked'] = True
-        _BLUR['ok'] = True
+        ev.setFrame_(m.CGRect(m.CGPoint(0, 0), m.CGSize(b[2], b[3])))
+        ev.setAutoresizingMask_(18)          # гибкие ширина и высота
+        lay = ev.layer()
+        lay.setCornerRadius_(float(radius))
+        try:
+            lay.setCornerCurve_(m.ns('continuous'))
+        except Exception:
+            pass
+        lay.setMasksToBounds_(True)
+        host.insertSubview_atIndex_(ev, 0)
+        ev.release()
+        _OBJC['surfaces'] += 1
+        return level
+    except Exception:
+        return 0
+
+
+def attach_gradient(view, stops, radius=0.0, start=(0.5, 0.0),
+                    end=(0.5, 1.0), radial=False, below=False):
+    """
+    Непрерывный CAGradientLayer вместо десятков ui.fill_rect.
+
+    stops — список (hex, alpha, location 0..1). Возвращает слой, чтобы
+    его можно было пересчитать в layout(), либо None.
+    """
+    m = _objc()
+    if m is None or _OBJC['gradient'] is None or not stops:
+        return None
+    try:
+        lay = _OBJC['gradient'].layer()
+        cols, locs = [], []
+        for hex_color, alpha, loc in stops:
+            col = _uicolor(hex_color, alpha)
+            if col is None:
+                return None
+            cols.append(col.CGColor())
+            locs.append(m.ns(float(loc)))
+        lay.setColors_(m.ns(cols))
+        lay.setLocations_(m.ns(locs))
+        lay.setStartPoint_(m.CGPoint(start[0], start[1]))
+        lay.setEndPoint_(m.CGPoint(end[0], end[1]))
+        if radial:
+            try:
+                lay.setType_(m.ns('radial'))
+            except Exception:
+                pass
+        b = view.bounds
+        lay.setFrame_(m.CGRect(m.CGPoint(0, 0), m.CGSize(b[2], b[3])))
+        if radius:
+            lay.setCornerRadius_(float(radius))
+            try:
+                lay.setCornerCurve_(m.ns('continuous'))
+            except Exception:
+                pass
+            lay.setMasksToBounds_(True)
+        host = view.objc_instance.layer()
+        if below:
+            host.insertSublayer_atIndex_(lay, 0)
+        else:
+            host.addSublayer_(lay)
+        _OBJC['gradients'] += 1
+        return lay
+    except Exception:
+        return None
+
+
+def sync_layer(lay, x, y, w, h):
+    """Пересчёт кадра слоя без неявной анимации."""
+    m = _OBJC['mod']
+    if lay is None or m is None:
+        return
+
+    def _apply():
+        try:
+            lay.setFrame_(m.CGRect(m.CGPoint(x, y),
+                                   m.CGSize(max(0.0, w), max(0.0, h))))
+        except Exception:
+            pass
+    _no_implicit_animation(_apply)
+
+
+def apply_shadow(view, color=GLASS_GLOW, opacity=0.35, radius=14.0,
+                 offset=(0.0, 4.0)):
+    """
+    Мягкая тень/свечение публичными свойствами CALayer. Именно так
+    делается ореол вокруг капсулы — не обводками внутрь границ.
+    """
+    m = _objc()
+    if m is None:
+        return False
+    try:
+        lay = view.objc_instance.layer()
+        col = _uicolor(color, 1.0)
+        if col is None:
+            return False
+        lay.setShadowColor_(col.CGColor())
+        lay.setShadowOpacity_(float(opacity))
+        lay.setShadowRadius_(float(radius))
+        lay.setShadowOffset_(m.CGSize(offset[0], offset[1]))
+        lay.setMasksToBounds_(False)
+        _OBJC['shadows'] += 1
         return True
     except Exception:
-        _BLUR['checked'] = True
-        _BLUR['ok'] = False
         return False
+
+
+def set_corner(view, radius, continuous=True):
+    """cornerRadius + continuous curve там, где это доступно."""
+    try:
+        view.corner_radius = float(radius)
+    except Exception:
+        pass
+    m = _OBJC['mod']
+    if m is None or not continuous:
+        return
+    try:
+        view.objc_instance.layer().setCornerCurve_(m.ns('continuous'))
+    except Exception:
+        pass
 
 
 def native_blur_available():
-    """Для отчёта и настроек: удался ли нативный blur в этом запуске."""
-    return bool(_BLUR['ok'])
+    """Совместимость: включён ли вообще нативный материал."""
+    return glass_level() in (GLASS_L1, GLASS_L2)
 
 
 class GlassView(ui.View):
     """
-    Единый стеклянный слой NOX: скруглённые углы, полупрозрачная заливка,
-    тонкая сине-фиолетовая рамка, верхний блик и мягкое свечение по краю.
+    Единая стеклянная поверхность NOX.
 
-    Всё рисуется в draw() один раз на перестроение экрана. Ни таймеров,
-    ни анимаций внутри нет: обновление прогресса стекло не перерисовывает.
+    Ничего не рисует в draw() — вообще. Материал даёт UIKit, оттенок и
+    рамку даёт обычная подкрашенная view, блик и свечение — CAGradientLayer
+    и тень CALayer. Полос на устройстве взяться неоткуда.
+
+    material='glass' — поверхность просит настоящий Liquid Glass;
+    material='thin'  — дешёвый полупрозрачный материал без effect view
+                       (обычные карточки медиатеки: их на экране много).
     """
 
-    def __init__(self, radius=CARD_RADIUS, fill=GLASS_BG, fill_alpha=0.78,
-                 border=GLASS_BORDER, border_alpha=0.95, border_w=1.0,
-                 highlight=0.10, glow=0.0, glow_color=GLASS_GLOW,
-                 blur=False, **kwargs):
+    def __init__(self, radius=CARD_RADIUS, tint=GLASS_TINT, tint_alpha=None,
+                 border=GLASS_BORDER, border_alpha=0.5, border_w=1.0,
+                 highlight=0.0, glow=0.0, glow_color=GLASS_GLOW,
+                 material='thin', interactive=False, container=False,
+                 shadow=None, fill=None, fill_alpha=None, **kwargs):
+        # fill/fill_alpha — прежние имена тех же параметров: оставлены,
+        # чтобы ни один вызов не остался с рассинхронизированным стилем.
+        if fill is not None:
+            tint = fill
+        if fill_alpha is not None:
+            tint_alpha = fill_alpha
         ui.View.__init__(self, **kwargs)
         self.background_color = 'clear'
         self.radius = radius
-        self.fill = fill
-        self.fill_alpha = fill_alpha
+        self.tint = tint
         self.border = border
         self.border_alpha = border_alpha
         self.border_w = border_w
-        self.highlight = highlight
         self.glow = glow
         self.glow_color = glow_color
-        self._blurred = False
-        if blur:
-            self._blurred = _attach_native_blur(self, self._radius())
-            if self._blurred:
-                # Настоящее размытие уже даёт материал — своя заливка
-                # становится лишь лёгкой подкраской поверх него.
-                self.fill_alpha = min(self.fill_alpha, 0.45)
+        self.material = material
+        self.level = 0
+        self._grad = None
+        self._highlight = highlight
+        if tint_alpha is None:
+            tint_alpha = GLASS_TINT_A if material == 'glass' else GLASS_THIN_A
+        self.tint_alpha = tint_alpha
+
+        r = self._radius()
+        if material == 'glass':
+            self.level = attach_material(self, r, tint=tint,
+                                         tint_alpha=0.20,
+                                         interactive=interactive,
+                                         container=container)
+        # Оттенок и рамка живут отдельным тонким слоем ПОВЕРХ материала,
+        # чтобы не гасить сам эффект прозрачностью effect view.
+        skin = ui.View(frame=self.bounds)
+        skin.flex = 'WH'
+        skin.user_interaction_enabled = False
+        skin.background_color = rgba(tint, self._skin_alpha())
+        set_corner(skin, r)
+        skin.border_width = border_w
+        skin.border_color = rgba(border, border_alpha)
+        self.add_subview(skin)
+        self.skin = skin
+        if highlight > 0:
+            self._grad = attach_gradient(
+                skin,
+                [(GLASS_HIGHLIGHT, highlight, 0.0),
+                 (GLASS_HIGHLIGHT, highlight * 0.35, 0.35),
+                 (GLASS_HIGHLIGHT, 0.0, 1.0)],
+                radius=r)
+        if glow > 0:
+            apply_shadow(self, glow_color, min(0.85, glow * 1.6),
+                         14.0, (0.0, 0.0))
+        elif shadow:
+            apply_shadow(self, BG_DEEP, 0.45, 16.0, (0.0, 8.0))
+
+    def _skin_alpha(self):
+        # Под настоящим материалом оттенок обязан быть лёгким, иначе
+        # стекло превращается в крашеный прямоугольник.
+        if self.level in (GLASS_L1, GLASS_L2):
+            return self.tint_alpha * 0.45
+        return self.tint_alpha
 
     def _radius(self):
         w, h = self.width, self.height
         return min(float(self.radius), max(1.0, min(w, h) / 2.0))
 
-    def set_active(self, flag, active_color=GLASS_BORDER_ACTIVE,
-                   idle_color=GLASS_BORDER, glow=0.30):
-        """Выделение без пересборки карточки: меняются только параметры."""
-        self.border = active_color if flag else idle_color
-        self.border_w = 1.6 if flag else 1.0
-        self.glow = glow if flag else 0.0
-        self.fill = GLASS_BG_STRONG if flag else GLASS_BG
-        redraw(self)
-
-    def draw(self):
-        w, h = self.width, self.height
-        if w <= 0 or h <= 0:
+    def layout(self):
+        skin = getattr(self, 'skin', None)
+        if skin is None:
             return
         r = self._radius()
-        # 1. Заливка стекла.
-        ui.set_color(rgba(self.fill, self.fill_alpha))
-        ui.Path.rounded_rect(0, 0, w, h, r).fill()
-        # 2. Свечение по краю: несколько вложенных обводок с падающей
-        #    альфой. Наружу выйти нельзя, поэтому свет идёт внутрь.
-        if self.glow > 0:
-            for i in range(4):
-                inset = 0.5 + i * 1.6
-                if w - inset * 2 <= 2 or h - inset * 2 <= 2:
-                    break
-                p = ui.Path.rounded_rect(inset, inset, w - inset * 2,
-                                         h - inset * 2, max(1.0, r - inset))
-                p.line_width = 2.0
-                ui.set_color(rgba(self.glow_color,
-                                  self.glow * (1.0 - i / 4.0) ** 2))
-                p.stroke()
-        # 3. Верхний блик. Полоса заужена на 0.75 радиуса с каждой стороны,
-        #    поэтому в скруглённые углы она не выходит и обрезка не нужна.
-        if self.highlight > 0 and h > 8:
-            band = min(h * 0.45, 22.0)
-            steps = 8
-            inset = r * 0.75 + 1.0
-            bw = w - inset * 2
-            if bw > 4:
-                for i in range(steps):
-                    t = i / float(steps)
-                    ui.set_color(rgba(GLASS_HIGHLIGHT,
-                                      self.highlight * (1.0 - t) ** 2.0))
-                    ui.fill_rect(inset, 1.0 + t * band, bw,
-                                 band / steps + 0.7)
-        # 4. Рамка.
-        if self.border_w > 0:
-            p = ui.Path.rounded_rect(self.border_w / 2.0, self.border_w / 2.0,
-                                     w - self.border_w, h - self.border_w,
-                                     max(1.0, r - self.border_w / 2.0))
-            p.line_width = self.border_w
-            ui.set_color(rgba(self.border, self.border_alpha))
-            p.stroke()
+        set_corner(skin, r)
+        if self._grad is not None:
+            sync_layer(self._grad, 0, 0, self.width, self.height)
+
+    def set_active(self, flag, active_color=GLASS_BORDER_ACTIVE,
+                   idle_color=GLASS_BORDER, glow=0.30):
+        """Выделение без пересборки: меняются только цвета уже готовых слоёв."""
+        self.border = active_color if flag else idle_color
+        self.border_w = 1.4 if flag else 1.0
+        self.glow = glow if flag else 0.0
+        skin = getattr(self, 'skin', None)
+        if skin is None:
+            return
+        skin.border_color = rgba(self.border, 0.95 if flag else self.border_alpha)
+        skin.border_width = self.border_w
+        skin.background_color = rgba(ACCENT if flag else self.tint,
+                                     (0.16 if flag else self._skin_alpha()))
+        if flag:
+            apply_shadow(self, ACCENT, 0.45, 12.0, (0.0, 0.0))
+        else:
+            apply_shadow(self, ACCENT, 0.0, 0.0, (0.0, 0.0))
 
 
 def glass_card(frame, radius=CARD_RADIUS, **kwargs):
-    """Обычная стеклянная карточка."""
+    """
+    Карточка медиатеки/очереди. По умолчанию дешёвый материал: таких
+    поверхностей на экране много, и 50 живых effect view — это работа
+    GPU на каждый кадр рядом с многочасовой загрузкой.
+    """
+    kwargs.setdefault('material', 'thin')
+    return GlassView(radius=radius, frame=frame, **kwargs)
+
+
+def glass_panel(frame, radius=GLASS_RADIUS, **kwargs):
+    """Крупная поверхность, которой положен НАСТОЯЩИЙ Liquid Glass."""
+    kwargs.setdefault('material', 'glass')
     return GlassView(radius=radius, frame=frame, **kwargs)
 
 
@@ -543,14 +832,10 @@ def glass_pill(frame, radius=None, **kwargs):
                      frame=frame, **kwargs)
 
 
-def card_view(frame, bg=CARD, radius=CARD_RADIUS, border=BORDER, border_w=1):
-    """
-    Старая фабрика карточек: теперь возвращает то же самое стекло.
-    Сохранена, чтобы не переписывать каждый вызов и не разъезжаться
-    по стилям.
-    """
-    return GlassView(radius=radius, fill=bg, border=border,
-                     border_w=border_w, frame=frame)
+def card_view(frame, bg=None, radius=CARD_RADIUS, border=BORDER, border_w=1):
+    """Старая фабрика карточек — то же стекло, чтобы стили не разъезжались."""
+    return GlassView(radius=radius, tint=(bg or GLASS_TINT), border=border,
+                     border_w=border_w, material='thin', frame=frame)
 
 
 # =====================================================================
@@ -824,154 +1109,138 @@ class Tappable(ui.View):
             nox_error(str(e))
 
 
-class GradientView(ui.View):
-    """Горизонтальный градиент (для главной кнопки «Скачать»)."""
+class GradientFill(ui.View):
+    """
+    Непрерывный градиент одним CAGradientLayer.
 
-    def __init__(self, c1=ACCENT_DEEP, c2=ACCENT_2, **kwargs):
+    Ни одного ui.fill_rect: раньше и фон, и CTA, и затемнение обложки
+    строились из 20-54 прямоугольников подряд, и швы между ними были
+    видны на устройстве полосами. Здесь слой один, и он непрерывный.
+    Если CoreAnimation недоступна, рисуется ОДИН ровный цвет — тоже
+    без полос.
+    """
+
+    def __init__(self, stops, radius=0.0, start=(0.5, 0.0), end=(0.5, 1.0),
+                 radial=False, flat=None, flat_alpha=1.0, **kwargs):
         ui.View.__init__(self, **kwargs)
-        self.c1 = c1
-        self.c2 = c2
         self.background_color = 'clear'
         self.user_interaction_enabled = False
+        self.stops = list(stops)
+        self.radius = radius
+        self.flat = flat or (self.stops[0][0] if self.stops else BG_DEEP)
+        self.flat_alpha = flat_alpha
+        self._lay = attach_gradient(self, self.stops, radius=radius,
+                                    start=start, end=end, radial=radial)
+        if self._lay is None and radius:
+            set_corner(self, radius)
+
+    def layout(self):
+        if self._lay is not None:
+            sync_layer(self._lay, 0, 0, self.width, self.height)
 
     def draw(self):
-        w = self.width
-        h = self.height
-        if w <= 0 or h <= 0:
+        # Только когда CAGradientLayer недоступен: одна ровная заливка.
+        if self._lay is not None:
             return
-        steps = 48
-        step_w = w / float(steps)
-        for i in range(steps):
-            t = i / float(steps - 1)
-            ui.set_color(mix(self.c1, self.c2, t))
-            ui.fill_rect(i * step_w, 0, step_w + 1.0, h)
-
-
-class FadeOverlay(ui.View):
-    """
-    Затемнение поверх обложки. horizontal=True — слева непрозрачно,
-    вправо сходит на нет (hero на главной); иначе тень снизу вверх.
-    """
-
-    def __init__(self, color=BG_DEEP, strength=0.97, horizontal=True,
-                 **kwargs):
-        ui.View.__init__(self, **kwargs)
-        self.color = color
-        self.strength = strength
-        self.horizontal = horizontal
-        self.background_color = 'clear'
-        self.user_interaction_enabled = False
-
-    def draw(self):
         w, h = self.width, self.height
         if w <= 0 or h <= 0:
             return
-        steps = 26
-        if self.horizontal:
-            sw = w / float(steps)
-            for i in range(steps):
-                t = i / float(steps - 1)
-                ui.set_color(rgba(self.color, self.strength * (1.0 - t) ** 1.5))
-                ui.fill_rect(i * sw, 0, sw + 1.0, h)
+        ui.set_color(rgba(self.flat, self.flat_alpha))
+        if self.radius:
+            ui.Path.rounded_rect(0, 0, w, h,
+                                 min(self.radius, min(w, h) / 2.0)).fill()
         else:
-            sh = h / float(steps)
-            for i in range(steps):
-                t = i / float(steps - 1)
-                ui.set_color(rgba(self.color, self.strength * t ** 1.8))
-                ui.fill_rect(0, i * sh, w, sh + 1.0)
+            ui.fill_rect(0, 0, w, h)
+
+
+def fade_overlay(frame, color=BG_DEEP, strength=0.97, horizontal=True):
+    """Затемнение поверх обложки — тем же непрерывным градиентом."""
+    if horizontal:
+        start, end = (0.0, 0.5), (1.0, 0.5)
+    else:
+        start, end = (0.5, 0.0), (0.5, 1.0)
+    return GradientFill([(color, strength, 0.0),
+                         (color, strength * 0.45, 0.45),
+                         (color, 0.0, 1.0)],
+                        start=start, end=end, flat=color, flat_alpha=0.0,
+                        frame=frame)
 
 
 class CTAButtonView(ui.View):
     """
-    Главная кнопка «Скачать»: горизонтальный градиент
-    deep violet -> electric violet -> lavender blue, верхний блик
-    и мягкое свечение по краю. Никакой логики, только отрисовка.
+    Кнопка «Скачать»: настоящая капсула, а не прямоугольник с закруглённым
+    краем. Градиент deep violet -> electric violet -> lavender blue лежит
+    в CAGradientLayer, у которого cornerRadius = h/2 и masksToBounds, так
+    что ни градиент, ни specular highlight за капсулу не выходят.
     """
 
     def __init__(self, **kwargs):
         ui.View.__init__(self, **kwargs)
         self.background_color = 'clear'
         self.user_interaction_enabled = False
+        r = self.height / 2.0 if self.height else 0.0
+        self._grad = attach_gradient(
+            self,
+            [(ACCENT_DEEP, 1.0, 0.0), (ACCENT, 1.0, 0.5),
+             (ACCENT_LIGHT, 1.0, 1.0)],
+            radius=r, start=(0.0, 0.15), end=(1.0, 0.85))
+        # Specular highlight — отдельный слой, обрезанный тем же радиусом.
+        self._spec = None
+        if self._grad is not None:
+            self._spec = attach_gradient(
+                self,
+                [(GLASS_HIGHLIGHT, 0.26, 0.0),
+                 (GLASS_HIGHLIGHT, 0.05, 0.42),
+                 (GLASS_HIGHLIGHT, 0.0, 1.0)],
+                radius=r)
+        else:
+            set_corner(self, r)
+        apply_shadow(self, ACCENT_DEEP, 0.45, 18.0, (0.0, 8.0))
+
+    def layout(self):
+        r = self.height / 2.0
+        for lay in (self._grad, self._spec):
+            if lay is not None:
+                sync_layer(lay, 0, 0, self.width, self.height)
+                try:
+                    lay.setCornerRadius_(float(r))
+                except Exception:
+                    pass
+        if self._grad is None:
+            set_corner(self, r)
 
     def draw(self):
+        # Fallback без CoreAnimation: одна ровная капсула, без полос.
+        if self._grad is not None:
+            return
         w, h = self.width, self.height
         if w <= 0 or h <= 0:
             return
-        r = h / 2.0
-        steps = 54
-        sw = w / float(steps)
-        for i in range(steps):
-            t = i / float(steps - 1)
-            if t < 0.5:
-                col = mix(ACCENT_DEEP, ACCENT, t * 2.0)
-            else:
-                col = mix(ACCENT, ACCENT_LIGHT, (t - 0.5) * 2.0)
-            ui.set_color(col)
-            if i == 0 or i == steps - 1:
-                ui.Path.rounded_rect(i * sw, 0, sw + 1.0, h, r).fill()
-            else:
-                ui.fill_rect(i * sw, 0, sw + 1.0, h)
-        # верхний highlight
-        ui.set_color(rgba('#ffffff', 0.20))
-        ui.Path.rounded_rect(r * 0.5, 1.5, w - r, h * 0.36, h * 0.18).fill()
-        # тонкое свечение по краю
-        for i in range(3):
-            inset = 0.6 + i * 1.5
-            p = ui.Path.rounded_rect(inset, inset, w - inset * 2,
-                                     h - inset * 2, max(1.0, r - inset))
-            p.line_width = 1.6
-            ui.set_color(rgba(ACCENT_LIGHT, 0.30 * (1.0 - i / 3.0)))
-            p.stroke()
-
-
-class GlowView(ui.View):
-    """Мягкое свечение — концентрические круги с малой альфой."""
-
-    def __init__(self, color=ACCENT, strength=0.16, rings=7, **kwargs):
-        ui.View.__init__(self, **kwargs)
-        self.color = color
-        self.strength = strength
-        self.rings = rings
-        self.background_color = 'clear'
-        self.user_interaction_enabled = False
-
-    def draw(self):
-        w, h = self.width, self.height
-        if w <= 0 or h <= 0:
-            return
-        cx, cy = w / 2.0, h / 2.0
-        rmax = min(w, h) / 2.0
-        for i in range(self.rings, 0, -1):
-            t = i / float(self.rings)
-            r = rmax * t
-            a = self.strength * (1.0 - t) ** 1.6
-            ui.set_color(rgba(self.color, a))
-            ui.Path.oval(cx - r, cy - r, r * 2, r * 2).fill()
+        ui.set_color(ACCENT)
+        ui.Path.rounded_rect(0, 0, w, h, h / 2.0).fill()
 
 
 class OrbView(ui.View):
-    """Фиолетовый «шар» статуса из шапки."""
+    """Фирменный шар статуса. Круги, а не полосы: banding здесь не бывает."""
 
     def __init__(self, **kwargs):
         ui.View.__init__(self, **kwargs)
         self.background_color = 'clear'
         self.user_interaction_enabled = False
+        apply_shadow(self, ACCENT, 0.55, 8.0, (0.0, 0.0))
 
     def draw(self):
         w, h = self.width, self.height
         s = min(w, h)
+        if s <= 0:
+            return
         cx, cy = w / 2.0, h / 2.0
-        for i in range(8, 0, -1):
-            t = i / 8.0
-            r = s / 2.0 * t
-            ui.set_color(rgba(ACCENT, 0.10 * (1.0 - t) + 0.02))
-            ui.Path.oval(cx - r, cy - r, r * 2, r * 2).fill()
-        r = s * 0.30
-        ui.set_color(ACCENT_DEEP)
+        r = s * 0.32
+        ui.set_color(ACCENT)
         ui.Path.oval(cx - r, cy - r, r * 2, r * 2).fill()
-        r2 = s * 0.20
-        ui.set_color(rgba(ACCENT_2, 0.85))
-        ui.Path.oval(cx - r2 * 1.1, cy - r2 * 1.35, r2 * 2, r2 * 2).fill()
+        r2 = s * 0.16
+        ui.set_color(rgba(GLASS_HIGHLIGHT, 0.42))
+        ui.Path.oval(cx - r2 * 1.1, cy - r2 * 1.5, r2 * 2, r2 * 2).fill()
 
 
 class ProgressBar(ui.View):
@@ -1075,21 +1344,17 @@ class ThumbView(ui.View):
         w, h = self.width, self.height
         if w <= 0 or h <= 0:
             return
-        # тонкий вертикальный градиент вместо выдуманной картинки
-        steps = 20
-        sh = h / float(steps)
-        for i in range(steps):
-            t = i / float(steps - 1)
-            ui.set_color(mix('#0d1120', '#141a30', t))
-            ui.fill_rect(0, i * sh, w, sh + 1.0)
+        # Ровная подложка вместо прежних 20 полос градиента.
+        ui.set_color(GLASS_BG_STRONG)
+        ui.fill_rect(0, 0, w, h)
         # тусклый значок видео по центру
         s = min(w, h) * 0.34
         cx, cy = w / 2.0, h / 2.0
-        ui.set_color(rgba(ACCENT, 0.30))
+        ui.set_color(rgba(ACCENT, 0.26))
         p = ui.Path.rounded_rect(cx - s / 2, cy - s * 0.34, s, s * 0.68, s * 0.12)
         p.line_width = max(1.0, s * 0.055)
         p.stroke()
-        ui.set_color(rgba(ACCENT_2, 0.42))
+        ui.set_color(rgba(ACCENT_LIGHT, 0.36))
         tri = ui.Path()
         tri.move_to(cx - s * 0.08, cy - s * 0.15)
         tri.line_to(cx + s * 0.16, cy)
@@ -1339,16 +1604,29 @@ class State(object):
         entry = self.watch_map().get(video_id)
         return entry if isinstance(entry, dict) else None
 
-    def watch_note(self, video_id, watched_seconds, duration):
+    def watch_set(self, video_id, position, duration=None):
         """
-        Накапливаем РЕАЛЬНО измеренное время просмотра.
-        Досмотрено почти до конца — запись сбрасывается.
+        Сохраняет АБСОЛЮТНУЮ позицию воспроизведения.
+
+        Раньше здесь было old_position + elapsed: к сохранённому числу
+        прибавлялось время, которое просмотрщик был открыт. После любой
+        перемотки или паузы это переставало быть позицией видео. Теперь
+        сюда приходит ровно currentTime AVPlayer, и он ЗАМЕЩАЕТ прежнее
+        значение — назад позиция тоже двигается.
+
+        Досмотрено почти до конца — запись удаляется, и в следующий раз
+        видео начнётся сначала.
         """
-        if not video_id or watched_seconds <= 0:
+        if not video_id:
             return
+        try:
+            position = float(position or 0.0)
+        except Exception:
+            return
+        if position < 0:
+            position = 0.0
         wp = self.watch_map()
         prev = wp.get(video_id) if isinstance(wp.get(video_id), dict) else {}
-        position = float(prev.get('position') or 0.0) + float(watched_seconds)
         try:
             total = float(duration or prev.get('duration') or 0.0)
         except Exception:
@@ -1356,9 +1634,15 @@ class State(object):
         if total > 0:
             position = min(position, total)
             if position >= total - WATCH_DONE_TAIL:
-                wp.pop(video_id, None)
-                self.save()
+                if wp.pop(video_id, None) is not None:
+                    self.save()
                 return
+        if position <= WATCH_MIN_START:
+            # В самом начале продолжать нечего — запись только мешала бы
+            # «Продолжить просмотр» на главной.
+            if wp.pop(video_id, None) is not None:
+                self.save()
+            return
         wp[video_id] = {'position': round(position, 1),
                         'duration': round(total, 1) if total else None,
                         'updated_at': time.time()}
@@ -3276,6 +3560,387 @@ DOWNLOADER = DownloadManager()
 
 
 # =====================================================================
+#  ПЛЕЕР: AVPlayer + AVPlayerViewController
+# =====================================================================
+#
+#  Quick Look позицию воспроизведения не сообщает и всегда начинает
+#  сначала. Прежний код засекал, СКОЛЬКО ВРЕМЕНИ просмотрщик был открыт,
+#  и прибавлял это к сохранённой позиции — после любой перемотки или
+#  паузы число переставало иметь отношение к видео.
+#
+#  Здесь позиция берётся ровно там, где она есть на самом деле: у
+#  AVPlayer, через currentTime. Quick Look остаётся только аварийным
+#  запасным вариантом и НЕ притворяется, что умеет продолжение.
+# ---------------------------------------------------------------------
+
+# Как часто позиция уходит в state.json во время просмотра.
+WATCH_PERSIST_EVERY = 3.0
+
+_AV = {'checked': False, 'ok': False, 'why': '', 'mod': None,
+       'player': None, 'item': None, 'vc': None, 'url': None,
+       'cm': None, 'seek': None, 'now': None, 'CMTime': None}
+
+
+def _av():
+    """
+    Однократная проверка AVFoundation/AVKit и CoreMedia.
+
+    CMTime — структура из 24 байт, и objc_util не умеет её сам, поэтому
+    вызовы currentTime/seekToTime: делаются через собственные указатели
+    objc_msgSend с явными ctypes-типами. Всё в try/except: не сложилось —
+    работает Quick Look.
+    """
+    if _AV['checked']:
+        return _AV['ok']
+    _AV['checked'] = True
+    try:
+        import ctypes
+        import objc_util
+    except Exception as e:
+        _AV['why'] = 'objc_util недоступен: %r' % (e,)
+        return False
+    for fw in ('AVFoundation', 'AVKit'):
+        try:
+            objc_util.load_framework(fw)
+        except Exception as e:
+            _AV['why'] = 'не загрузился %s: %r' % (fw, e)
+            return False
+    try:
+        cls = objc_util.ObjCClass
+        _AV['player'] = cls('AVPlayer')
+        _AV['item'] = cls('AVPlayerItem')
+        _AV['vc'] = cls('AVPlayerViewController')
+        _AV['url'] = cls('NSURL')
+    except Exception as e:
+        _AV['why'] = 'AVKit недоступен: %r' % (e,)
+        return False
+    try:
+        class CMTime(ctypes.Structure):
+            _fields_ = [('value', ctypes.c_int64),
+                        ('timescale', ctypes.c_int32),
+                        ('flags', ctypes.c_uint32),
+                        ('epoch', ctypes.c_int64)]
+        cm = ctypes.CDLL('/System/Library/Frameworks/'
+                         'CoreMedia.framework/CoreMedia')
+        cm.CMTimeGetSeconds.argtypes = [CMTime]
+        cm.CMTimeGetSeconds.restype = ctypes.c_double
+        # Отдельные указатели на objc_msgSend: у каждого свои argtypes,
+        # так что настройки не пересекаются с самим objc_util.
+        libobjc = ctypes.CDLL('/usr/lib/libobjc.dylib')
+        now = libobjc['objc_msgSend']
+        now.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        now.restype = CMTime
+        seek = libobjc['objc_msgSend']
+        seek.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                         CMTime, CMTime, CMTime]
+        seek.restype = None
+        _AV['CMTime'] = CMTime
+        _AV['cm'] = cm
+        _AV['now'] = now
+        _AV['seek'] = seek
+        _AV['mod'] = objc_util
+    except Exception as e:
+        _AV['why'] = 'CoreMedia недоступна: %r' % (e,)
+        return False
+    _AV['ok'] = True
+    return True
+
+
+def av_available():
+    return _av()
+
+
+def av_reason():
+    return _AV['why']
+
+
+def _cmtime(seconds):
+    """CMTime с таймшкалой 600 — стандартной для видео."""
+    CMTime = _AV['CMTime']
+    return CMTime(int(round(float(seconds) * 600.0)), 600, 1, 0)
+
+
+def _cmzero():
+    CMTime = _AV['CMTime']
+    return CMTime(0, 600, 1, 0)
+
+
+class PlayerSession(object):
+    """Одна открытая сессия просмотра. Больше одной не бывает."""
+
+    def __init__(self, item, saved_position):
+        self.item = item
+        self.watch_id = item.watch_id
+        self.saved_position = float(saved_position or 0.0)
+        self.current_position = float(saved_position or 0.0)
+        self.duration = float(item.duration or 0.0)
+        self.player = None
+        self.vc = None
+        self.seeked = False
+        self.started_at = time.monotonic()
+        self.last_persist = 0.0
+        self.is_active = True
+
+
+class PlayerManager(object):
+    """
+    Единственная точка открытия видео во всём NOX.
+
+    Своего таймера не заводит: позицию опрашивает общий такт
+    NoxApp._tick, пока сессия жива.
+    """
+
+    def __init__(self):
+        self.session = None
+        self.app = None
+        self.fallback_used = False
+
+    # -- состояние -------------------------------------------------
+    @property
+    def is_active(self):
+        s = self.session
+        return bool(s is not None and s.is_active)
+
+    def is_playing(self, item):
+        s = self.session
+        return bool(s is not None and s.is_active
+                    and getattr(s.item, 'path', None) == getattr(item, 'path', 1))
+
+    def saved_position(self, item):
+        """Сохранённая позиция этого КОНКРЕТНОГО видео, а не общая."""
+        try:
+            entry = STATE.watch_get(item.watch_id)
+        except Exception:
+            entry = None
+        if not isinstance(entry, dict):
+            return 0.0
+        try:
+            pos = float(entry.get('position') or 0.0)
+        except Exception:
+            return 0.0
+        total = 0.0
+        try:
+            total = float(entry.get('duration') or item.duration or 0.0)
+        except Exception:
+            total = 0.0
+        if total > 0 and pos >= total - WATCH_DONE_TAIL:
+            return 0.0            # досмотрено — начинаем сначала
+        return max(0.0, pos)
+
+    # -- открытие --------------------------------------------------
+    def open(self, item):
+        """
+        ЕДИНСТВЕННЫЙ путь открытия видео. Только главный поток.
+        """
+        if item is None:
+            return False
+        path = getattr(item, 'path', '')
+        if not path or not os.path.exists(path):
+            nox_error('Файл больше не существует')
+            if self.app is not None:
+                run_on_main(self.app.reload_all)
+            return False
+        if self.is_active:
+            self.close()
+        try:
+            STATE.remember_opened(path)
+        except Exception as e:
+            log_debug('remember_opened: %r' % (e,))
+        position = self.saved_position(item)
+        if av_available() and self._open_native(item, position):
+            return True
+        return self._open_fallback(item)
+
+    def _open_native(self, item, position):
+        m = _AV['mod']
+        try:
+            url = _AV['url'].fileURLWithPath_(m.ns(item.path))
+            player_item = _AV['item'].playerItemWithURL_(url)
+            player = _AV['player'].playerWithPlayerItem_(player_item)
+            vc = _AV['vc'].alloc().init()
+            vc.setPlayer_(player)
+            try:
+                vc.setModalPresentationStyle_(0)   # fullScreen
+            except Exception:
+                pass
+            root = self._top_view_controller(m)
+            if root is None:
+                return False
+            session = PlayerSession(item, position)
+            session.player = player
+            session.vc = vc
+            self.session = session
+            root.presentViewController_animated_completion_(vc, True, None)
+            # Точный seek ДО начала воспроизведения: сначала позиция,
+            # только потом play.
+            if position > 0.5:
+                self._seek(player, position)
+            session.seeked = True
+            try:
+                player.play()
+            except Exception:
+                pass
+            self.fallback_used = False
+            return True
+        except Exception as e:
+            log_debug('AVPlayer: %r' % (e,))
+            self.session = None
+            return False
+
+    @staticmethod
+    def _top_view_controller(m):
+        """Самый верхний показанный контроллер — над ним и презентуем."""
+        try:
+            app = m.ObjCClass('UIApplication').sharedApplication()
+            win = app.keyWindow()
+            if win is None:
+                windows = app.windows()
+                win = windows.firstObject() if windows else None
+            if win is None:
+                return None
+            vc = win.rootViewController()
+            while vc is not None and vc.presentedViewController() is not None:
+                vc = vc.presentedViewController()
+            return vc
+        except Exception:
+            return None
+
+    def _seek(self, player, seconds):
+        """Точный seek: обе допуски нулевые, иначе попадём в ключевой кадр."""
+        try:
+            _AV['seek'](player.ptr, _AV['mod'].sel(
+                'seekToTime:toleranceBefore:toleranceAfter:'),
+                _cmtime(seconds), _cmzero(), _cmzero())
+            return True
+        except Exception as e:
+            log_debug('seek: %r' % (e,))
+            return False
+
+    def _current_time(self, player):
+        """Настоящий currentTime AVPlayer в секундах. Иначе None."""
+        try:
+            t = _AV['now'](player.ptr, _AV['mod'].sel('currentTime'))
+            secs = _AV['cm'].CMTimeGetSeconds(t)
+            if secs != secs or secs < 0:      # NaN до готовности item
+                return None
+            return float(secs)
+        except Exception:
+            return None
+
+    def _open_fallback(self, item):
+        """
+        Аварийный путь: только если AVKit создать не удалось.
+
+        Продолжения он НЕ умеет и не делает вид, что умеет — никакого
+        «прошедшее время = позиция» здесь больше нет.
+
+        console.quicklook блокирует поток до закрытия просмотрщика,
+        поэтому он уходит с главного потока разово. Наши ui.View он при
+        этом не трогает: перестроение возвращается через run_on_main.
+        """
+        self.fallback_used = True
+        app = self.app
+        path = item.path
+
+        def _show():
+            try:
+                console.quicklook(path)
+            except Exception as e:
+                log_debug('quicklook: %r' % (e,))
+            if app is not None:
+                run_on_main(app.after_player_closed)
+        try:
+            ui.in_background(_show)()
+        except Exception:
+            _show()
+        return True
+
+    # -- такт ------------------------------------------------------
+    def tick(self):
+        """
+        Вызывается из общего NoxApp._tick. Ничего не пересобирает и не
+        пишет state чаще, чем раз в WATCH_PERSIST_EVERY секунд.
+        """
+        s = self.session
+        if s is None or not s.is_active:
+            return
+        pos = self._current_time(s.player)
+        if pos is not None and pos > 0:
+            s.current_position = pos
+        if self._dismissed(s):
+            self.close()
+            return
+        now = time.monotonic()
+        if now - s.last_persist >= WATCH_PERSIST_EVERY:
+            s.last_persist = now
+            self._persist(s)
+
+    @staticmethod
+    def _dismissed(session):
+        """Контроллер закрыт, если он больше никем не показан."""
+        vc = session.vc
+        if vc is None:
+            return True
+        try:
+            if vc.presentingViewController() is None:
+                return True
+            if vc.view().window() is None:
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _persist(self, session):
+        """Сохраняем АБСОЛЮТНУЮ позицию, а не прошедшее время."""
+        try:
+            STATE.watch_set(session.watch_id, session.current_position,
+                            session.duration or None)
+        except Exception as e:
+            log_debug('watch_set: %r' % (e,))
+
+    # -- закрытие --------------------------------------------------
+    def close(self):
+        s = self.session
+        if s is None:
+            return
+        s.is_active = False
+        # Позицию берём ещё раз, уже после закрытия: пользователь мог
+        # перемотать в последнюю секунду.
+        pos = self._current_time(s.player) if s.player is not None else None
+        if pos is not None and pos > 0:
+            s.current_position = pos
+        self._persist(s)
+        try:
+            if s.player is not None:
+                s.player.pause()
+        except Exception:
+            pass
+        try:
+            if s.vc is not None:
+                s.vc.setPlayer_(None)
+                if s.vc.presentingViewController() is not None:
+                    s.vc.dismissViewControllerAnimated_completion_(True, None)
+        except Exception:
+            pass
+        try:
+            # Контроллер создан через alloc().init(), то есть принадлежит нам.
+            # UIKit держит собственную ссылку на время анимации закрытия,
+            # поэтому отпускаем свою здесь — и утечки не остаётся.
+            if s.vc is not None:
+                s.vc.release()
+        except Exception:
+            pass
+        s.player = None
+        s.vc = None
+        self.session = None
+        if self.app is not None:
+            run_on_main(self.app.after_player_closed)
+
+
+PLAYER = PlayerManager()
+
+
+# =====================================================================
 #  ОБЩИЕ БЛОКИ ИНТЕРФЕЙСА
 # =====================================================================
 
@@ -3324,8 +3989,8 @@ def build_header(width, y=0.0):
     cap_w = min(210.0, max(150.0, width * 0.47))
     cap_x = width - PAD - cap_w
     cap = glass_pill((cap_x, (h - cap_h) / 2.0 + 1, cap_w, cap_h),
-                     fill=GLASS_BG, fill_alpha=0.80, border=GLASS_BORDER,
-                     highlight=0.13, glow=0.20)
+                     tint=GLASS_TINT, border=GLASS_BORDER, border_alpha=0.38,
+                     highlight=0.12, material='glass')
     orb_size = 30.0
     orb_frame = (13, (cap_h - orb_size) / 2.0, orb_size, orb_size)
     icon_img = load_project_icon()
@@ -3394,9 +4059,9 @@ def glass_circle(frame, icon_name, color=TEXT_SECONDARY, line=1.8,
     Хит-таргетом всегда служит настоящий прозрачный ui.Button.
     """
     x, y, w, h = frame
-    v = GlassView(radius=min(w, h) / 2.0, fill=fill, fill_alpha=fill_alpha,
-                  border=border, highlight=0.14, glow=glow,
-                  frame=(x, y, w, h))
+    v = GlassView(radius=min(w, h) / 2.0, tint=fill, tint_alpha=fill_alpha,
+                  border=border, border_alpha=0.40, highlight=0.14, glow=glow,
+                  material='glass', interactive=True, frame=(x, y, w, h))
     ic = Icon(icon_name, color, line,
               frame=((w - icon_size) / 2.0, (h - icon_size) / 2.0,
                      icon_size, icon_size))
@@ -3414,11 +4079,11 @@ def empty_block(width, y, title, subtitle, icon='film'):
     """Пустое состояние — тоже стекло, а не пустая дыра в композиции."""
     h = 190.0
     v = glass_card((PAD, y, width - PAD * 2, h), GLASS_RADIUS,
-                   fill_alpha=0.72, highlight=0.09, glow=0.10)
+                   border_alpha=0.30, highlight=0.07)
     w = v.width
-    ring = GlassView(radius=44.0, fill=GLASS_BG_STRONG, fill_alpha=0.75,
-                     border=GLASS_BORDER, highlight=0.16, glow=0.26,
-                     frame=(w / 2.0 - 44, 30, 88, 88))
+    ring = GlassView(radius=44.0, tint=GLASS_BG_STRONG, border=GLASS_BORDER,
+                     border_alpha=0.35, highlight=0.14, glow=0.18,
+                     material='glass', frame=(w / 2.0 - 44, 30, 88, 88))
     ring.add_subview(Icon(icon, ACCENT_LIGHT, 2.0, frame=(28, 28, 32, 32)))
     v.add_subview(ring)
     t = make_label(title, (F_BOLD, 17), TEXT_PRIMARY, ui.ALIGN_CENTER,
@@ -3434,9 +4099,8 @@ def status_pill(text, icon_name, color, x, y, w=None, h=28.0, bg=None):
     lbl_font = (F_REG, 11.5)
     if w is None:
         w = 28 + len(text) * 6.4
-    v = glass_pill((x, y, w, h), fill=(bg or GLASS_BG_STRONG),
-                   fill_alpha=0.85, border=color, border_alpha=0.42,
-                   highlight=0.14)
+    v = glass_pill((x, y, w, h), tint=(bg or GLASS_BG_STRONG),
+                   border=color, border_alpha=0.34, highlight=0.12)
     v.user_interaction_enabled = False
     ic = Icon(icon_name, color, 1.6, frame=(8, (h - 14) / 2, 14, 14))
     v.add_subview(ic)
@@ -3495,11 +4159,11 @@ def job_card(screen, w, y, temp, job):
     err = (job is not None and job.status == ST_ERROR)
     paused = (job is not None and job.status == ST_PAUSED)
     card = glass_card((PAD, y, w - PAD * 2, h), CARD_RADIUS,
-                      fill_alpha=0.70 if paused else 0.78,
+                      tint_alpha=0.55 if paused else GLASS_THIN_A,
                       border=DANGER if err else GLASS_BORDER,
-                      border_alpha=0.55 if err else 0.95,
-                      highlight=0.09,
-                      glow=0.22 if err else 0.10,
+                      border_alpha=0.45 if err else 0.30,
+                      highlight=0.07,
+                      glow=0.16 if err else 0.0,
                       glow_color=DANGER if err else GLASS_GLOW)
     cw = card.width
 
@@ -3580,11 +4244,82 @@ def job_thumb_image(job):
     return None
 
 
+class WatchLine(ui.View):
+    """
+    Очень тонкая полоса просмотра по нижнему краю обложки. Две
+    скруглённые заливки, ни одного цикла — полосам взяться неоткуда.
+    """
+
+    def __init__(self, value, **kwargs):
+        ui.View.__init__(self, **kwargs)
+        self.background_color = 'clear'
+        self.user_interaction_enabled = False
+        self.value = max(0.0, min(1.0, float(value or 0.0)))
+
+    def draw(self):
+        w, h = self.width, self.height
+        if w <= 0 or h <= 0:
+            return
+        r = h / 2.0
+        ui.set_color(rgba(BG_DEEP, 0.75))
+        ui.Path.rounded_rect(0, 0, w, h, r).fill()
+        if self.value > 0:
+            ui.set_color(ACCENT)
+            ui.Path.rounded_rect(0, 0, max(h, w * self.value), h, r).fill()
+
+
+def watch_fraction(item):
+    """Доля просмотренного этого видео или None. Ничего не выдумываем."""
+    try:
+        entry = STATE.watch_get(item.watch_id)
+    except Exception:
+        return None
+    if not isinstance(entry, dict):
+        return None
+    try:
+        pos = float(entry.get('position') or 0.0)
+        total = float(entry.get('duration') or item.duration or 0.0)
+    except Exception:
+        return None
+    if total <= 0 or pos <= 0:
+        return None
+    return max(0.0, min(1.0, pos / total))
+
+
+def watch_position(item):
+    """Сохранённая позиция в секундах или 0."""
+    try:
+        entry = STATE.watch_get(item.watch_id)
+        return float(entry.get('position') or 0.0) if entry else 0.0
+    except Exception:
+        return 0.0
+
+
+def dots_button(action, x, y, h=CTRL_ZONE, w=CTRL_ZONE):
+    """
+    Троеточие в СОБСТВЕННОЙ зоне CTRL_ZONE x CTRL_ZONE.
+
+    Раньше значок стоял впритык к рамке карточки и читался как случайная
+    точка. Теперь у него фиксированная колонка, значок центрирован в ней,
+    хит-таргет не меньше 40x40, а сам знак остаётся маленьким.
+    """
+    holder = ui.View(frame=(x, y, w, h))
+    holder.background_color = 'clear'
+    holder.add_subview(Icon('dots', TEXT_MUTED, 1.6,
+                            frame=(w / 2.0 - 5, h / 2.0 - 9, 10, 18)))
+    hit = ui.Button(frame=(0, 0, w, h))
+    hit.flex = 'WH'
+    hit.background_color = 'clear'
+    hit.action = action
+    holder.add_subview(hit)
+    return holder
+
+
 def play_orb(cx, cy, size=54.0):
     """Стеклянная круглая кнопка play поверх обложки (эталон, фото 3)."""
-    v = GlassView(radius=size / 2.0, fill=GLASS_BG_STRONG, fill_alpha=0.55,
-                  border=GLASS_HIGHLIGHT, border_alpha=0.45,
-                  highlight=0.20, glow=0.22,
+    v = GlassView(radius=size / 2.0, tint=GLASS_BG_STRONG, tint_alpha=0.42,
+                  border=GLASS_HIGHLIGHT, border_alpha=0.34,
+                  highlight=0.18, material='glass',
                   frame=(cx - size / 2.0, cy - size / 2.0, size, size))
     v.user_interaction_enabled = False
     s = size * 0.40
@@ -3595,53 +4330,323 @@ def play_orb(cx, cy, size=54.0):
 
 
 # =====================================================================
+#  NOX SHEET — собственные меню вместо системных окон
+# =====================================================================
+
+class NoxSheet(ui.View):
+    """
+    Единственный модальный компонент NOX.
+
+    Живёт поверх интерфейса внутри самого NoxApp: затемнение на весь
+    экран плюс стеклянная панель снизу. Никаких dialogs.list_dialog и
+    console.alert — именно они выбивались из дизайна и на устройстве
+    иногда уносили Pythonista с собой.
+
+    Ни одного нового таймера: открытие и закрытие — одна ui.animate,
+    её completion всегда настоящий callable (см. animate()).
+    """
+
+    SIDE = 12.0
+    ROW_H = 56.0
+
+    def __init__(self, app, title='', **kwargs):
+        ui.View.__init__(self, **kwargs)
+        self.app = app
+        self.background_color = 'clear'
+        self.title_text = title
+        self._closing = False
+        self._on_close = None
+
+        self.dim = ui.View(frame=self.bounds)
+        self.dim.flex = 'WH'
+        self.dim.background_color = rgba(BG_DEEP, 0.62)
+        self.dim.alpha = 0.0
+        self.add_subview(self.dim)
+        # Тап мимо панели закрывает лист.
+        self.dim_hit = ui.Button(frame=self.bounds)
+        self.dim_hit.flex = 'WH'
+        self.dim_hit.background_color = 'clear'
+        self.dim_hit.action = lambda sender: self.close()
+        self.dim.add_subview(self.dim_hit)
+
+        self.panel = GlassView(radius=GLASS_RADIUS + 6, tint=GLASS_TINT,
+                               tint_alpha=0.72, border=GLASS_BORDER,
+                               border_alpha=0.36, highlight=0.10,
+                               material='glass', shadow=True,
+                               frame=(0, 0, 100, 100))
+        self.add_subview(self.panel)
+
+        self.handle = ui.View(frame=(0, 10, 40, 5))
+        self.handle.background_color = rgba(TEXT_MUTED, 0.55)
+        self.handle.corner_radius = 2.5
+        self.handle.user_interaction_enabled = False
+        self.panel.add_subview(self.handle)
+
+        self.body = ui.View(frame=(0, 24, 100, 100))
+        self.body.background_color = 'clear'
+        self.panel.add_subview(self.body)
+        self._content_h = 0.0
+
+    # -- вёрстка ---------------------------------------------------
+    def set_content_height(self, h):
+        self._content_h = float(h)
+        self.layout()
+
+    def layout(self):
+        w, hh = self.width, self.height
+        if w <= 0:
+            return
+        pw = w - self.SIDE * 2
+        bottom = getattr(self.app, 'bottom_inset', 20.0) + 10.0
+        ph = min(max(160.0, self._content_h + 34.0), hh - 90.0)
+        self.panel.frame = (self.SIDE, hh - ph - bottom, pw, ph)
+        self.handle.frame = (pw / 2.0 - 20, 10, 40, 5)
+        self.body.frame = (0, 24, pw, ph - 24)
+
+    # -- содержимое ------------------------------------------------
+    def add(self, view):
+        self.body.add_subview(view)
+        return view
+
+    def header(self, y, title, subtitle=None, thumb=None):
+        """Шапка листа: обложка, название, метаданные."""
+        w = self.body.width
+        h = 68.0 if thumb is not None else 46.0
+        v = ui.View(frame=(0, y, w, h))
+        v.background_color = 'clear'
+        left = 18.0
+        if thumb is not None:
+            th = ThumbView(thumb, frame=(18, 0, 96, 60))
+            th.corner_radius = 12
+            th.border_width = 1
+            th.border_color = rgba(GLASS_BORDER, 0.7)
+            v.add_subview(th)
+            left = 124.0
+        v.add_subview(make_label(safe_name(title, 34), (F_BOLD, 17),
+                                 TEXT_PRIMARY, lines=2,
+                                 frame=(left, 2, w - left - 18, 40)))
+        if subtitle:
+            v.add_subview(make_label(subtitle, (F_REG, 12.5), TEXT_MUTED,
+                                     frame=(left, 42, w - left - 18, 17)))
+        self.add(v)
+        return y + h + 10
+
+    def row(self, y, icon, title, action, danger=False, subtitle=None):
+        """Строка действия. Хит-таргет — настоящий ui.Button."""
+        w = self.body.width
+        h = self.ROW_H
+        col = DANGER if danger else TEXT_PRIMARY
+        v = GlassView(radius=14.0, tint=GLASS_BG_STRONG,
+                      tint_alpha=0.55 if not danger else 0.40,
+                      border=DANGER if danger else GLASS_BORDER,
+                      border_alpha=0.35 if danger else 0.30,
+                      highlight=0.09, frame=(14, y, w - 28, h))
+        v.add_subview(Icon(icon, DANGER if danger else ACCENT_LIGHT, 1.8,
+                           frame=(16, h / 2.0 - 10, 20, 20)))
+        ty = 0 if not subtitle else 8
+        v.add_subview(make_label(title, (F_REG, 15.5), col,
+                                 frame=(48, ty, w - 28 - 62, h if not subtitle else 20)))
+        if subtitle:
+            v.add_subview(make_label(subtitle, (F_REG, 11.5), TEXT_MUTED,
+                                     frame=(48, 29, w - 28 - 62, 16)))
+        hit = ui.Button(frame=(0, 0, w - 28, h))
+        hit.flex = 'WH'
+        hit.background_color = 'clear'
+        hit.action = action
+        v.add_subview(hit)
+        self.add(v)
+        return y + h + 8
+
+    def section(self, y, title):
+        w = self.body.width
+        self.add(make_label(title, (F_BOLD, 13), TEXT_MUTED,
+                            frame=(18, y, w - 36, 18)))
+        return y + 24
+
+    def chips(self, y, options, current, on_pick, per_row=3):
+        """
+        Сетка выбора вместо длинного списка одинаковых строк.
+        options — [(key, title)], current — выбранный key.
+        """
+        w = self.body.width
+        gap = 8.0
+        cw = (w - 28 - gap * (per_row - 1)) / float(per_row)
+        ch = 42.0
+        for i, (key, title) in enumerate(options):
+            col = i % per_row
+            row = i // per_row
+            sel = (key == current)
+            tile = GlassView(radius=13.0, tint=GLASS_BG_STRONG,
+                             tint_alpha=0.50, border=GLASS_BORDER,
+                             border_alpha=0.30, highlight=0.08,
+                             frame=(14 + col * (cw + gap),
+                                    y + row * (ch + gap), cw, ch))
+            tile.set_active(sel)
+            tile.add_subview(make_label(title, (F_BOLD if sel else F_REG, 13),
+                                        TEXT_PRIMARY if sel else TEXT_SECONDARY,
+                                        ui.ALIGN_CENTER, frame=(0, 0, cw, ch)))
+            hit = ui.Button(frame=(0, 0, cw, ch))
+            hit.flex = 'WH'
+            hit.background_color = 'clear'
+            hit.action = self._picker(on_pick, key)
+            tile.add_subview(hit)
+            self.add(tile)
+        rows = (len(options) + per_row - 1) // per_row
+        return y + rows * (ch + gap) + 4
+
+    @staticmethod
+    def _picker(on_pick, key):
+        def _act(sender):
+            on_pick(key)
+        return _act
+
+    def buttons(self, y, left_title, left_action, right_title, right_action,
+                right_danger=False):
+        """Пара кнопок внизу листа: например «Отмена» и «Удалить»."""
+        w = self.body.width
+        gap = 10.0
+        bw = (w - 28 - gap) / 2.0
+        h = 50.0
+        for i, (title, action, danger) in enumerate(
+                ((left_title, left_action, False),
+                 (right_title, right_action, right_danger))):
+            tint = DANGER if danger else GLASS_BG_STRONG
+            v = GlassView(radius=h / 2.0, tint=tint,
+                          tint_alpha=0.85 if danger else 0.55,
+                          border=DANGER if danger else GLASS_BORDER,
+                          border_alpha=0.45 if danger else 0.32,
+                          highlight=0.14, material='glass', interactive=True,
+                          frame=(14 + i * (bw + gap), y, bw, h))
+            v.add_subview(make_label(title, (F_BOLD, 16), TEXT_PRIMARY,
+                                     ui.ALIGN_CENTER, frame=(0, 0, bw, h)))
+            hit = ui.Button(frame=(0, 0, bw, h))
+            hit.flex = 'WH'
+            hit.background_color = 'clear'
+            hit.action = action
+            v.add_subview(hit)
+            self.add(v)
+        return y + h + 6
+
+    def text_block(self, y, text, mono=False):
+        w = self.body.width
+        lines = max(1, min(6, len(text) // 32 + 1))
+        h = 20.0 + lines * 17.0
+        v = GlassView(radius=13.0, tint=GLASS_BG_DEEP, tint_alpha=0.80,
+                      border=GLASS_BORDER, border_alpha=0.30,
+                      frame=(14, y, w - 28, h))
+        v.add_subview(make_label(text, (F_REG, 12.5), TEXT_SECONDARY,
+                                 lines=lines,
+                                 frame=(14, 10, w - 56, h - 20)))
+        self.add(v)
+        return y + h + 8
+
+    # -- показ и закрытие ------------------------------------------
+    def present(self, on_close=None):
+        self._on_close = on_close
+        self.layout()
+        start = self.panel.frame
+        self.panel.frame = (start[0], self.height, start[2], start[3])
+        self.panel.alpha = 0.0
+
+        def _in():
+            self.dim.alpha = 1.0
+            self.panel.frame = start
+            self.panel.alpha = 1.0
+        animate(_in, 0.24)
+
+    def close(self, sender=None):
+        if self._closing:
+            return
+        self._closing = True
+        f = self.panel.frame
+
+        def _out():
+            self.dim.alpha = 0.0
+            self.panel.alpha = 0.0
+            self.panel.frame = (f[0], self.height, f[2], f[3])
+
+        def _done():
+            try:
+                deactivate_tree(self)
+                if self.superview is not None:
+                    self.superview.remove_subview(self)
+                # Приложение не должно держать ссылку на снятый лист:
+                # иначе следующий open_sheet считал бы его живым.
+                if getattr(self.app, 'sheet', None) is self:
+                    self.app.sheet = None
+            except Exception as e:
+                log_debug('sheet close: %r' % (e,))
+            cb = self._on_close
+            if callable(cb):
+                try:
+                    cb()
+                except Exception as e:
+                    log_debug('sheet on_close: %r' % (e,))
+        animate(_out, 0.20, 0.0, _done)
+
+
+# =====================================================================
 #  НИЖНЯЯ НАВИГАЦИЯ
 # =====================================================================
 
 class ActivePill(ui.View):
     """
-    Светящаяся капсула активной вкладки. Она ОДНА на всю панель и просто
-    переезжает к нужному сегменту: новых view при переключении не
-    создаётся и не удаляется.
+    Капсула активной вкладки.
+
+    Прежняя версия рисовала тело полосами ui.fill_rect, и на устройстве
+    у неё были видны прямые края — прямоугольник вокруг вкладки. Здесь
+    нет ни одной полосы: форму задаёт cornerRadius = h/2 у самой view и
+    у её слоёв, поэтому «квадрату» взяться неоткуда. Внутри — либо
+    отдельный UIGlassEffect (когда доступен), либо непрерывный градиент,
+    либо ровная заливка. Ореол — публичная тень CALayer, наружу.
+
+    Капсула ОДНА на всю панель и просто переезжает между вкладками.
     """
 
     def __init__(self, **kwargs):
         ui.View.__init__(self, **kwargs)
         self.background_color = 'clear'
         self.user_interaction_enabled = False
+        r = max(1.0, self.height / 2.0)
+        # Слой материала: отдельное стекло внутри стеклянного контейнера.
+        self.level = attach_material(self, r, tint=ACCENT, tint_alpha=0.28,
+                                     interactive=True)
+        skin = ui.View(frame=self.bounds)
+        skin.flex = 'WH'
+        skin.user_interaction_enabled = False
+        skin.background_color = rgba(ACCENT, 0.30 if self.level else 0.85)
+        set_corner(skin, r)
+        skin.border_width = 1.0
+        skin.border_color = rgba(ACCENT_LIGHT, 0.45)
+        self.add_subview(skin)
+        self.skin = skin
+        self._spec = attach_gradient(
+            skin,
+            [(GLASS_HIGHLIGHT, 0.22, 0.0), (GLASS_HIGHLIGHT, 0.04, 0.45),
+             (GLASS_HIGHLIGHT, 0.0, 1.0)], radius=r)
+        apply_shadow(self, ACCENT, 0.5, 14.0, (0.0, 0.0))
+
+    def layout(self):
+        r = max(1.0, self.height / 2.0)
+        skin = getattr(self, 'skin', None)
+        if skin is not None:
+            set_corner(skin, r)
+        if self._spec is not None:
+            sync_layer(self._spec, 0, 0, self.width, self.height)
+            try:
+                self._spec.setCornerRadius_(float(r))
+            except Exception:
+                pass
 
     def draw(self):
+        # Fallback без CoreAnimation: ОДНА скруглённая заливка.
+        if getattr(self, 'skin', None) is not None:
+            return
         w, h = self.width, self.height
         if w <= 0 or h <= 0:
             return
-        r = min(h / 2.0, 22.0)
-        # ореол вокруг капсулы, внутрь собственных границ
-        for i in range(4):
-            inset = i * 1.4
-            p = ui.Path.rounded_rect(inset, inset, w - inset * 2,
-                                     h - inset * 2, max(1.0, r - inset))
-            p.line_width = 2.4
-            ui.set_color(rgba(ACCENT, 0.16 * (1.0 - i / 4.0)))
-            p.stroke()
-        # тело капсулы: мягкий вертикальный градиент
-        steps = 12
-        bh = h / float(steps)
-        for i in range(steps):
-            t = i / float(steps - 1)
-            ui.set_color(mixa(ACCENT, ACCENT_DEEP, t, 0.92))
-            top = i == 0
-            bot = i == steps - 1
-            if top or bot:
-                ui.Path.rounded_rect(0, i * bh, w, bh + 1.0, r).fill()
-            else:
-                ui.fill_rect(0, i * bh, w, bh + 1.0)
-        # верхний блик
-        ui.set_color(rgba('#ffffff', 0.16))
-        ui.Path.rounded_rect(r * 0.6, 1.0, w - r * 1.2, h * 0.34, r * 0.5).fill()
-        p = ui.Path.rounded_rect(0.6, 0.6, w - 1.2, h - 1.2, r)
-        p.line_width = 1.2
-        ui.set_color(rgba(ACCENT_LIGHT, 0.55))
-        p.stroke()
+        ui.set_color(rgba(ACCENT, 0.85))
+        ui.Path.rounded_rect(0, 0, w, h, h / 2.0).fill()
 
 
 class TabItem(Tappable):
@@ -3690,11 +4695,14 @@ class TabBar(ui.View):
         self.background_color = 'clear'
         self.items = []
         self.index = 0
+        # Главный showcase Liquid Glass: контейнер из UIGlassContainerEffect,
+        # внутри которого живёт отдельное стекло активной вкладки.
         self.capsule = GlassView(radius=NAV_HEIGHT / 2.0,
-                                 fill=GLASS_BG, fill_alpha=0.82,
-                                 border=GLASS_BORDER, border_w=1.0,
-                                 highlight=0.09, glow=0.16,
-                                 blur=True,
+                                 tint=GLASS_TINT, tint_alpha=0.50,
+                                 border=GLASS_BORDER, border_alpha=0.40,
+                                 border_w=1.0, highlight=0.10,
+                                 material='glass', container=True,
+                                 shadow=True,
                                  frame=(NAV_SIDE, 0, 100, NAV_HEIGHT))
         self.add_subview(self.capsule)
         self.pill = ActivePill(frame=(0, 6, 10, NAV_HEIGHT - 12))
@@ -3970,36 +4978,16 @@ class HomeScreen(Screen):
         self.query = text
         self.rebuild()
 
-    @ui.in_background
     def _open_filter_menu(self, sender):
-        """Штатный для Pythonista список: сортировка и фильтр качества."""
-        labels = ['Сортировка: ' + t for _, t in SORT_OPTIONS]
-        labels += ['Качество: ' + t for _, t in QUALITY_FILTERS]
-        try:
-            import dialogs
-            choice = dialogs.list_dialog('Сортировка и фильтр', labels)
-        except KeyboardInterrupt:
-            return
-        except Exception as e:
-            log_debug('filter menu: %r' % (e,))
-            nox_error('Меню недоступно')
-            return
-        if not choice:
-            return
-        if choice.startswith('Сортировка: '):
-            title = choice[len('Сортировка: '):]
-            for key, text in SORT_OPTIONS:
-                if text == title:
-                    STATE.set('sort', key)
-                    break
-        elif choice.startswith('Качество: '):
-            title = choice[len('Качество: '):]
-            for key, text in QUALITY_FILTERS:
-                if text == title:
-                    STATE.set('quality_filter', key)
-                    break
-        # Перестроение — только на главном потоке.
-        run_on_main(self.rebuild)
+        """
+        Сортировка и фильтр — СВОЙ стеклянный лист.
+
+        dialogs.list_dialog отсюда удалён совсем: белое системное окно
+        выбивалось из дизайна, а на устройстве иногда уносило Pythonista.
+        Метод больше не помечен @ui.in_background — лист открывается
+        строго на главном потоке.
+        """
+        self.app.open_filter_sheet(self.rebuild)
 
     # ---------------------------------------------------------------
     def build(self):
@@ -4030,8 +5018,9 @@ class HomeScreen(Screen):
         gap = 12.0
         btn = h
         box_w = w - PAD * 2 - btn - gap
-        box = glass_pill((PAD, y, box_w, h), fill=GLASS_BG, fill_alpha=0.76,
-                         highlight=0.12, glow=0.08)
+        box = glass_pill((PAD, y, box_w, h), tint=GLASS_TINT,
+                         border_alpha=0.36, highlight=0.11,
+                         material='glass')
         box.add_subview(Icon('search', TEXT_MUTED, 2.0,
                              frame=(20, h / 2 - 11, 22, 22)))
 
@@ -4068,7 +5057,7 @@ class HomeScreen(Screen):
             return y                       # блок полностью скрыт
         h = 166.0
         card = glass_card((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
-                          fill_alpha=0.74, highlight=0.10, glow=0.14)
+                          border_alpha=0.32, highlight=0.08)
         cw = card.width
 
         img = item.load_thumb_image()
@@ -4085,7 +5074,7 @@ class HomeScreen(Screen):
             iv.content_mode = ui.CONTENT_SCALE_ASPECT_FILL
             iv.image = img
             holder.add_subview(iv)
-            holder.add_subview(FadeOverlay(frame=(0, 0, iw, h)))
+            holder.add_subview(fade_overlay((0, 0, iw, h)))
             card.add_subview(holder)
 
         # Капсула «Продолжить» стоит в правом нижнем углу, поэтому текстовая
@@ -4096,8 +5085,9 @@ class HomeScreen(Screen):
         row = Tappable(action=lambda s: self.app.open_media(item),
                        press_scale=0.99, frame=(14, 14, 190, 30))
         row.background_color = 'clear'
-        circ = GlassView(radius=15.0, fill=GLASS_BG_STRONG, fill_alpha=0.9,
-                         border=GLASS_BORDER, highlight=0.18, glow=0.24,
+        circ = GlassView(radius=15.0, tint=GLASS_BG_STRONG,
+                         border=GLASS_BORDER, border_alpha=0.40,
+                         highlight=0.16, material='glass',
                          frame=(0, 0, 30, 30))
         circ.add_subview(Icon('play', TEXT_PRIMARY, 1.7, frame=(10, 8, 13, 14)))
         row.add_subview(circ)
@@ -4131,9 +5121,10 @@ class HomeScreen(Screen):
         card.add_subview(meta)
 
         # Капсула «Продолжить» в правом нижнем углу, как на эталоне.
-        btn = GlassView(radius=bh / 2.0, fill=ACCENT, fill_alpha=0.90,
-                        border=ACCENT_LIGHT, border_alpha=0.55,
-                        highlight=0.20, glow=0.30,
+        btn = GlassView(radius=bh / 2.0, tint=ACCENT, tint_alpha=0.88,
+                        border=ACCENT_LIGHT, border_alpha=0.50,
+                        highlight=0.20, glow=0.26, material='glass',
+                        interactive=True,
                         frame=(cw - bw - 14, h - bh - 14, bw, bh))
         btn.add_subview(Icon('play', TEXT_PRIMARY, 1.9, frame=(26, 15, 17, 17)))
         btn.add_subview(make_label('Продолжить', (F_BOLD, 16), TEXT_PRIMARY,
@@ -4243,8 +5234,10 @@ class HomeScreen(Screen):
         return y + row_h + 22
 
     def _library_card(self, item, x, y, cw, thumb_h, total_h):
-        c = Tappable(action=lambda s: self.app.open_media(item),
-                     press_scale=0.985, frame=(x, y, cw, total_h))
+        # Хит-таргетом служит настоящий прозрачный ui.Button: собственный
+        # touch_ended у Tappable на устройстве до обработчика не доходил.
+        c = Tappable(action=None, press_scale=0.985,
+                     frame=(x, y, cw, total_h))
         c.background_color = 'clear'
 
         th = ThumbView(item.load_thumb_image(), frame=(0, 0, cw, thumb_h))
@@ -4266,20 +5259,21 @@ class HomeScreen(Screen):
         c.add_subview(m)
 
         py = ty + 40
-        pill = glass_pill((0, py, min(84.0, cw - 26), 30),
-                          fill=GLASS_BG_STRONG, fill_alpha=0.85,
-                          border=ACCENT, border_alpha=0.40, highlight=0.14)
+        pill = glass_pill((0, py, min(84.0, cw - CTRL_ZONE + 4), 30),
+                          tint=GLASS_BG_STRONG, border=ACCENT,
+                          border_alpha=0.32, highlight=0.12)
         pill.user_interaction_enabled = False
         pill.add_subview(Icon('check', ACCENT_LIGHT, 1.8, frame=(10, 9, 12, 12)))
         pill.add_subview(make_label('Офлайн', (F_REG, 11), ACCENT_LIGHT,
                                     frame=(26, 0, pill.width - 30, 30)))
         c.add_subview(pill)
 
-        dots = Tappable(action=lambda s: self.app.item_menu(item),
-                        press_scale=0.85, frame=(cw - 24, py, 24, 30))
-        dots.background_color = 'clear'
-        dots.add_subview(Icon('dots', TEXT_MUTED, 1.5, frame=(8, 8, 8, 14)))
-        c.add_subview(dots)
+        hit = ui.Button(frame=(0, 0, cw, thumb_h + 34))
+        hit.background_color = 'clear'
+        hit.action = lambda s: self.app.open_media(item)
+        c.add_subview(hit)
+        c.add_subview(dots_button(lambda s: self.app.item_menu(item),
+                                  cw - CTRL_ZONE, py - 5, 34.0, CTRL_ZONE))
         return c
 
     # ---------------------------------------------------------------
@@ -4380,13 +5374,14 @@ class DownloadsScreen(Screen):
     # ---------------------------------------------------------------
     def _build_url_box(self, w, y):
         h = 132.0
-        box = glass_card((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
-                         fill_alpha=0.72, highlight=0.10, glow=0.12)
+        box = glass_panel((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
+                          border_alpha=0.34, highlight=0.10)
         bw = box.width
 
         fh = 58.0
-        field = GlassView(radius=fh / 2.0, fill=GLASS_BG_DEEP, fill_alpha=0.92,
-                          border=GLASS_BORDER, highlight=0.06,
+        field = GlassView(radius=fh / 2.0, tint=GLASS_BG_DEEP,
+                          tint_alpha=0.86, border=GLASS_BORDER,
+                          border_alpha=0.42, highlight=0.05,
                           frame=(14, 14, bw - 28, fh))
         field.add_subview(Icon('link', TEXT_MUTED, 1.8, frame=(16, 19, 22, 20)))
 
@@ -4409,8 +5404,9 @@ class DownloadsScreen(Screen):
         field.add_subview(tf)
 
         # Отдельная стеклянная кнопка «Вставить» внутри поля.
-        pb = GlassView(radius=pbh / 2.0, fill=GLASS_BG_STRONG, fill_alpha=0.95,
-                       border=GLASS_BORDER, highlight=0.18, glow=0.14,
+        pb = GlassView(radius=pbh / 2.0, tint=GLASS_BG_STRONG,
+                       border=GLASS_BORDER, border_alpha=0.45,
+                       highlight=0.16, material='glass', interactive=True,
                        frame=(field.width - paste_w - 8, (fh - pbh) / 2.0,
                               paste_w, pbh))
         pb.add_subview(Icon('clip', TEXT_PRIMARY, 1.7, frame=(14, 13, 16, 16)))
@@ -4463,9 +5459,10 @@ class DownloadsScreen(Screen):
             x = PAD + i * (cw + gap)
             # Плитка — стекло, а не просто синяя рамка: у активной меняются
             # и поверхность, и край, и внутреннее свечение.
-            tile = GlassView(radius=16.0, fill=GLASS_BG, fill_alpha=0.78,
-                             border=GLASS_BORDER, highlight=0.10,
-                             frame=(x, y, cw, ch))
+            tile = GlassView(radius=16.0, tint=GLASS_TINT,
+                             border=GLASS_BORDER, border_alpha=0.34,
+                             highlight=0.09, material='glass',
+                             interactive=True, frame=(x, y, cw, ch))
             t = make_label(top, (F_BOLD, 17), TEXT_PRIMARY, ui.ALIGN_CENTER,
                            frame=(0, 20, cw, 22))
             tile.add_subview(t)
@@ -4618,11 +5615,12 @@ class DownloadsScreen(Screen):
     def _build_storage(self, w, y):
         h = 108.0
         c = glass_card((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
-                       fill_alpha=0.74, highlight=0.10, glow=0.10)
+                       border_alpha=0.30, highlight=0.08)
         cw = c.width
 
-        box = GlassView(radius=15.0, fill=GLASS_BG_STRONG, fill_alpha=0.9,
-                        border=GLASS_BORDER, highlight=0.16, glow=0.22,
+        box = GlassView(radius=15.0, tint=GLASS_BG_STRONG,
+                        border=GLASS_BORDER, border_alpha=0.38,
+                        highlight=0.14, material='glass',
                         frame=(14, 22, 54, 54))
         box.add_subview(Icon('drive', ACCENT_LIGHT, 1.9, frame=(14, 14, 26, 26)))
         c.add_subview(box)
@@ -4715,8 +5713,8 @@ class PlayerScreen(Screen):
         cw = w - PAD * 2
         th_h = cw * 0.56
         h = th_h + 92.0
-        c = glass_card((PAD, y, cw, h), GLASS_RADIUS, fill_alpha=0.74,
-                       highlight=0.10, glow=0.14)
+        c = glass_card((PAD, y, cw, h), GLASS_RADIUS, border_alpha=0.30,
+                       highlight=0.08)
 
         th = ThumbView(item.load_thumb_image(), frame=(8, 8, cw - 16, th_h))
         th.corner_radius = 15
@@ -4731,12 +5729,18 @@ class PlayerScreen(Screen):
             c.add_subview(duration_badge(dur, cw - 20, 8 + th_h - 28))
 
         ty = th_h + 20
-        right = 44.0
+        right = CTRL_ZONE + 12.0
         c.add_subview(make_label(safe_name(item.title, 34), (F_BOLD, 17),
                                  TEXT_PRIMARY,
                                  frame=(16, ty, cw - 16 - right, 22)))
-        c.add_subview(make_label(item.meta_line or item.fmt_label,
-                                 (F_REG, 12.5), TEXT_SECONDARY,
+        pos = watch_position(item)
+        if pos > 0:
+            meta = 'Продолжить с ' + fmt_clock(pos)
+            meta_col = ACCENT_LIGHT
+        else:
+            meta = item.meta_line or item.fmt_label
+            meta_col = TEXT_SECONDARY
+        c.add_subview(make_label(meta, (F_REG, 12.5), meta_col,
                                  frame=(16, ty + 23, cw - 16 - right, 17)))
         tail = item.uploader or ''
         if tail:
@@ -4749,21 +5753,18 @@ class PlayerScreen(Screen):
         hit.action = lambda s: self.app.open_media(item)
         c.add_subview(hit)
 
-        dots = Tappable(action=lambda s: self.app.item_menu(item),
-                        press_scale=0.85, frame=(cw - 38, ty - 2, 30, 34))
-        dots.background_color = 'clear'
-        dots.add_subview(Icon('dots', TEXT_MUTED, 1.5, frame=(11, 9, 8, 16)))
-        c.add_subview(dots)
+        c.add_subview(dots_button(lambda s: self.app.item_menu(item),
+                                  cw - CTRL_ZONE - 6, ty - 6))
         return c
 
     def _row(self, w, y, item):
         h = 108.0
-        c = Tappable(action=lambda s: self.app.open_media(item),
-                     press_scale=0.985, frame=(PAD, y, w - PAD * 2, h))
+        c = Tappable(action=None, press_scale=0.985,
+                     frame=(PAD, y, w - PAD * 2, h))
         c.background_color = 'clear'
         cw = c.width
-        c.add_subview(glass_card((0, 0, cw, h), CARD_RADIUS, fill_alpha=0.74,
-                                 highlight=0.09, glow=0.08))
+        c.add_subview(glass_card((0, 0, cw, h), CARD_RADIUS,
+                                 border_alpha=0.28, highlight=0.07))
 
         tw, th_h, orb = 138.0, 88.0, 34.0
         ty = (h - th_h) / 2.0
@@ -4780,14 +5781,22 @@ class PlayerScreen(Screen):
             # ty+(th_h+orb)/2), поэтому пересечься они не могут.
             c.add_subview(duration_badge(dur, 10 + 6 + badge_w(dur),
                                          ty + th_h - 26))
+        frac = watch_fraction(item)
+        if frac is not None:
+            c.add_subview(WatchLine(frac, frame=(10, ty + th_h - 4, tw, 3)))
 
         left = 10.0 + tw + 14.0
-        right = 40.0
+        right = CTRL_ZONE + 12.0
         tw_text = max(50.0, cw - left - right)
         c.add_subview(make_label(safe_name(item.title, 26), (F_BOLD, 15),
                                  TEXT_PRIMARY, frame=(left, 24, tw_text, 20)))
-        c.add_subview(make_label(item.meta_line or item.fmt_label,
-                                 (F_REG, 12), TEXT_SECONDARY,
+        pos = watch_position(item)
+        if pos > 0:
+            row_meta, row_col = ('Продолжить с ' + fmt_clock(pos), ACCENT_LIGHT)
+        else:
+            row_meta, row_col = (item.meta_line or item.fmt_label,
+                                 TEXT_SECONDARY)
+        c.add_subview(make_label(row_meta, (F_REG, 12), row_col,
                                  frame=(left, 46, tw_text, 17)))
         tail = item.uploader or ''
         if tail:
@@ -4795,11 +5804,13 @@ class PlayerScreen(Screen):
                                      TEXT_FAINT,
                                      frame=(left, 65, tw_text, 16)))
 
-        dots = Tappable(action=lambda s: self.app.item_menu(item),
-                        press_scale=0.85, frame=(cw - 36, h / 2 - 17, 30, 34))
-        dots.background_color = 'clear'
-        dots.add_subview(Icon('dots', TEXT_MUTED, 1.5, frame=(11, 9, 8, 16)))
-        c.add_subview(dots)
+        hit = ui.Button(frame=(0, 0, cw - CTRL_ZONE - 8, h))
+        hit.background_color = 'clear'
+        hit.action = lambda s: self.app.open_media(item)
+        c.add_subview(hit)
+        c.add_subview(dots_button(lambda s: self.app.item_menu(item),
+                                  cw - CTRL_ZONE - 6,
+                                  (h - CTRL_ZONE) / 2.0))
         return c
 
 # =====================================================================
@@ -4860,15 +5871,16 @@ class SettingsScreen(Screen):
     def _card(self, w, y, h, title):
         """Раздел настроек — такая же стеклянная группа, как карточки."""
         c = glass_card((PAD, y, w - PAD * 2, h), GLASS_RADIUS,
-                       fill_alpha=0.72, highlight=0.09, glow=0.08)
+                       border_alpha=0.30, highlight=0.07)
         c.add_subview(make_label(title, (F_BOLD, 16.5), TEXT_PRIMARY,
                                  frame=(16, 14, c.width - 32, 22)))
         return c
 
     def _row_button(self, cw, y, h, icon, title, action):
         """Строка-действие внутри раздела: стекло плюс прозрачный ui.Button."""
-        b = GlassView(radius=13.0, fill=GLASS_BG_STRONG, fill_alpha=0.9,
-                      border=GLASS_BORDER, highlight=0.14, glow=0.10,
+        b = GlassView(radius=13.0, tint=GLASS_BG_STRONG,
+                      border=GLASS_BORDER, border_alpha=0.36,
+                      highlight=0.12, material='glass',
                       frame=(16, y, cw - 32, h))
         b.add_subview(Icon(icon, ACCENT_LIGHT, 1.7,
                            frame=(15, h / 2.0 - 9, 18, 18)))
@@ -5055,12 +6067,16 @@ class NoxApp(ui.View):
 
         STATE.ensure_folder()
         _load_yt_dlp()
+        PLAYER.app = self
         # Незавершённые загрузки прошлого запуска возвращаются как
         # приостановленные. Сами по себе они не стартуют никогда.
         try:
             DOWNLOADER.restore(STATE)
         except Exception as e:
             log_debug('restore: %r' % (e,))
+
+        # Фон-градиент кладётся ПЕРВЫМ и лежит под всеми экранами.
+        self._build_backdrop()
 
         self.body = ui.View(frame=self.bounds)
         self.body.background_color = 'clear'
@@ -5096,6 +6112,7 @@ class NoxApp(ui.View):
 
     def layout(self):
         self._compute_insets()
+        self._layout_backdrop()
         nav_total = NAV_H + self.bottom_inset
         self.body.frame = (0, self.top_inset, self.width,
                            max(50.0, self.height - self.top_inset))
@@ -5109,32 +6126,37 @@ class NoxApp(ui.View):
                 nox_error(str(e))
         self.tabbar.frame = (0, self.height - nav_total, self.width, nav_total)
 
-    def draw(self):
+    def _build_backdrop(self):
         """
-        Многослойный фон: вертикальный градиент плюс два очень слабых
-        размытых пятна света. Рисуется один раз на изменение размера,
-        такт обновления загрузок его не трогает.
+        Фон приложения: непрерывный CAGradientLayer плюс два очень слабых
+        РАДИАЛЬНЫХ пятна света. Ни одной полосы — раньше здесь было 26
+        ui.fill_rect подряд, и их швы были видны на устройстве.
+        Строится один раз, такт обновления загрузок его не трогает.
         """
+        self.backdrop = GradientFill([(BG_TOP, 1.0, 0.0),
+                                      (BG, 1.0, 0.45),
+                                      (BG_DEEP, 1.0, 1.0)],
+                                     flat=BG,
+                                     frame=self.bounds)
+        self.backdrop.flex = 'WH'
+        self.add_subview(self.backdrop)
+        self.glows = []
+        for fx, fy, fs, alpha in ((0.10, 0.02, 1.5, 0.16),
+                                  (0.95, 0.34, 1.1, 0.09),
+                                  (0.50, 1.00, 1.3, 0.10)):
+            g = GradientFill([(BG_GLOW, alpha, 0.0),
+                              (BG_GLOW, alpha * 0.28, 0.45),
+                              (BG_GLOW, 0.0, 1.0)],
+                             radial=True, flat=BG, flat_alpha=0.0,
+                             frame=(0, 0, 10, 10))
+            self.add_subview(g)
+            self.glows.append((g, fx, fy, fs))
+
+    def _layout_backdrop(self):
         w, h = self.width, self.height
-        if w <= 0 or h <= 0:
-            return
-        steps = 26
-        band = h / float(steps)
-        for i in range(steps):
-            t = i / float(steps - 1)
-            # сверху холоднее и светлее, к низу уходит в почти чёрный
-            ui.set_color(mix(BG_TOP, BG_DEEP, t ** 0.75))
-            ui.fill_rect(0, i * band, w, band + 1.0)
-        # Рассеянный свет: круги с очень малой альфой, без текстуры и шума.
-        for cx, cy, rad, a in ((w * 0.16, h * 0.05, w * 0.95, 0.13),
-                               (w * 0.95, h * 0.30, w * 0.80, 0.07),
-                               (w * 0.50, h * 0.97, w * 0.85, 0.09)):
-            rings = 9
-            for i in range(rings, 0, -1):
-                t = i / float(rings)
-                r = rad * t
-                ui.set_color(rgba(BG_GLOW, a * (1.0 - t) ** 2.0))
-                ui.Path.oval(cx - r, cy - r, r * 2, r * 2).fill()
+        for g, fx, fy, fs in getattr(self, 'glows', ()):
+            size = w * fs
+            g.frame = (w * fx - size / 2.0, h * fy - size / 2.0, size, size)
 
     # ---------------------------------------------------------------
     def select_tab(self, index):
@@ -5188,73 +6210,206 @@ class NoxApp(ui.View):
         self.rebuild_screens()
 
     # ---------------------------------------------------------------
-    @ui.in_background
     def open_media(self, item):
-        if not os.path.exists(item.path):
-            nox_error('Файл больше не существует')
-            run_on_main(self.reload_all)
-            return
-        STATE.remember_opened(item.path)
-        started = time.monotonic()
-        try:
-            console.quicklook(item.path)
-        except Exception:
-            nox_error('Не удалось открыть файл')
-        # Просмотрщик iOS позицию не сообщает, поэтому засекается реальное
-        # время, что он был открыт, и накапливается в watch_progress.
-        try:
-            STATE.watch_note(item.watch_id, time.monotonic() - started,
-                             item.duration)
-        except Exception as e:
-            log_debug('watch_note: %r' % (e,))
-        run_on_main(self._refresh_home_after_watch)
+        """
+        ЕДИНСТВЕННАЯ точка открытия видео во всём интерфейсе: карточка на
+        главной, hero, featured и компактные карточки плеера, пункт меню.
+        Все они ведут сюда, а отсюда — в PLAYER.open.
 
-    def _refresh_home_after_watch(self):
-        """Главный поток: обновить «Продолжить просмотр» после просмотра."""
+        Не @ui.in_background: AVPlayerViewController показывается строго
+        с главного потока.
+        """
+        PLAYER.open(item)
+
+    def after_player_closed(self):
+        """
+        Плеер закрыт: позиция уже сохранена в PlayerManager.close().
+        Здесь только обновление интерфейса, на главном потоке.
+        """
         try:
             self.home.rebuild()
         except Exception as e:
-            log_debug('refresh home: %r' % (e,))
-
-    @ui.in_background
-    def item_menu(self, item):
+            log_debug('home rebuild: %r' % (e,))
         try:
-            choice = console.alert(safe_name(item.title, 30),
-                                   item.meta_line or item.fmt_label,
-                                   'Открыть', 'Показать источник', 'Удалить')
-        except KeyboardInterrupt:
-            return
-        except Exception:
-            return
-        if choice == 1:
-            self.open_media(item)
-        elif choice == 2:
-            src = item.webpage_url or 'Источник неизвестен'
-            if clipboard is not None and item.webpage_url:
-                try:
-                    clipboard.set(item.webpage_url)
-                except Exception:
-                    pass
+            if self._tab == 2:
+                self.player.rebuild()
+            else:
+                self.player._built_w = -1.0
+        except Exception as e:
+            log_debug('player rebuild: %r' % (e,))
+
+    def _refresh_home_after_watch(self):
+        """Совместимость: то же самое обновление главной."""
+        self.after_player_closed()
+
+    # -- собственные меню NOX --------------------------------------
+    def _sheet_host(self):
+        """Куда класть лист: поверх всего содержимого NoxApp."""
+        return self
+
+    def close_sheet(self):
+        sheet = getattr(self, 'sheet', None)
+        if sheet is not None:
+            sheet.close()
+            self.sheet = None
+
+    def open_sheet(self, title=''):
+        """
+        Открывает новый лист, аккуратно убрав предыдущий. Только главный
+        поток: метод вызывается из обработчиков нажатий.
+        """
+        old = getattr(self, 'sheet', None)
+        if old is not None:
             try:
-                console.alert('Источник', src, 'Закрыть',
-                              hide_cancel_button=True)
-            except KeyboardInterrupt:
-                pass
+                deactivate_tree(old)
+                if old.superview is not None:
+                    old.superview.remove_subview(old)
+            except Exception as e:
+                log_debug('sheet swap: %r' % (e,))
+        sheet = NoxSheet(self, title, frame=self.bounds)
+        sheet.flex = 'WH'
+        self.add_subview(sheet)
+        self.sheet = sheet
+        return sheet
+
+    def item_menu(self, item):
+        """⋯ у видео: стеклянный лист NOX, без единого системного окна."""
+        try:
+            sheet = self.open_sheet()
+            y = 12.0
+            y = sheet.header(y, item.title,
+                             item.meta_line or item.fmt_label,
+                             item.load_thumb_image())
+            watch = STATE.watch_get(item.watch_id)
+            pos = 0.0
+            if isinstance(watch, dict):
+                try:
+                    pos = float(watch.get('position') or 0.0)
+                except Exception:
+                    pos = 0.0
+            if pos > 0:
+                y = sheet.row(y, 'play', 'Продолжить',
+                              self._sheet_open(item),
+                              subtitle='с ' + fmt_clock(pos))
+            else:
+                y = sheet.row(y, 'play', 'Открыть', self._sheet_open(item))
+            y = sheet.row(y, 'link', 'Источник', self._sheet_source(item))
+            y = sheet.row(y, 'trash', 'Удалить', self._sheet_confirm(item),
+                          danger=True)
+            sheet.set_content_height(y)
+            sheet.present()
+        except Exception as e:
+            log_debug('item_menu: %r' % (e,))
+            nox_error('Меню недоступно')
+
+    def _sheet_open(self, item):
+        def _act(sender):
+            self.close_sheet()
+            # Открываем плеер следующим шагом: сначала лист должен уйти.
+            run_on_main(lambda: PLAYER.open(item))
+        return _act
+
+    def _sheet_source(self, item):
+        def _act(sender):
+            src = item.webpage_url or ''
+            sheet = self.open_sheet()
+            y = 12.0
+            y = sheet.header(y, 'Источник', safe_name(item.title, 34))
+            y = sheet.text_block(y, src or 'Источник неизвестен')
+            if src and clipboard is not None:
+                y = sheet.row(y, 'clip', 'Скопировать ссылку',
+                              self._sheet_copy(src))
+            y = sheet.buttons(y, 'Назад',
+                              lambda s: self.item_menu(item),
+                              'Закрыть', lambda s: self.close_sheet())
+            sheet.set_content_height(y)
+            sheet.present()
+        return _act
+
+    def _sheet_copy(self, text):
+        def _act(sender):
+            try:
+                clipboard.set(text)
+                nox_ok('Скопировано')
             except Exception:
-                pass
-        elif choice == 3:
-            self._delete(item)
+                nox_error('Не удалось скопировать')
+        return _act
+
+    def _sheet_confirm(self, item):
+        def _act(sender):
+            sheet = self.open_sheet()
+            y = 12.0
+            y = sheet.header(y, 'Удалить видео?', safe_name(item.title, 40))
+            y = sheet.text_block(
+                y, 'Файл и его обложка с метаданными будут удалены '
+                   'с устройства безвозвратно.')
+            y = sheet.buttons(y, 'Отмена', lambda s: self.close_sheet(),
+                              'Удалить', self._sheet_delete(item),
+                              right_danger=True)
+            sheet.set_content_height(y)
+            sheet.present()
+        return _act
+
+    def _sheet_delete(self, item):
+        def _act(sender):
+            self.close_sheet()
+            run_on_main(lambda: self._delete(item))
+        return _act
+
+    def open_filter_sheet(self, on_change=None):
+        """Сортировка и фильтр качества — сетка, а не список из 11 строк."""
+        try:
+            sheet = self.open_sheet()
+
+            def rebuild_sheet():
+                self.open_filter_sheet(on_change)
+
+            def pick_sort(key):
+                STATE.set('sort', key)
+                if callable(on_change):
+                    on_change()
+                rebuild_sheet()
+
+            def pick_quality(key):
+                STATE.set('quality_filter', key)
+                if callable(on_change):
+                    on_change()
+                rebuild_sheet()
+
+            def reset(sender):
+                STATE.set('sort', 'new')
+                STATE.set('quality_filter', 'all')
+                if callable(on_change):
+                    on_change()
+                rebuild_sheet()
+
+            y = 12.0
+            y = sheet.header(y, 'Сортировка и фильтр')
+            y = sheet.section(y, 'СОРТИРОВКА')
+            y = sheet.chips(y, [(k, t) for k, t in SORT_OPTIONS],
+                            STATE.get('sort', 'new'), pick_sort, per_row=2)
+            y += 8
+            y = sheet.section(y, 'КАЧЕСТВО')
+            y = sheet.chips(y, [(k, t) for k, t in QUALITY_FILTERS],
+                            STATE.get('quality_filter', 'all'), pick_quality,
+                            per_row=3)
+            y += 6
+            y = sheet.buttons(y, 'Сбросить', reset,
+                              'Готово', lambda s: self.close_sheet())
+            sheet.set_content_height(y)
+            sheet.present()
+        except Exception as e:
+            log_debug('filter sheet: %r' % (e,))
+            nox_error('Меню недоступно')
 
     def _delete(self, item):
-        try:
-            console.alert('Удалить файл?',
-                          safe_name(item.title, 40), 'Удалить')
-        except KeyboardInterrupt:
-            return
-        except Exception:
-            return
-        # Только спутники ИМЕННО этого видео: .nox.json, обложка,
-        # старый .info.json. Чужие файлы не трогаем.
+        """
+        Сама файловая логика удаления не менялась: подтверждение теперь
+        приходит из NoxSheet, а не из системного окна.
+        """
+        if PLAYER.is_playing(item):
+            # Открытый прямо сейчас файл сначала корректно закрываем.
+            PLAYER.close()
         targets = [item.path] + item.sidecar_paths()
         try:
             STATE.watch_forget(item.watch_id)
@@ -5275,8 +6430,6 @@ class NoxApp(ui.View):
             nox_ok('Удалено')
         else:
             nox_error('Файл больше не существует')
-        # Файлы уже удалены в фоне, а перечитывание папки и перестроение
-        # экранов выполняет главный поток.
         run_on_main(self.reload_all)
 
     def toggle_job(self, job_id):
@@ -5377,7 +6530,13 @@ class NoxApp(ui.View):
                     self.indeterminate_phase = 0.0
             # Экран не гасим, только пока что-то реально качается или
             # разбирается. Пауза, ошибка и пустая очередь его не держат.
-            keep_screen_awake(DOWNLOADER.awake_needed())
+            keep_screen_awake(DOWNLOADER.awake_needed()
+                              or PLAYER.is_active)
+            if PLAYER.is_active:
+                # Никакого своего таймера у плеера нет: позицию снимает
+                # этот же единственный такт.
+                step = UI_REFRESH
+                PLAYER.tick()
             self._resolve_pending()
             self._persist_jobs()
             self._persist_debug()
@@ -5540,6 +6699,12 @@ class NoxApp(ui.View):
 
     def will_close(self):
         self._alive = False
+        # Позиция просмотра сохраняется в любом случае, даже если NOX
+        # закрыли прямо во время воспроизведения.
+        try:
+            PLAYER.close()
+        except Exception:
+            pass
         # Очередь сохраняем последний раз и возвращаем экрану право гаснуть.
         try:
             DOWNLOADER.persist(STATE)

@@ -7,24 +7,23 @@ NOX - офлайн-медиатека для iPhone (Pythonista 3).
 Архитектура (одна, рабочая):
 
     NOX (Pythonista)
-        -> shortcuts://run-shortcut?name=NOX%20Download&text=<команда>
-        -> Ярлык "NOX Download"
-        -> a-Shell (действие "Execute Command")
-        -> yt-dlp
-        -> общая папка NoxMedia
+        -> локальный пакет yt_dlp рядом с NOX.py
+        -> yt_dlp.YoutubeDL в отдельном потоке
+        -> NoxMedia
         -> NOX видит файлы напрямую
+
+Всё происходит внутри NOX: ни a-Shell, ни Ярлыков, ни выхода из приложения.
 
 Все пути считаются от самого NOX.py, никаких путей контейнера в коде нет:
 
     Файлы -> На iPhone -> NOX          <- PROJECT_DIR (папка с NOX.py)
         NOX.py
         NOX_icon.png                   <- необязательно
-        NoxMedia/                      <- медиатека (одна для NOX и a-Shell)
-        NOX_Data/state.json            <- настройки и состояние
+        yt_dlp/                        <- локальный пакет загрузчика
+        NoxMedia/                      <- медиатека
+        NOX_Data/state.json            <- настройки
 
-a-Shell получает доступ к той же самой NoxMedia один раз командой pickFolder.
-
-Инструкция по разовой настройке - на вкладке "Настройки" внутри приложения.
+Загрузка идёт, пока NOX открыт: усыпить Pythonista может сама iOS.
 """
 
 import os
@@ -35,12 +34,6 @@ import json
 import time
 import shutil
 import threading
-import webbrowser
-
-try:
-    from urllib.parse import quote as _url_quote
-except ImportError:                                    # pragma: no cover
-    from urllib import quote as _url_quote             # type: ignore
 
 import ui
 import console
@@ -87,13 +80,16 @@ F_REG       = '<system>'
 PAD         = 20.0
 NAV_H       = 60.0
 
-# Сколько ждать реального появления файлов от yt-dlp, прежде чем считать
-# запуск неудавшимся, и сколько после этого держать строку с ошибкой.
-PENDING_TIMEOUT = 90.0
-ERROR_TTL = 300.0
+# Как часто интерфейс перечитывает состояние загрузки. progress_hook
+# дёргается очень часто, поэтому UI обновляется не чаще ~5 раз в секунду.
+UI_REFRESH = 0.22
+IDLE_REFRESH = 3.0
 
 VIDEO_EXT   = ('.mp4', '.mov', '.m4v', '.mkv', '.webm')
-IMAGE_EXT   = ('.jpg', '.jpeg', '.png')
+# .webp yt-dlp пишет часто, но Pythonista его обычно не декодирует:
+# такой файл найдётся, картинка не откроется — и карточка честно останется
+# минималистичной, без выдуманной обложки.
+IMAGE_EXT   = ('.jpg', '.jpeg', '.png', '.webp')
 TEMP_EXT    = ('.part', '.ytdl')
 
 QUALITIES = [
@@ -225,6 +221,39 @@ def fmt_duration(sec):
     if m:
         return '%d мин' % m
     return '%d с' % s
+
+
+def fmt_speed(bps):
+    """Реальная скорость из progress_hook. Нет данных — пустая строка."""
+    try:
+        v = float(bps)
+    except Exception:
+        return ''
+    if v <= 0:
+        return ''
+    if v >= 1024.0 ** 3:
+        return '%.1f GB/s' % (v / 1024.0 ** 3)
+    if v >= 1024.0 ** 2:
+        return '%.1f MB/s' % (v / 1024.0 ** 2)
+    if v >= 1024.0:
+        return '%.0f KB/s' % (v / 1024.0)
+    return '%d B/s' % int(v)
+
+
+def fmt_eta(seconds):
+    """Реальный остаток из progress_hook: 00:38 или 1:02:03."""
+    try:
+        s = int(float(seconds))
+    except Exception:
+        return ''
+    if s < 0:
+        return ''
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    if h:
+        return '%d:%02d:%02d' % (h, m, sec)
+    return '%02d:%02d' % (m, sec)
 
 
 def safe_name(text, limit=40):
@@ -745,8 +774,8 @@ PROJECT_DIR = _project_dir()
 MEDIA_DIR = os.path.join(PROJECT_DIR, 'NoxMedia')
 DATA_DIR = os.path.join(PROJECT_DIR, 'NOX_Data')
 ICON_PATH = os.path.join(PROJECT_DIR, 'NOX_icon.png')
+YT_DLP_DIR = os.path.join(PROJECT_DIR, 'yt_dlp')
 STATE_PATH = os.path.join(DATA_DIR, 'state.json')
-JOB_PATH = os.path.join(DATA_DIR, 'nox_job.json')
 LEGACY_STATE = os.path.join(os.path.expanduser('~/Documents'), '.nox_state.json')
 
 # Показываем пользователю понятный путь, а не контейнер приложения.
@@ -764,6 +793,51 @@ def ensure_dirs():
         if not os.path.isdir(path):
             ok = False
     return ok
+
+
+# ---------------------------------------------------------------------
+#  Локальный пакет yt_dlp рядом с NOX.py
+# ---------------------------------------------------------------------
+
+yt_dlp = None
+YTDLP_ERROR = ''
+YTDLP_VERSION = ''
+
+
+def _load_yt_dlp():
+    """
+    Импортирует ИМЕННО тот yt_dlp, что лежит рядом с NOX.py: PROJECT_DIR
+    ставится первым в sys.path. Системные пути не хардкодятся.
+    Неудача не роняет приложение — она превращается в понятную ошибку.
+    """
+    global yt_dlp, YTDLP_ERROR, YTDLP_VERSION
+    if yt_dlp is not None:
+        return yt_dlp
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    if not os.path.isdir(YT_DLP_DIR):
+        YTDLP_ERROR = 'Модуль yt-dlp не найден'
+        return None
+    try:
+        import yt_dlp as _mod
+    except Exception as e:
+        YTDLP_ERROR = 'Модуль yt-dlp не найден'
+        print('NOX: не удалось импортировать yt_dlp: %r' % (e,))
+        return None
+    got = os.path.dirname(os.path.abspath(getattr(_mod, '__file__', '') or ''))
+    if os.path.normpath(got) != os.path.normpath(YT_DLP_DIR):
+        print('NOX: yt_dlp импортирован не из папки проекта: %s' % got)
+    yt_dlp = _mod
+    YTDLP_ERROR = ''
+    try:
+        YTDLP_VERSION = str(getattr(_mod.version, '__version__', '') or '')
+    except Exception:
+        YTDLP_VERSION = ''
+    return yt_dlp
+
+
+def ytdlp_ready():
+    return _load_yt_dlp() is not None
 
 
 _LAST_ERROR = {'text': '', 'time': 0.0}
@@ -789,10 +863,7 @@ class State(object):
     def __init__(self):
         self.data = {
             'quality': '720',
-            'bookmark': 'NoxMedia',
-            'use_shortcut': True,
             'last_opened': None,
-            'jobs': [],
         }
         self.load()
 
@@ -804,7 +875,10 @@ class State(object):
                 with io.open(source, 'r', encoding='utf-8') as f:
                     raw = json.load(f)
                 if isinstance(raw, dict):
-                    raw.pop('folder', None)      # путь больше не настраивается
+                    # Устаревшие ключи прежней архитектуры (a-Shell/Ярлык) и
+                    # активные задания в JSON не восстанавливаются.
+                    for dead in ('folder', 'bookmark', 'use_shortcut', 'jobs'):
+                        raw.pop(dead, None)
                     self.data.update(raw)
         except Exception:
             pass
@@ -850,38 +924,6 @@ class State(object):
         if p and os.path.exists(p):
             return p
         return None
-
-    # --- задания на загрузку ---
-    def add_job(self, url, quality):
-        """
-        Запоминаем снимок папки на момент старта: любой НОВЫЙ файл в NoxMedia
-        означает, что yt-dlp реально начал работу (он всегда пишет .info.json).
-        """
-        jobs = [j for j in self.data.get('jobs', []) if isinstance(j, dict)]
-        jobs = [j for j in jobs if j.get('url') != url]
-        try:
-            known = sorted(os.listdir(MEDIA_DIR))[:500]
-        except Exception:
-            known = []
-        jobs.append({'url': url, 'quality': quality, 'time': time.time(),
-                     'known': known})
-        self.data['jobs'] = jobs[-8:]
-        self.save()
-
-    def drop_job(self, url):
-        jobs = [j for j in self.data.get('jobs', []) if isinstance(j, dict)]
-        before = len(jobs)
-        self.data['jobs'] = [j for j in jobs if j.get('url') != url]
-        self.save()
-        return len(self.data['jobs']) != before
-
-    def raw_jobs(self):
-        return [j for j in self.data.get('jobs', []) if isinstance(j, dict)]
-
-    def set_jobs(self, jobs):
-        if jobs != self.data.get('jobs'):
-            self.data['jobs'] = jobs
-            self.save()
 
 
 STATE = State()
@@ -1083,39 +1125,27 @@ class Library(object):
         self.items.sort(key=lambda i: i.mtime, reverse=True)
         self.temps.sort(key=lambda i: i.mtime, reverse=True)
 
-    def jobs(self):
+    def orphan_temps(self, active_paths):
         """
-        Задания NOX, ожидающие подтверждения от yt-dlp.
-
-        Подтверждение — появление в NoxMedia НОВОГО файла относительно снимка,
-        сделанного при запуске (yt-dlp с --write-info-json создаёт его сразу).
-        Подтверждённое задание убирается: дальше его показывает реальный .part.
-        Неподтверждённое живёт PENDING_TIMEOUT секунд, затем становится ошибкой
-        и через ERROR_TTL исчезает само — вечных «Подготовка...» больше нет.
+        Незавершённые файлы, за которыми НЕ стоит живой DownloadJob.
+        После перезапуска NOX такие .part показываются как «Не завершено»,
+        а не как идущая прямо сейчас загрузка.
         """
-        now = time.time()
-        current = set(self.names)
-        keep = []
-        out = []
-        for j in self.state.raw_jobs():
-            url = j.get('url')
-            if not url:
+        busy = set()
+        for p in active_paths or ():
+            if not p:
                 continue
-            started = float(j.get('time', 0) or 0)
-            known = set(j.get('known') or [])
-            if current - known:
-                continue                       # yt-dlp реально начал работу
-            age = now - started
-            if age >= PENDING_TIMEOUT + ERROR_TTL:
-                continue                       # ошибка отвисела своё — убираем
-            keep.append(j)
-            out.append({
-                'url': url,
-                'quality': j.get('quality', ''),
-                'time': started,
-                'status': 'pending' if age < PENDING_TIMEOUT else 'error',
-            })
-        self.state.set_jobs(keep)
+            busy.add(os.path.normpath(p))
+            busy.add(os.path.normpath(p + '.part'))
+        out = []
+        for t in self.temps:
+            base = t.path
+            for suf in ('.part', '.ytdl'):
+                if base.endswith(suf):
+                    base = base[:-len(suf)]
+            if os.path.normpath(t.path) in busy or os.path.normpath(base) in busy:
+                continue
+            out.append(t)
         return out
 
     def filtered(self, query):
@@ -1151,30 +1181,8 @@ LIB = Library(STATE)
 
 
 # =====================================================================
-#  ЗАПУСК ЗАГРУЗКИ (a-Shell + yt-dlp)
+#  ЗАГРУЗКА (локальный yt_dlp внутри NOX)
 # =====================================================================
-
-def format_selector(quality):
-    """
-    Приоритет: точный прямой urlXXX -> ближайший меньший прямой ->
-    single-file (видео+аудио) -> любой совместимый.
-    Никаких video-only + audio-only (ffmpeg не требуется).
-    """
-    if quality == 'MAX':
-        chain = list(DIRECT_LADDER)
-    else:
-        key = 'url' + str(quality)
-        if key in DIRECT_LADDER:
-            chain = DIRECT_LADDER[DIRECT_LADDER.index(key):]
-        else:
-            chain = list(DIRECT_LADDER)
-    chain = chain + [
-        'best[ext=mp4][vcodec!=none][acodec!=none]',
-        'best[vcodec!=none][acodec!=none]',
-        'best',
-    ]
-    return '/'.join(chain)
-
 
 URL_RE = re.compile(r'^https?://[^\s"\'`\\]+$', re.IGNORECASE)
 
@@ -1188,64 +1196,460 @@ def validate_url(url):
     return url, None
 
 
-def build_command(url, quality, bookmark):
-    fmt = format_selector(quality)
-    out = '%(title)s [%(id)s].%(ext)s'
-    # a-Shell не разбирает «&&» — он воспринял всю строку как один вызов и
-    # напечатал Usage. Execute Command должен получить ДВЕ команды,
-    # разделённые переводом строки; закладка адресуется как ~NoxMedia.
-    return (
-        'cd ~{bm}\n'
-        'yt-dlp -f "{fmt}" --continue --retries infinite '
-        '--write-info-json --write-thumbnail -o "{out}" "{url}"'
-    ).format(bm=bookmark, fmt=fmt, out=out, url=url)
-
-
-def write_job_file(url, quality, folder):
-    """Дублируем задание в NOX_Data — на случай ручного запуска."""
-    try:
-        ensure_dirs()
-        payload = {'url': url, 'quality': quality, 'folder': folder,
-                   'created': time.time()}
-        with io.open(JOB_PATH, 'w', encoding='utf-8') as f:
-            f.write(json.dumps(payload, ensure_ascii=False, indent=1))
-    except Exception:
-        pass
-
-
-def start_download(url, quality):
-    """Возвращает (ok, сообщение)."""
-    url, err = validate_url(url)
-    if err:
-        return False, err
-    if quality not in [q[0] for q in QUALITIES]:
-        return False, 'Такое качество недоступно'
-    if not STATE.ensure_folder():
-        return False, 'Папка NOX недоступна'
-
-    bookmark = (STATE.get('bookmark') or 'NoxMedia').strip() or 'NoxMedia'
-    cmd = build_command(url, quality, bookmark)
-
-    write_job_file(url, quality, STATE.folder)
-
-    if clipboard is not None:
+def ffmpeg_available():
+    """
+    Склейка video-only + audio-only допустима только при наличии ffmpeg.
+    В Pythonista его, как правило, нет — тогда такие форматы не выбираются.
+    """
+    mod = _load_yt_dlp()
+    if mod is not None:
         try:
-            clipboard.set(cmd)
+            from yt_dlp.postprocessor.ffmpeg import FFmpegPostProcessor
+            pp = FFmpegPostProcessor()
+            if getattr(pp, 'available', False):
+                return True
         except Exception:
             pass
-
-    STATE.add_job(url, quality)
-
-    if not STATE.get('use_shortcut', True):
-        return True, 'Команда скопирована. Вставьте её в a-Shell.'
-
     try:
-        target = ('shortcuts://run-shortcut?name=NOX%20Download&input=text&text='
-                  + _url_quote(cmd, safe=''))
-        webbrowser.open(target)
+        return bool(shutil.which('ffmpeg'))
     except Exception:
-        return False, 'Не удалось запустить загрузку'
-    return True, 'Передано в a-Shell'
+        return False
+
+
+HEIGHTS = {'360': 360, '480': 480, '720': 720}
+# Прямые combined-форматы VK: они уже содержат звук.
+VK_DIRECT = {
+    '360': ['url360', 'url240', 'url144'],
+    '480': ['url480', 'url360', 'url240', 'url144'],
+    '720': ['url720', 'url480', 'url360', 'url240', 'url144'],
+    'MAX': ['url2160', 'url1440', 'url1080', 'url720',
+            'url480', 'url360', 'url240', 'url144'],
+}
+
+
+def format_selector(quality, allow_merge=None):
+    """
+    Сначала готовый файл со звуком (progressive/combined), только потом —
+    склейка, и лишь если ffmpeg реально доступен.
+    'best' в yt-dlp по определению возвращает формат с видео И аудио.
+    """
+    if allow_merge is None:
+        allow_merge = ffmpeg_available()
+    h = HEIGHTS.get(quality)
+    parts = list(VK_DIRECT.get(quality, []))
+    if h:
+        parts.append('best[height<=%d][ext=mp4]' % h)
+        parts.append('best[height<=%d]' % h)
+    else:
+        parts.append('best[ext=mp4]')
+    if allow_merge:
+        if h:
+            parts.append('bestvideo[height<=%d]+bestaudio' % h)
+        else:
+            parts.append('bestvideo+bestaudio')
+    parts.append('best')
+    return '/'.join(parts)
+
+
+class DownloadCancelledByUser(Exception):
+    """Запасное исключение отмены, если DownloadCancelled нет в этой версии."""
+    pass
+
+
+def _cancel_exception():
+    mod = _load_yt_dlp()
+    if mod is not None:
+        try:
+            from yt_dlp.utils import DownloadCancelled
+            return DownloadCancelled
+        except Exception:
+            pass
+    return DownloadCancelledByUser
+
+
+class _QuietLogger(object):
+    """Диагностика уходит в консоль Pythonista, а не в интерфейс."""
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        print('NOX yt-dlp: %s' % msg)
+
+    def error(self, msg):
+        print('NOX yt-dlp: %s' % msg)
+
+
+ST_QUEUED = 'queued'
+ST_PREPARING = 'preparing'
+ST_DOWNLOADING = 'downloading'
+ST_PROCESSING = 'processing'
+ST_FINISHED = 'finished'
+ST_ERROR = 'error'
+ST_CANCELLED = 'cancelled'
+
+ACTIVE_STATES = (ST_QUEUED, ST_PREPARING, ST_DOWNLOADING, ST_PROCESSING)
+
+STATUS_TEXT = {
+    ST_QUEUED: 'В очереди',
+    ST_PREPARING: 'Получение информации...',
+    ST_DOWNLOADING: 'Скачивается',
+    ST_PROCESSING: 'Обработка файла...',
+    ST_FINISHED: 'Готово',
+    ST_ERROR: 'Ошибка загрузки',
+    ST_CANCELLED: 'Остановлено',
+}
+
+STATUS_SHORT = {
+    ST_QUEUED: 'В очереди',
+    ST_PREPARING: 'Подготовка',
+    ST_DOWNLOADING: 'Скачивается',
+    ST_PROCESSING: 'Обработка',
+    ST_FINISHED: 'Готово',
+    ST_ERROR: 'Ошибка',
+    ST_CANCELLED: 'Остановлено',
+}
+
+
+class DownloadJob(object):
+    _seq = 0
+
+    def __init__(self, url, quality):
+        DownloadJob._seq += 1
+        self.id = 'job%d' % DownloadJob._seq
+        self.url = url
+        self.quality = quality
+        self.title = ''
+        self.status = ST_QUEUED
+        self.downloaded_bytes = 0
+        self.total_bytes = None
+        self.total_bytes_estimate = None
+        self.speed = None
+        self.eta = None
+        self.filename = ''
+        self.error = ''
+        self.started_at = time.time()
+        self.finished_at = None
+        self.cancel_requested = False
+
+    @property
+    def total(self):
+        """Точный размер, иначе оценка yt-dlp, иначе None. Ничего не выдумываем."""
+        for v in (self.total_bytes, self.total_bytes_estimate):
+            try:
+                if v and float(v) > 0:
+                    return float(v)
+            except Exception:
+                continue
+        return None
+
+    @property
+    def percent(self):
+        total = self.total
+        if not total:
+            return None
+        return max(0.0, min(1.0, float(self.downloaded_bytes) / total))
+
+    @property
+    def is_active(self):
+        return self.status in ACTIVE_STATES
+
+    @property
+    def display_title(self):
+        if self.title:
+            return self.title
+        if self.filename:
+            return os.path.splitext(os.path.basename(self.filename))[0]
+        return self.url
+
+    def sub_line(self):
+        """Первая строка карточки — то, что реально известно."""
+        if self.status == ST_DOWNLOADING:
+            total = self.total
+            if total:
+                return 'Скачивается  •  %s / %s' % (
+                    fmt_size(self.downloaded_bytes), fmt_size(total))
+            return 'Скачивается  •  %s' % fmt_size(self.downloaded_bytes)
+        if self.status == ST_ERROR and self.error:
+            return safe_name(self.error, 46)
+        return STATUS_TEXT.get(self.status, '')
+
+    def detail_line(self):
+        """Вторая строка: процент, скорость, остаток — только реальные."""
+        if self.status != ST_DOWNLOADING:
+            return ''
+        bits = []
+        pct = self.percent
+        if pct is not None:
+            bits.append('%d%%' % int(pct * 100))
+        sp = fmt_speed(self.speed)
+        if sp:
+            bits.append(sp)
+        eta = fmt_eta(self.eta)
+        if eta:
+            bits.append('осталось ' + eta)
+        return '  ·  '.join(bits)
+
+    def short_status(self):
+        if self.status == ST_DOWNLOADING:
+            pct = self.percent
+            if pct is not None:
+                return '%d%%' % int(pct * 100)
+        return STATUS_SHORT.get(self.status, '')
+
+
+class DownloadManager(object):
+    """
+    Живёт на уровне приложения, а не экрана: перестроение интерфейса и
+    переключение вкладок его не трогают. Режим последовательный — один
+    рабочий поток, остальные задания ждут в очереди.
+    """
+
+    def __init__(self):
+        self.jobs = []
+        self.revision = 0        # меняется при структурных изменениях
+        self.tick = 0            # меняется на каждом обновлении прогресса
+        self._lock = threading.RLock()
+        self._thread = None
+
+    # -- чтение состояния ------------------------------------------
+    def all_jobs(self):
+        with self._lock:
+            return list(self.jobs)
+
+    def active_jobs(self):
+        return [j for j in self.all_jobs() if j.is_active]
+
+    def visible_jobs(self):
+        """Активные + недавно завершившиеся с ошибкой/остановкой."""
+        return [j for j in self.all_jobs()
+                if j.is_active or j.status in (ST_ERROR, ST_CANCELLED)]
+
+    def active_paths(self):
+        return [j.filename for j in self.active_jobs() if j.filename]
+
+    def find(self, job_id):
+        for j in self.all_jobs():
+            if j.id == job_id:
+                return j
+        return None
+
+    def signature(self):
+        """Структурный отпечаток: меняется — значит нужен полный rebuild."""
+        return tuple((j.id, j.status) for j in self.visible_jobs())
+
+    # -- изменение состояния ---------------------------------------
+    def add(self, url, quality):
+        url, err = validate_url(url)
+        if err:
+            return False, err
+        if quality not in [q[0] for q in QUALITIES]:
+            return False, 'Такое качество недоступно'
+        if not ytdlp_ready():
+            return False, YTDLP_ERROR or 'Модуль yt-dlp не найден'
+        if not ensure_dirs():
+            return False, 'Папка NOX недоступна'
+        with self._lock:
+            for j in self.jobs:
+                if j.url == url and j.is_active:
+                    return False, 'Эта ссылка уже в очереди'
+            job = DownloadJob(url, quality)
+            self.jobs.append(job)
+            self.revision += 1
+        self._pump()
+        return True, 'Добавлено в очередь'
+
+    def cancel(self, job_id):
+        """Настоящая отмена: рабочий поток прервётся на ближайшем hook."""
+        job = self.find(job_id)
+        if job is None:
+            return False
+        if job.is_active:
+            job.cancel_requested = True
+            if job.status == ST_QUEUED:
+                job.status = ST_CANCELLED
+                job.finished_at = time.time()
+        with self._lock:
+            self.revision += 1
+        self._pump()
+        return True
+
+    def remove(self, job_id):
+        job = self.find(job_id)
+        if job is None:
+            return False
+        if job.is_active:
+            job.cancel_requested = True
+        with self._lock:
+            self.jobs = [j for j in self.jobs if j.id != job_id]
+            self.revision += 1
+        return True
+
+    def clear_finished(self):
+        with self._lock:
+            before = len(self.jobs)
+            self.jobs = [j for j in self.jobs if j.status != ST_FINISHED]
+            if len(self.jobs) != before:
+                self.revision += 1
+
+    # -- рабочий поток ---------------------------------------------
+    def _pump(self):
+        """
+        Запускает следующее задание, только если поток не занят.
+        Вызывается из add/cancel и из самого потока по завершении, поэтому
+        перестроение интерфейса второй поток создать не может.
+        """
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            nxt = None
+            for j in self.jobs:
+                if j.status == ST_QUEUED and not j.cancel_requested:
+                    nxt = j
+                    break
+            if nxt is None:
+                self._thread = None
+                return
+            nxt.status = ST_PREPARING
+            self.revision += 1
+            self._thread = threading.Thread(target=self._run, args=(nxt,),
+                                            name='nox-download', daemon=True)
+            self._thread.start()
+
+    def _hook(self, job, d):
+        if job.cancel_requested:
+            raise _cancel_exception()('Загрузка остановлена пользователем')
+        st = d.get('status')
+        if st == 'downloading':
+            job.status = ST_DOWNLOADING
+            job.downloaded_bytes = d.get('downloaded_bytes') or 0
+            job.total_bytes = d.get('total_bytes')
+            job.total_bytes_estimate = d.get('total_bytes_estimate')
+            job.speed = d.get('speed')
+            job.eta = d.get('eta')
+            name = d.get('filename')
+            if not name:
+                info = d.get('info_dict') or {}
+                name = info.get('_filename') or info.get('filepath')
+            if name:
+                job.filename = name
+        elif st == 'finished':
+            job.status = ST_PROCESSING
+            done = d.get('total_bytes') or d.get('downloaded_bytes')
+            if done:
+                job.downloaded_bytes = done
+                if not job.total_bytes:
+                    job.total_bytes = done
+            job.speed = None
+            job.eta = None
+            name = d.get('filename')
+            if name:
+                job.filename = name
+        elif st == 'error':
+            job.status = ST_ERROR
+            if not job.error:
+                job.error = 'Загрузка прервана'
+        self.tick += 1
+
+    def _ydl_opts(self, job):
+        allow_merge = ffmpeg_available()
+        opts = {
+            'format': format_selector(job.quality, allow_merge),
+            'outtmpl': os.path.join(MEDIA_DIR, '%(title)s [%(id)s].%(ext)s'),
+            'continuedl': True,
+            'noprogress': True,
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'writeinfojson': True,
+            'writethumbnail': True,
+            'retries': 10,
+            'fragment_retries': 10,
+            'socket_timeout': 30,
+            'logger': _QuietLogger(),
+            'progress_hooks': [lambda d, _j=job: self._hook(_j, d)],
+        }
+        if allow_merge:
+            opts['merge_output_format'] = 'mp4'
+        return opts
+
+    def _run(self, job):
+        cancel_exc = _cancel_exception()
+        try:
+            mod = _load_yt_dlp()
+            if mod is None:
+                raise RuntimeError(YTDLP_ERROR or 'Модуль yt-dlp не найден')
+            with mod.YoutubeDL(self._ydl_opts(job)) as ydl:
+                info = ydl.extract_info(job.url, download=False)
+                if isinstance(info, dict):
+                    entries = info.get('entries')
+                    if isinstance(entries, list) and entries:
+                        info = entries[0] or {}
+                    title = info.get('title')
+                    if isinstance(title, str) and title.strip():
+                        job.title = title.strip()
+                    self.tick += 1
+                if job.cancel_requested:
+                    raise cancel_exc('Загрузка остановлена пользователем')
+                ydl.download([job.url])
+            if job.cancel_requested:
+                job.status = ST_CANCELLED
+            else:
+                job.status = ST_FINISHED
+        except cancel_exc:
+            job.status = ST_CANCELLED
+        except DownloadCancelledByUser:
+            job.status = ST_CANCELLED
+        except Exception as e:
+            if job.cancel_requested:
+                job.status = ST_CANCELLED
+            else:
+                job.status = ST_ERROR
+                job.error = short_error(e)
+                print('NOX: ошибка загрузки %s: %r' % (job.url, e))
+        finally:
+            job.finished_at = time.time()
+            job.speed = None
+            job.eta = None
+            with self._lock:
+                self.revision += 1
+                self._thread = None
+            self.tick += 1
+            try:
+                self._pump()
+            except Exception as e:
+                print('NOX: не удалось взять следующее задание: %r' % (e,))
+
+
+def short_error(exc):
+    """Короткий человеческий текст. Полный traceback — только в консоль."""
+    text = str(exc or '').strip()
+    text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+    text = re.sub(r'^ERROR:\s*', '', text)
+    text = text.split('\n')[0].strip()
+    low = text.lower()
+    if not text:
+        return 'Не удалось скачать'
+    if 'unsupported url' in low or 'no video' in low:
+        return 'Ссылка не поддерживается'
+    if 'requested format' in low:
+        return 'Такое качество недоступно'
+    if 'private' in low or 'login' in low or 'sign in' in low:
+        return 'Видео требует входа в аккаунт'
+    if 'timed out' in low or 'timeout' in low:
+        return 'Превышено время ожидания'
+    if 'name or service not known' in low or 'urlopen error' in low \
+            or 'connection' in low or 'network' in low:
+        return 'Нет соединения с сервером'
+    if 'no space left' in low:
+        return 'Недостаточно места'
+    return safe_name(text, 60)
+
+
+DOWNLOADER = DownloadManager()
 
 
 # =====================================================================
@@ -1455,6 +1859,8 @@ class Screen(ui.View):
     _ready = False
     _built_w = -1.0
     _building = False
+    _job_views = None
+    _job_sig = None
     app = None
     sv = None
 
@@ -1470,6 +1876,8 @@ class Screen(ui.View):
         self.add_subview(self.sv)
         self._built_w = -1.0
         self._building = False
+        self._job_views = {}
+        self._job_sig = None
         self._ready = True
 
     def layout(self):
@@ -1483,12 +1891,12 @@ class Screen(ui.View):
         for v in list(self.sv.subviews):
             self.sv.remove_subview(v)
 
-    # -- крестик «убрать из очереди NOX» -----------------------------
+    # -- крестик: настоящая остановка загрузки ------------------------
     def _dismiss_button(self, job, x, y, w=26.0, h=28.0):
         """
         Хит-таргет — настоящий прозрачный ui.Button, как у кнопки «Скачать».
-        Крестик убирает только запись NOX; процесс yt-dlp он не трогает,
-        поэтому и появляется лишь у неподтверждённых и ошибочных заданий.
+        yt-dlp работает внутри NOX, поэтому крестик реально прерывает
+        рабочий поток, а не просто прячет строку.
         """
         holder = ui.View(frame=(x, y, w, h))
         holder.background_color = 'clear'
@@ -1502,8 +1910,10 @@ class Screen(ui.View):
         return holder
 
     def _make_dismiss(self, job):
+        job_id = getattr(job, 'id', None)
+
         def _act(sender):
-            self.app.cancel_job(job)
+            self.app.cancel_job(job_id)
         return _act
 
     def rebuild(self):
@@ -1515,14 +1925,72 @@ class Screen(ui.View):
         self._building = True
         try:
             self.clear()
+            self._job_views = {}
+            self._job_sig = DOWNLOADER.signature()
             self.build()
             self._built_w = self.width
         except Exception as e:
             self.clear()
+            self._job_views = {}
             self._built_w = -1.0
             nox_error(str(e))
         finally:
             self._building = False
+
+    def refresh_jobs(self):
+        """
+        Точечное обновление строк загрузки: тексты и полоса меняются на месте.
+        Экран целиком пересобирается только когда меняется состав очереди или
+        статус задания, а не на каждый чанк из сети.
+        """
+        if not self._ready or self.hidden or self.width <= 40:
+            return
+        if DOWNLOADER.signature() != self._job_sig:
+            self.rebuild()
+            return
+        views = self._job_views or {}
+        if not views:
+            return
+        for job in DOWNLOADER.visible_jobs():
+            row = views.get(job.id)
+            if not row:
+                continue
+            try:
+                self._apply_job(job, row)
+            except Exception as e:
+                print('NOX: не удалось обновить строку загрузки: %r' % (e,))
+
+    def _apply_job(self, job, row):
+        title = row.get('title')
+        if title is not None:
+            text = safe_name(job.display_title, 26)
+            if title.text != text:
+                title.text = text
+        sub = row.get('sub')
+        if sub is not None:
+            text = job.sub_line()
+            if sub.text != text:
+                sub.text = text
+        detail = row.get('detail')
+        if detail is not None:
+            text = job.detail_line()
+            if detail.text != text:
+                detail.text = text
+        status = row.get('status')
+        if status is not None:
+            text = job.short_status()
+            if status.text != text:
+                status.text = text
+        bar = row.get('bar')
+        if bar is not None:
+            value = job.percent
+            if value is None and job.status in (ST_ERROR, ST_CANCELLED):
+                value = 0.0
+            if value is None:
+                bar.start_indeterminate()
+            else:
+                bar.stop()
+            bar.set_value(value)
 
     def build(self):
         """Наполнение экрана. Переопределяется наследниками."""
@@ -1770,8 +2238,8 @@ class HomeScreen(Screen):
 
     # ---------------------------------------------------------------
     def _build_downloads(self, w, y):
-        temps = LIB.temps
-        jobs = LIB.jobs()
+        jobs = DOWNLOADER.visible_jobs()
+        temps = LIB.orphan_temps(DOWNLOADER.active_paths())
         head, hh = section_header(w, y, 'Загрузки',
                                   'Все' if (temps or jobs) else None,
                                   lambda s: self.app.select_tab(1))
@@ -1786,23 +2254,19 @@ class HomeScreen(Screen):
 
         box = card_view((PAD, y, w - PAD * 2, 0), CARD, 16, BORDER)
         by = 0.0
-        rows = 0
-        for t in temps[:4]:
-            r = self._download_row(box.width, by, t.title, t, None)
+        for j in jobs[:4]:
+            r = self._download_row(box.width, by, None, j)
             box.add_subview(r)
             by += r.height
-            rows += 1
-        for j in jobs[:3]:
-            r = self._download_row(box.width, by, safe_name(j.get('url', ''), 30),
-                                   None, j)
+        for t in temps[:3]:
+            r = self._download_row(box.width, by, t, None)
             box.add_subview(r)
             by += r.height
-            rows += 1
         box.height = max(60.0, by)
         self.sv.add_subview(box)
         return y + box.height
 
-    def _download_row(self, w, y, title, temp, job):
+    def _download_row(self, w, y, temp, job):
         h = 74.0
         v = ui.View(frame=(0, y, w, h))
         v.background_color = 'clear'
@@ -1813,44 +2277,46 @@ class HomeScreen(Screen):
         th.border_color = BORDER
         v.add_subview(th)
 
+        title = temp.title if temp is not None else job.display_title
         tl = make_label(safe_name(title, 26), (F_BOLD, 13), TXT,
                         frame=(70, 14, w - 70 - 118, 17))
         v.add_subview(tl)
 
         if temp is not None:
-            prog = temp.progress
-            if prog is None:
-                sub = 'Скачивается  •  ' + fmt_size(temp.size)
-            else:
-                sub = '%s из %s' % (fmt_size(temp.size), fmt_size(temp.total))
-            sl = make_label(sub, (F_REG, 10.5), TXT_3,
-                            frame=(70, 31, w - 70 - 118, 14))
-            v.add_subview(sl)
-            bar = ProgressBar(prog, frame=(70, 50, w - 70 - 118, 5))
-            v.add_subview(bar)
-            if prog is None:
-                bar.start_indeterminate()
-                st_text, st_icon = 'Скачивается', 'ring'
-            else:
-                st_text, st_icon = '%d%%' % int(prog * 100), 'download'
-        elif job.get('status') == 'error':
-            sl = make_label('Не удалось начать загрузку', (F_REG, 10.5), ERR_TXT,
-                            frame=(70, 31, w - 70 - 118, 14))
-            v.add_subview(sl)
-            bar = ProgressBar(0.0, frame=(70, 50, w - 70 - 118, 5))
-            v.add_subview(bar)
-            st_text, st_icon, st_col = 'Ошибка', 'close', ERR_TXT
+            # Незавершённый файл прошлого запуска: сейчас он никуда не качается.
+            sub = 'Не завершено  •  ' + fmt_size(temp.size)
+            bar_value = temp.progress
+            st_text, st_icon, st_col = 'Не завершено', 'clock', TXT_2
+            indeterminate = False
         else:
-            sl = make_label('Подготовка...', (F_REG, 10.5), TXT_3,
-                            frame=(70, 31, w - 70 - 118, 14))
-            v.add_subview(sl)
-            bar = ProgressBar(None, frame=(70, 50, w - 70 - 118, 5))
-            v.add_subview(bar)
-            bar.start_indeterminate()
-            st_text, st_icon, st_col = 'Подготовка', 'ring', ACCENT_2
+            sub = job.sub_line()
+            bar_value = job.percent
+            st_text = job.short_status()
+            st_col = ERR_TXT if job.status == ST_ERROR else ACCENT_2
+            if job.status == ST_ERROR:
+                st_icon = 'close'
+            elif job.status == ST_CANCELLED:
+                st_icon = 'clock'
+                st_col = TXT_2
+            elif job.status == ST_DOWNLOADING and bar_value is not None:
+                st_icon = 'download'
+            else:
+                st_icon = 'ring'
+            indeterminate = (job.status in (ST_PREPARING, ST_PROCESSING) or
+                             (job.status == ST_DOWNLOADING and bar_value is None))
+            if job.status in (ST_ERROR, ST_CANCELLED) and bar_value is None:
+                bar_value = 0.0
 
-        if temp is not None:
-            st_col = ACCENT_2
+        sl = make_label(sub, (F_REG, 10.5),
+                        ERR_TXT if (job is not None and job.status == ST_ERROR)
+                        else TXT_3,
+                        frame=(70, 31, w - 70 - 118, 14))
+        v.add_subview(sl)
+        bar = ProgressBar(bar_value, frame=(70, 50, w - 70 - 118, 5))
+        v.add_subview(bar)
+        if indeterminate:
+            bar.start_indeterminate()
+
         ic = Icon(st_icon, st_col, 1.6, frame=(w - 112, h / 2 - 10, 20, 20))
         v.add_subview(ic)
         st = make_label(st_text, (F_REG, 11), st_col,
@@ -1859,6 +2325,8 @@ class HomeScreen(Screen):
 
         if job is not None:
             v.add_subview(self._dismiss_button(job, w - 30, h / 2 - 14))
+            self._job_views[job.id] = {'sub': sl, 'bar': bar, 'status': st,
+                                       'title': tl}
 
         ui_line = ui.View(frame=(70, h - 1, w - 82, 1))
         ui_line.background_color = rgba(BORDER, 0.7)
@@ -2083,8 +2551,14 @@ class DownloadsScreen(Screen):
 
         self.sv.add_subview(btn)
         y += h + 10
-        self.sv.add_subview(make_label('Для больших загрузок не закрывайте a-Shell.',
-                                       (F_REG, 10.5), TXT_4, ui.ALIGN_CENTER,
+        if ytdlp_ready():
+            note, note_col = 'Для больших загрузок не закрывайте NOX.', TXT_4
+        else:
+            note = (YTDLP_ERROR or 'Модуль yt-dlp не найден') + \
+                   '  •  положите папку yt_dlp рядом с NOX.py'
+            note_col = ERR_TXT
+        self.sv.add_subview(make_label(note, (F_REG, 10.5), note_col,
+                                       ui.ALIGN_CENTER,
                                        frame=(PAD, y, w - PAD * 2, 16)))
         return y + 26
 
@@ -2117,23 +2591,20 @@ class DownloadsScreen(Screen):
                 self._url_field.end_editing()
             except Exception:
                 pass
-        ok, msg = start_download(url, self.quality)
+        ok, msg = DOWNLOADER.add(url, self.quality)
         if ok:
             nox_ok(msg)
             self.url_text = ''
             if self._url_field is not None:
                 self._url_field.text = ''
-            try:
-                ui.delay(self.rebuild, 0.6)
-            except Exception:
-                self.rebuild()
+            self.rebuild()
         else:
             nox_error(msg)
 
     # ---------------------------------------------------------------
     def _build_queue(self, w, y):
-        temps = LIB.temps
-        jobs = LIB.jobs()
+        jobs = DOWNLOADER.visible_jobs()
+        temps = LIB.orphan_temps(DOWNLOADER.active_paths())
         count = len(temps) + len(jobs)
         self.sv.add_subview(make_label('Очередь загрузок', (F_BOLD, 19), TXT,
                                        frame=(PAD, y, w - 140, 26)))
@@ -2148,17 +2619,17 @@ class DownloadsScreen(Screen):
             self.sv.add_subview(v)
             return y + vh + 20
 
-        for t in temps:
-            card = self._queue_card(w, y, t.title, t, None)
+        for j in jobs:
+            card = self._queue_card(w, y, None, j)
             self.sv.add_subview(card)
             y += card.height + 10
-        for j in jobs:
-            card = self._queue_card(w, y, safe_name(j.get('url', ''), 32), None, j)
+        for t in temps:
+            card = self._queue_card(w, y, t, None)
             self.sv.add_subview(card)
             y += card.height + 10
         return y + 10
 
-    def _queue_card(self, w, y, title, temp, job):
+    def _queue_card(self, w, y, temp, job):
         h = 86.0
         c = card_view((PAD, y, w - PAD * 2, h), CARD, 14, BORDER)
         cw = c.width
@@ -2171,55 +2642,57 @@ class DownloadsScreen(Screen):
 
         left = 82.0
         right_w = 120.0
-        c.add_subview(make_label(safe_name(title, 24), (F_BOLD, 14), TXT,
-                                 frame=(left, 14, cw - left - right_w, 18)))
+        title = temp.title if temp is not None else job.display_title
+        tl = make_label(safe_name(title, 24), (F_BOLD, 14), TXT,
+                        frame=(left, 14, cw - left - right_w, 18))
+        c.add_subview(tl)
 
         if temp is not None:
-            prog = temp.progress
-            if prog is None:
-                sub = 'Скачивается  •  ' + fmt_size(temp.size)
-                st_text = 'Скачивается'
-            else:
-                sub = '%s из %s' % (fmt_size(temp.size), fmt_size(temp.total))
-                st_text = '%d%%' % int(prog * 100)
-            c.add_subview(make_label(sub, (F_REG, 11), TXT_3,
-                                     frame=(left, 33, cw - left - right_w, 15)))
-            bar = ProgressBar(prog, frame=(left, 56, cw - left - 16, 5))
-            c.add_subview(bar)
-            if prog is None:
-                bar.start_indeterminate()
-            c.add_subview(make_label(st_text, (F_BOLD, 12), ACCENT_2, ui.ALIGN_RIGHT,
-                                     frame=(cw - right_w - 4, 14, right_w - 44, 18)))
-            # Раньше здесь стоял значок паузы: остановить процесс yt-dlp
-            # из Pythonista нечем, и кнопка обещала то, чего сделать нельзя.
-            # Значок заменён на нейтральный индикатор идущей загрузки.
-            pz = ui.View(frame=(cw - 46, 16, 34, 34))
-            pz.background_color = 'clear'
-            pz.corner_radius = 17
-            pz.border_width = 1
-            pz.border_color = BORDER_2
-            pz.user_interaction_enabled = False
-            pz.add_subview(Icon('download', ACCENT_2, 1.5, frame=(10, 10, 14, 14)))
-            c.add_subview(pz)
-        elif job.get('status') == 'error':
-            c.add_subview(make_label('Не удалось начать загрузку', (F_REG, 11),
-                                     ERR_TXT,
-                                     frame=(left, 33, cw - left - right_w, 15)))
-            c.add_subview(ProgressBar(0.0, frame=(left, 56, cw - left - 16, 5)))
-            c.add_subview(Icon('close', ERR_TXT, 1.6, frame=(cw - 118, 24, 20, 20)))
-            c.add_subview(make_label('Ошибка', (F_REG, 12), ERR_TXT,
-                                     frame=(cw - 94, 24, 76, 20)))
-            c.add_subview(self._dismiss_button(job, cw - 34, 22, 26, 26))
+            # Файл прошлого запуска: NOX его сейчас не качает и не притворяется.
+            sub, detail = 'Не завершено  •  ' + fmt_size(temp.size), ''
+            bar_value = temp.progress
+            indeterminate = False
+            st_text, st_icon, st_col = 'Не завершено', 'clock', TXT_2
+            sub_col = TXT_3
         else:
-            c.add_subview(make_label('Подготовка...', (F_REG, 11), TXT_3,
-                                     frame=(left, 33, cw - left - right_w, 15)))
-            bar = ProgressBar(None, frame=(left, 56, cw - left - 16, 5))
-            c.add_subview(bar)
+            sub, detail = job.sub_line(), job.detail_line()
+            bar_value = job.percent
+            st_text = job.short_status()
+            if job.status == ST_ERROR:
+                st_icon, st_col, sub_col = 'close', ERR_TXT, ERR_TXT
+            elif job.status == ST_CANCELLED:
+                st_icon, st_col, sub_col = 'clock', TXT_2, TXT_3
+            elif job.status == ST_DOWNLOADING and bar_value is not None:
+                st_icon, st_col, sub_col = 'download', ACCENT_2, TXT_3
+            else:
+                st_icon, st_col, sub_col = 'ring', ACCENT_2, TXT_3
+            indeterminate = (job.status in (ST_PREPARING, ST_PROCESSING) or
+                             (job.status == ST_DOWNLOADING and bar_value is None))
+            if job.status in (ST_ERROR, ST_CANCELLED) and bar_value is None:
+                bar_value = 0.0
+
+        sl = make_label(sub, (F_REG, 11), sub_col,
+                        frame=(left, 33, cw - left - right_w, 15))
+        c.add_subview(sl)
+        bar = ProgressBar(bar_value, frame=(left, 56, cw - left - 16, 5))
+        c.add_subview(bar)
+        if indeterminate:
             bar.start_indeterminate()
-            c.add_subview(Icon('ring', ACCENT_2, 1.6, frame=(cw - 118, 24, 20, 20)))
-            c.add_subview(make_label('Подготовка', (F_REG, 12), TXT_2,
-                                     frame=(cw - 94, 24, 76, 20)))
+        # Вторая строка занимает уже существовавшее пустое место под полосой,
+        # ни один элемент карточки не сдвинут.
+        dl = make_label(detail, (F_REG, 10), TXT_4,
+                        frame=(left, 64, cw - left - 16, 14))
+        c.add_subview(dl)
+
+        st = make_label(st_text, (F_REG, 12), st_col,
+                        frame=(cw - 118, 24, 76, 20))
+        c.add_subview(Icon(st_icon, st_col, 1.6, frame=(cw - 142, 24, 20, 20)))
+        c.add_subview(st)
+
+        if job is not None:
             c.add_subview(self._dismiss_button(job, cw - 34, 22, 26, 26))
+            self._job_views[job.id] = {'sub': sl, 'detail': dl, 'bar': bar,
+                                       'status': st, 'title': tl}
         return c
 
     # ---------------------------------------------------------------
@@ -2358,25 +2831,21 @@ class PlayerScreen(Screen):
 # =====================================================================
 
 SETUP_TEXT = (
-    '1.  NOX сам создал рядом с NOX.py две папки:\n'
-    '     Файлы → На iPhone → NOX → NoxMedia\n'
-    '     Файлы → На iPhone → NOX → NOX_Data\n\n'
-    '2.  Откройте a-Shell и выполните:  pickFolder\n'
-    '     Выберите именно На iPhone → NOX → NoxMedia\n'
-    '     и нажмите «Открыть».\n'
-    '     Проверьте имя закладки командой:  showmarks\n'
-    '     Если имя другое — впишите его в поле «Закладка a-Shell».\n\n'
-    '3.  Создайте Ярлык (приложение «Быстрые команды»):\n'
-    '     • Новый ярлык, имя ровно:  NOX Download\n'
-    '     • Добавьте одно действие приложения a-Shell — «Execute Command»\n'
-    '       («Выполнить команду»).\n'
-    '     • В поле команды вставьте переменную «Вход ярлыка»\n'
-    '       (Shortcut Input) и сохраните.\n\n'
-    '4.  Уже скачанное ранее видео перенесите в NOX → NoxMedia\n'
+    'NOX скачивает видео сам, внутри Pythonista. a-Shell, Ярлык\n'
+    '«NOX Download» и закладки больше не нужны — их можно удалить.\n\n'
+    '1.  Папка проекта — та, где лежит NOX.py:\n'
+    '     Файлы → На iPhone → NOX\n\n'
+    '2.  Рядом с NOX.py должны быть:\n'
+    '     yt_dlp/        — пакет загрузчика\n'
+    '     NoxMedia/      — сюда сохраняются видео\n'
+    '     NOX_Data/      — настройки\n'
+    '     NOX_icon.png   — необязательно\n\n'
+    '3.  NoxMedia и NOX_Data NOX создаёт сам.\n'
+    '     Папку yt_dlp нужно положить рядом с NOX.py вручную.\n\n'
+    '4.  Скачанное ранее видео просто перенесите в NoxMedia\n'
     '     вместе с его .info.json и нажмите «Обновить медиатеку».\n\n'
-    '5.  Готово. Кнопка «Скачать» передаёт команду в a-Shell.\n'
-    '     Команда также всегда копируется в буфер обмена —\n'
-    '     её можно вставить в a-Shell вручную.'
+    '5.  Загрузка идёт, пока NOX открыт: свернуть Pythonista\n'
+    '     надолго iOS не даст.'
 )
 
 
@@ -2461,52 +2930,35 @@ class SettingsScreen(Screen):
 
         c.add_subview(make_label(MEDIA_LABEL, (F_BOLD, 13), TXT,
                                  frame=(16, 40, cw - 32, 20)))
-        c.add_subview(make_label('Рядом с NOX.py — одна папка для NOX и a-Shell',
+        c.add_subview(make_label('Рядом с NOX.py — сюда сохраняются все файлы',
                                  (F_REG, 10.5), TXT_3, lines=2,
                                  frame=(16, 60, cw - 32, 28)))
         exists = os.path.isdir(MEDIA_DIR)
         c.add_subview(status_pill('Доступна' if exists else 'Недоступна',
                                   'check' if exists else 'close',
-                                  ACCENT_2 if exists else '#ff6b81',
+                                  ACCENT_2 if exists else ERR_TXT,
                                   16, 92, w=104))
 
-        c.add_subview(make_label('Закладка a-Shell', (F_REG, 12.5), TXT_2,
+        c.add_subview(make_label('Загрузчик yt-dlp', (F_REG, 12.5), TXT_2,
                                  frame=(16, 132, cw - 150, 18)))
-        c.add_subview(make_label(STATE.get('bookmark', 'NoxMedia'),
-                                 (F_BOLD, 12.5), ACCENT_2,
+        ready = ytdlp_ready()
+        if ready:
+            value = 'Подключён' + (('  ' + YTDLP_VERSION) if YTDLP_VERSION else '')
+        else:
+            value = YTDLP_ERROR or 'Модуль yt-dlp не найден'
+        c.add_subview(make_label(value, (F_BOLD, 12.5),
+                                 ACCENT_2 if ready else ERR_TXT,
                                  frame=(16, 151, cw - 150, 18)))
-        # Проверить bookmark из Pythonista невозможно — статус не выдумываем.
-        c.add_subview(make_label('Настраивается один раз через a-Shell → pickFolder',
+        c.add_subview(make_label('Пакет yt_dlp лежит рядом с NOX.py — '
+                                 'загрузка идёт внутри приложения',
                                  (F_REG, 10), TXT_4, lines=2,
                                  frame=(16, 170, cw - 32, 16)))
-        bmb = Tappable(action=self._change_bookmark, press_scale=0.94,
-                       frame=(cw - 16 - 108, 138, 108, 30))
-        bmb.background_color = CARD_3
-        bmb.corner_radius = 10
-        bmb.border_width = 1
-        bmb.border_color = BORDER_2
-        bmb.add_subview(make_label('Изменить', (F_REG, 11.5), TXT,
-                                   ui.ALIGN_CENTER, frame=(0, 0, 108, 30)))
-        c.add_subview(bmb)
+        c.add_subview(status_pill('Готов' if ready else 'Нет модуля',
+                                  'check' if ready else 'close',
+                                  ACCENT_2 if ready else ERR_TXT,
+                                  cw - 16 - 108, 138, w=108))
         self.sv.add_subview(c)
         return y + h + 14
-
-    @ui.in_background
-    def _change_bookmark(self, sender):
-        try:
-            new = console.input_alert('Закладка a-Shell',
-                                      'Имя закладки из команды showmarks',
-                                      STATE.get('bookmark', 'NoxMedia'),
-                                      'Сохранить')
-        except KeyboardInterrupt:
-            return
-        except Exception:
-            return
-        new = (new or '').strip()
-        if not new:
-            return
-        STATE.set('bookmark', re.sub(r'\s+', '', new))
-        self.rebuild()
 
     # ---------------------------------------------------------------
     def _storage_block(self, w, y):
@@ -2587,7 +3039,7 @@ class SettingsScreen(Screen):
         c = self._card(w, y, h, 'О NOX')
         cw = c.width
         text = ('NOX %s — личная офлайн-медиатека.\n'
-                'Загрузка выполняется связкой a-Shell + yt-dlp в общую папку, '
+                'Загрузка выполняется локальным yt-dlp внутри приложения, '
                 'воспроизведение — стандартным просмотрщиком iOS.\n'
                 'Приложение показывает только реальные файлы из папки NoxMedia.'
                 % APP_VERSION)
@@ -2610,8 +3062,11 @@ class NoxApp(ui.View):
         self.bottom_inset = 0.0
         self._alive = True
         self._tab = 0
+        self._last_sig = ()
+        self._last_tick = -1
 
         STATE.ensure_folder()
+        _load_yt_dlp()
 
         self.body = ui.View(frame=self.bounds)
         self.body.background_color = 'clear'
@@ -2792,19 +3247,25 @@ class NoxApp(ui.View):
             nox_error('Файл больше не существует')
         self.reload_all()
 
-    def cancel_job(self, job):
+    def cancel_job(self, job_id):
         """
-        Убирает ТОЛЬКО запись NOX. Процесс yt-dlp в a-Shell при этом не
-        останавливается — остановить его отсюда нечем, и делать вид, что
-        остановили, мы не будем. Поэтому крестик есть лишь у заданий, по
-        которым yt-dlp ещё не подтвердил старт (или уже сообщил об ошибке).
+        Настоящая остановка: менеджер выставляет cancel_requested, ближайший
+        progress_hook поднимает исключение отмены и рабочий поток завершается.
+        Файл .part не удаляется — повторная загрузка продолжит его.
         """
         try:
-            STATE.drop_job((job or {}).get('url'))
+            job = DOWNLOADER.find(job_id)
+            if job is None:
+                DOWNLOADER.remove(job_id)
+            elif job.is_active:
+                DOWNLOADER.cancel(job_id)
+                nox_ok('Останавливаю загрузку')
+            else:
+                DOWNLOADER.remove(job_id)
+                nox_ok('Убрано из очереди')
         except Exception as e:
             nox_error(str(e))
             return
-        nox_ok('Убрано из очереди NOX')
         # Экран нельзя разбирать прямо в обработчике касания его же кнопки:
         # перестраиваем отложенно, когда touch-событие уже отработало.
         try:
@@ -2818,28 +3279,47 @@ class NoxApp(ui.View):
         self._tick()
 
     def _tick(self):
+        """
+        Единственное место, где интерфейс читает состояние загрузки.
+        Крутится на главном потоке через ui.delay — рабочий поток yt-dlp
+        сам ui.View не трогает. Пока что-то качается, шаг UI_REFRESH
+        (~5 обновлений в секунду), в покое — раз в IDLE_REFRESH.
+        """
         if not self._alive:
             return
+        step = IDLE_REFRESH
         try:
+            active = DOWNLOADER.active_jobs()
+            if active:
+                step = UI_REFRESH
+            screen = self.screens[self._tab]
             if self._tab in (0, 1):
-                folder = STATE.folder
-                busy = False
-                try:
-                    for n in os.listdir(folder):
-                        low = n.lower()
-                        if low.endswith(TEMP_EXT) or '.part' in low:
-                            busy = True
-                            break
-                except Exception:
-                    busy = False
-                if busy or STATE.raw_jobs():
-                    self.screens[self._tab].rebuild()
-        except Exception:
-            pass
+                if DOWNLOADER.signature() != self._last_sig:
+                    self._last_sig = DOWNLOADER.signature()
+                    self.after_downloads_changed()
+                elif active and DOWNLOADER.tick != self._last_tick:
+                    self._last_tick = DOWNLOADER.tick
+                    screen.refresh_jobs()
+            elif DOWNLOADER.signature() != self._last_sig:
+                self._last_sig = DOWNLOADER.signature()
+                self.after_downloads_changed()
+        except Exception as e:
+            print('NOX: сбой обновления интерфейса: %r' % (e,))
         try:
-            ui.delay(self._tick, 3.0)
+            ui.delay(self._tick, step)
         except Exception:
             self._alive = False
+
+    def after_downloads_changed(self):
+        """
+        Состав очереди изменился: пересканировать NoxMedia и обновить
+        Главную, Плеер, Загрузки и хранилище. Завершённые задания уходят
+        из очереди, файл появляется в медиатеке.
+        """
+        DOWNLOADER.clear_finished()
+        self._last_sig = DOWNLOADER.signature()
+        self._last_tick = DOWNLOADER.tick
+        self.reload_all()
 
     def will_close(self):
         self._alive = False

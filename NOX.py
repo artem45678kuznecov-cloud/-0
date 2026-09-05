@@ -34,6 +34,7 @@ import json
 import time
 import shutil
 import threading
+import urllib.request
 
 import ui
 import console
@@ -84,6 +85,30 @@ NAV_H       = 60.0
 # дёргается очень часто, поэтому UI обновляется не чаще ~5 раз в секунду.
 UI_REFRESH = 0.22
 IDLE_REFRESH = 3.0
+
+# Досмотрено, если до конца осталось меньше этого; продолжать предлагаем,
+# только если посмотрено больше WATCH_MIN_START.
+WATCH_DONE_TAIL = 20.0
+WATCH_MIN_START = 10.0
+HISTORY_LIMIT = 200
+# Сколько карточка держится с отметкой «Готово» перед уходом из очереди.
+DONE_LINGER = 0.8
+
+SORT_OPTIONS = [
+    ('new', 'Сначала новые'),
+    ('old', 'Сначала старые'),
+    ('title', 'По названию'),
+    ('size', 'По размеру'),
+    ('duration', 'По длительности'),
+]
+QUALITY_FILTERS = [
+    ('all', 'Все'),
+    ('360', '360p'),
+    ('480', '480p'),
+    ('720', '720p'),
+    ('1080', '1080p+'),
+    ('max', 'MAX/4K'),
+]
 
 VIDEO_EXT   = ('.mp4', '.mov', '.m4v', '.mkv', '.webm')
 # .webp yt-dlp пишет часто, но Pythonista его обычно не декодирует:
@@ -891,6 +916,10 @@ class State(object):
         self.data = {
             'quality': '720',
             'last_opened': None,
+            'sort': 'new',
+            'quality_filter': 'all',
+            'watch_progress': {},
+            'download_history': [],
         }
         self.load()
 
@@ -943,6 +972,61 @@ class State(object):
         self.data['last_opened'] = {'path': path, 'time': time.time()}
         self.save()
 
+    # --- позиция просмотра -----------------------------------------
+    def watch_map(self):
+        wp = self.data.get('watch_progress')
+        if not isinstance(wp, dict):
+            wp = {}
+            self.data['watch_progress'] = wp
+        return wp
+
+    def watch_get(self, video_id):
+        entry = self.watch_map().get(video_id)
+        return entry if isinstance(entry, dict) else None
+
+    def watch_note(self, video_id, watched_seconds, duration):
+        """
+        Накапливаем РЕАЛЬНО измеренное время просмотра.
+        Досмотрено почти до конца — запись сбрасывается.
+        """
+        if not video_id or watched_seconds <= 0:
+            return
+        wp = self.watch_map()
+        prev = wp.get(video_id) if isinstance(wp.get(video_id), dict) else {}
+        position = float(prev.get('position') or 0.0) + float(watched_seconds)
+        try:
+            total = float(duration or prev.get('duration') or 0.0)
+        except Exception:
+            total = 0.0
+        if total > 0:
+            position = min(position, total)
+            if position >= total - WATCH_DONE_TAIL:
+                wp.pop(video_id, None)
+                self.save()
+                return
+        wp[video_id] = {'position': round(position, 1),
+                        'duration': round(total, 1) if total else None,
+                        'updated_at': time.time()}
+        self.save()
+
+    def watch_forget(self, video_id):
+        if self.watch_map().pop(video_id, None) is not None:
+            self.save()
+
+    # --- история загрузок ------------------------------------------
+    def history(self):
+        h = self.data.get('download_history')
+        if not isinstance(h, list):
+            h = []
+            self.data['download_history'] = h
+        return h
+
+    def add_history(self, entry):
+        h = self.history()
+        h.append(entry)
+        self.data['download_history'] = h[-HISTORY_LIMIT:]
+        self.save()
+
     def last_opened_path(self):
         lo = self.data.get('last_opened')
         if not isinstance(lo, dict):
@@ -974,40 +1058,48 @@ class MediaItem(object):
             self.size = 0
             self.mtime = 0.0
         self.info = {}
+        self.meta_source = ''
         self.title = self.stem
         self.duration = None
         self.uploader = ''
         self.video_id = ''
         self.webpage_url = ''
+        self.height = None
+        self.format_id = ''
         self.thumb_path = None
         self._load_info()
         self._find_thumb()
 
-    def _load_info(self):
+    def _meta_candidates(self):
+        """Приоритет: свой .nox.json -> старый .info.json -> имя файла."""
         folder = os.path.dirname(self.path)
-        candidates = [self.stem + '.info.json']
-        # yt-dlp иногда добавляет суффикс формата: "name.f137.mp4"
         base = re.sub(r'\.f\d+$', '', self.stem)
-        if base != self.stem:
-            candidates.append(base + '.info.json')
-        for c in candidates:
-            p = os.path.join(folder, c)
-            if not os.path.exists(p):
+        stems = [self.stem] if base == self.stem else [self.stem, base]
+        out = []
+        for suffix in (SIDECAR_EXT, '.info.json'):
+            for stem in stems:
+                out.append((os.path.join(folder, stem + suffix), suffix))
+        return out
+
+    def _load_info(self):
+        for path, suffix in self._meta_candidates():
+            if not os.path.exists(path):
                 continue
             try:
-                with io.open(p, 'r', encoding='utf-8') as f:
+                with io.open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
             except Exception:
                 continue
             if not isinstance(data, dict):
                 continue
             self.info = data
+            self.meta_source = suffix
             t = data.get('title')
             if isinstance(t, str) and t.strip():
                 self.title = t.strip()
             d = data.get('duration')
             if isinstance(d, (int, float)) and d > 0:
-                self.duration = d
+                self.duration = float(d)
             up = data.get('uploader') or data.get('channel') or ''
             if isinstance(up, str):
                 self.uploader = up.strip()
@@ -1017,6 +1109,12 @@ class MediaItem(object):
             wu = data.get('webpage_url')
             if isinstance(wu, str):
                 self.webpage_url = wu
+            h = data.get('height')
+            if isinstance(h, (int, float)) and h > 0:
+                self.height = int(h)
+            fid = data.get('format_id')
+            if isinstance(fid, str):
+                self.format_id = fid
             break
 
     def _find_thumb(self):
@@ -1043,11 +1141,39 @@ class MediaItem(object):
             return None
 
     @property
+    def watch_id(self):
+        """Стабильный ключ: id из метаданных, иначе имя файла."""
+        if self.video_id:
+            return self.video_id
+        return os.path.basename(self.path)
+
+    @property
+    def quality_label(self):
+        """Реальное качество: высота из метаданных или format_id вида url480."""
+        h = self.height
+        if not h and self.format_id:
+            m = re.search(r'(\d{3,4})', self.format_id)
+            if m:
+                try:
+                    h = int(m.group(1))
+                except Exception:
+                    h = None
+        if not h:
+            return ''
+        for step in (2160, 1440, 1080, 720, 480, 360, 240, 144):
+            if h >= step:
+                return '4K' if step == 2160 else '%dp' % step
+        return '%dp' % h
+
+    @property
     def meta_line(self):
         parts = []
         d = fmt_duration(self.duration) if self.duration else ''
         if d:
             parts.append(d)
+        q = self.quality_label
+        if q:
+            parts.append(q)
         if self.size:
             parts.append(fmt_size(self.size))
         return '  •  '.join(parts)
@@ -1055,6 +1181,19 @@ class MediaItem(object):
     @property
     def fmt_label(self):
         return self.ext.lstrip('.').upper()
+
+    def sidecar_paths(self):
+        """Файлы-спутники ИМЕННО этого видео — для удаления."""
+        folder = os.path.dirname(self.path)
+        base = re.sub(r'\.f\d+$', '', self.stem)
+        stems = {self.stem, base}
+        out = []
+        for stem in stems:
+            out.append(os.path.join(folder, stem + SIDECAR_EXT))
+            out.append(os.path.join(folder, stem + '.info.json'))
+            for ext in IMAGE_EXT:
+                out.append(os.path.join(folder, stem + ext))
+        return out
 
 
 class TempItem(object):
@@ -1119,12 +1258,14 @@ class Library(object):
         self.items = []
         self.temps = []
         self.names = []
+        self.total_bytes = 0
         self.error = ''
 
     def scan(self):
         self.items = []
         self.temps = []
         self.names = []
+        self.total_bytes = 0
         self.error = ''
         folder = self.state.folder
         if not os.path.isdir(folder):
@@ -1143,6 +1284,10 @@ class Library(object):
             p = os.path.join(folder, n)
             if not os.path.isfile(p):
                 continue
+            try:
+                self.total_bytes += os.path.getsize(p)   # видео + обложки + метаданные
+            except Exception:
+                pass
             low = n.lower()
             if low.endswith(TEMP_EXT) or '.part' in low:
                 self.temps.append(TempItem(p))
@@ -1175,24 +1320,60 @@ class Library(object):
             out.append(t)
         return out
 
-    def filtered(self, query):
+    @staticmethod
+    def _quality_bucket(item):
+        label = item.quality_label
+        if not label:
+            return ''
+        if label == '4K':
+            return 'max'
+        try:
+            h = int(label.rstrip('p'))
+        except Exception:
+            return ''
+        if h >= 1440:
+            return 'max'
+        if h >= 1080:
+            return '1080'
+        for step in (720, 480, 360):
+            if h >= step:
+                return str(step)
+        return ''
+
+    def filtered(self, query, sort=None, quality=None):
+        """Локальный поиск по названию, автору и имени файла + фильтр и сортировка."""
+        out = list(self.items)
         q = (query or '').strip().lower()
-        if not q:
-            return list(self.items)
-        out = []
-        for i in self.items:
-            hay = (i.title + ' ' + i.name + ' ' + i.uploader).lower()
-            if q in hay:
-                out.append(i)
+        if q:
+            out = [i for i in out
+                   if q in (i.title + ' ' + i.name + ' ' + i.uploader).lower()]
+        quality = quality or self.state.get('quality_filter', 'all')
+        if quality and quality != 'all':
+            out = [i for i in out if self._quality_bucket(i) == quality]
+        sort = sort or self.state.get('sort', 'new')
+        if sort == 'old':
+            out.sort(key=lambda i: i.mtime)
+        elif sort == 'title':
+            out.sort(key=lambda i: i.title.lower())
+        elif sort == 'size':
+            out.sort(key=lambda i: i.size, reverse=True)
+        elif sort == 'duration':
+            out.sort(key=lambda i: i.duration or 0.0, reverse=True)
+        else:
+            out.sort(key=lambda i: i.mtime, reverse=True)
         return out
 
-    def used_bytes(self):
-        total = 0
+    def find_by_watch_id(self, watch_id):
         for i in self.items:
-            total += i.size
-        for t in self.temps:
-            total += t.size
-        return total
+            if i.watch_id == watch_id:
+                return i
+        return None
+
+    def used_bytes(self):
+        """Весь объём медиатеки: MP4 + обложки + метаданные + незавершённые."""
+        if self.total_bytes:
+            return self.total_bytes
+        return sum(i.size for i in self.items) + sum(t.size for t in self.temps)
 
     def disk(self):
         """(total, free) реального тома или (None, None)."""
@@ -1258,6 +1439,158 @@ def format_selector(quality):
     return '/'.join(parts)
 
 
+SIDECAR_EXT = '.nox.json'
+THUMB_LIMIT = 8 * 1024 * 1024
+
+
+def _entry_of(info):
+    """Из результата extract_info достаём словарь самого видео."""
+    if not isinstance(info, dict):
+        return {}
+    entries = info.get('entries')
+    if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+        return entries[0]
+    return info
+
+
+def _media_path_of(job, entry):
+    """Путь к реально скачанному файлу: сначала из info, потом из hook."""
+    for candidate in (entry.get('filepath'), entry.get('_filename'),
+                      job.filename):
+        if isinstance(candidate, str) and candidate and os.path.isfile(candidate):
+            return candidate
+    return ''
+
+
+def _source_of(entry):
+    name = entry.get('extractor_key') or entry.get('extractor') or ''
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    url = entry.get('webpage_url') or ''
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc
+        return host or ''
+    except Exception:
+        return ''
+
+
+def write_sidecar(video_path, entry):
+    """
+    Пишет <имя видео>.nox.json из УЖЕ полученного info.
+    Второй extract_info не делается: yt-dlp opts остаются неизменными.
+    """
+    data = {
+        'id': entry.get('id'),
+        'title': entry.get('title'),
+        'uploader': entry.get('uploader'),
+        'channel': entry.get('channel'),
+        'duration': entry.get('duration'),
+        'width': entry.get('width'),
+        'height': entry.get('height'),
+        'format_id': entry.get('format_id'),
+        'ext': entry.get('ext'),
+        'webpage_url': entry.get('webpage_url'),
+        'thumbnail': entry.get('thumbnail'),
+        'filesize': entry.get('filesize') or entry.get('filesize_approx'),
+        'downloaded_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'source': _source_of(entry),
+    }
+    try:
+        if not data.get('filesize'):
+            data['filesize'] = os.path.getsize(video_path)
+    except Exception:
+        pass
+    base = os.path.splitext(video_path)[0]
+    tmp = base + SIDECAR_EXT + '.tmp'
+    with io.open(tmp, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(data, ensure_ascii=False, indent=1))
+    target = base + SIDECAR_EXT
+    if os.path.exists(target):
+        os.remove(target)
+    os.rename(tmp, target)
+    return target
+
+
+def _best_thumb_url(entry):
+    url = entry.get('thumbnail')
+    if isinstance(url, str) and url.startswith('http'):
+        return url
+    thumbs = entry.get('thumbnails')
+    if not isinstance(thumbs, list):
+        return ''
+    best, best_rank = '', None
+    for t in thumbs:
+        if not isinstance(t, dict):
+            continue
+        u = t.get('url')
+        if not isinstance(u, str) or not u.startswith('http'):
+            continue
+        rank = (t.get('preference') or 0, t.get('width') or 0)
+        if best_rank is None or rank > best_rank:
+            best, best_rank = u, rank
+    return best
+
+
+def fetch_thumbnail(video_path, entry):
+    """
+    Обложка качается обычным Python HTTP — без yt-dlp postprocessor,
+    без ffmpeg и без subprocess. Сбой здесь ничего не значит для MP4.
+    """
+    url = _best_thumb_url(entry)
+    if not url:
+        return ''
+    req = urllib.request.Request(url, headers={'User-Agent': 'NOX/1.0'})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        ctype = (resp.headers.get('Content-Type') or '').lower()
+        raw = resp.read(THUMB_LIMIT + 1)
+    if not raw or len(raw) > THUMB_LIMIT:
+        return ''
+    ext = '.jpg'
+    if 'png' in ctype or raw[:8] == b'\x89PNG\r\n\x1a\n':
+        ext = '.png'
+    elif 'webp' in ctype or raw[8:12] == b'WEBP':
+        ext = '.webp'
+    elif 'jpeg' not in ctype and 'jpg' not in ctype:
+        low = url.split('?')[0].lower()
+        for known in ('.jpg', '.jpeg', '.png', '.webp'):
+            if low.endswith(known):
+                ext = known
+                break
+    target = os.path.splitext(video_path)[0] + ext
+    tmp = target + '.tmp'
+    with io.open(tmp, 'wb') as f:
+        f.write(raw)
+    if os.path.exists(target):
+        os.remove(target)
+    os.rename(tmp, target)
+    return target
+
+
+def save_extras(job, info):
+    """
+    Метаданные и обложка ПОСЛЕ успешной загрузки. Каждый шаг в своём
+    try/except: ни один сбой не делает готовый MP4 неудачным.
+    """
+    entry = {}
+    path = ''
+    try:
+        entry = _entry_of(info)
+        path = _media_path_of(job, entry)
+    except Exception as e:
+        job.debug_error = 'extras/path: %r' % (e,)
+    if not path:
+        return
+    try:
+        write_sidecar(path, entry)
+    except Exception as e:
+        job.debug_error = 'sidecar: %r' % (e,)
+    try:
+        fetch_thumbnail(path, entry)
+    except Exception as e:
+        job.debug_error = 'thumbnail: %r' % (e,)
+
+
 class DownloadCancelledByUser(Exception):
     """Запасное исключение отмены, если DownloadCancelled нет в этой версии."""
     pass
@@ -1304,7 +1637,7 @@ STATUS_TEXT = {
     ST_PREPARING: 'Получение информации...',
     ST_DOWNLOADING: 'Скачивается',
     ST_PROCESSING: 'Обработка файла...',
-    ST_FINISHED: 'Готово',
+    ST_FINISHED: '✓ Готово',
     ST_ERROR: 'Ошибка загрузки',
     ST_CANCELLED: 'Остановлено',
 }
@@ -1314,7 +1647,7 @@ STATUS_SHORT = {
     ST_PREPARING: 'Подготовка',
     ST_DOWNLOADING: 'Скачивается',
     ST_PROCESSING: 'Обработка',
-    ST_FINISHED: 'Готово',
+    ST_FINISHED: '✓ Готово',
     ST_ERROR: 'Ошибка',
     ST_CANCELLED: 'Остановлено',
 }
@@ -1431,9 +1764,20 @@ class DownloadManager(object):
         return [j for j in self.all_jobs() if j.is_active]
 
     def visible_jobs(self):
-        """Активные + недавно завершившиеся с ошибкой/остановкой."""
-        return [j for j in self.all_jobs()
-                if j.is_active or j.status in (ST_ERROR, ST_CANCELLED)]
+        """
+        Активные, ошибочные и остановленные плюс те, что только что
+        завершились: карточка ~0.8 c показывает «Готово» и уходит.
+        Рабочий поток этим не задерживается — это чисто состояние UI.
+        """
+        now = time.time()
+        out = []
+        for j in self.all_jobs():
+            if j.is_active or j.status in (ST_ERROR, ST_CANCELLED):
+                out.append(j)
+            elif j.status == ST_FINISHED and \
+                    now - float(j.finished_at or 0) < DONE_LINGER:
+                out.append(j)
+        return out
 
     def active_paths(self):
         return [j.filename for j in self.active_jobs() if j.filename]
@@ -1504,9 +1848,13 @@ class DownloadManager(object):
         return True
 
     def clear_finished(self):
+        """Убирает завершённые, чья отметка «Готово» уже отвисела."""
+        now = time.time()
         with self._lock:
             before = len(self.jobs)
-            self.jobs = [j for j in self.jobs if j.status != ST_FINISHED]
+            self.jobs = [j for j in self.jobs
+                         if j.status != ST_FINISHED
+                         or now - float(j.finished_at or 0) < DONE_LINGER]
             if len(self.jobs) != before:
                 self.revision += 1
 
@@ -1639,6 +1987,7 @@ class DownloadManager(object):
         with mod.YoutubeDL(self._ydl_opts(job, ipv4)) as ydl:
             info = ydl.extract_info(job.url, download=True)
         self._absorb_info(job, info)
+        return info
 
     def _run(self, job):
         """
@@ -1647,6 +1996,7 @@ class DownloadManager(object):
         а на экран её позже переносит главный поток.
         """
         cancel_exc = _cancel_exception()
+        info = None
         try:
             # Попытка 1 — обычная сеть; попытка 2 — та же задача по IPv4,
             # и только если первая упала именно на сети.
@@ -1654,7 +2004,7 @@ class DownloadManager(object):
                 if job.cancel_requested:
                     raise cancel_exc('Загрузка остановлена пользователем')
                 try:
-                    self._attempt(job, ipv4)
+                    info = self._attempt(job, ipv4)
                     break
                 except (cancel_exc, DownloadCancelledByUser):
                     raise
@@ -1674,6 +2024,10 @@ class DownloadManager(object):
             if job.cancel_requested:
                 job.status = ST_CANCELLED
             else:
+                # Дополнительные функции идут ПОСЛЕ успешной загрузки и
+                # не могут превратить готовый MP4 в ошибку: save_extras
+                # ничего не выбрасывает наружу.
+                save_extras(job, info)
                 job.status = ST_FINISHED
         except cancel_exc:
             job.status = ST_CANCELLED
@@ -2119,6 +2473,36 @@ class HomeScreen(Screen):
         self.query = text
         self.rebuild()
 
+    @ui.in_background
+    def _open_filter_menu(self, sender):
+        """Штатный для Pythonista список: сортировка и фильтр качества."""
+        labels = ['Сортировка: ' + t for _, t in SORT_OPTIONS]
+        labels += ['Качество: ' + t for _, t in QUALITY_FILTERS]
+        try:
+            import dialogs
+            choice = dialogs.list_dialog('Сортировка и фильтр', labels)
+        except KeyboardInterrupt:
+            return
+        except Exception as e:
+            log_debug('filter menu: %r' % (e,))
+            nox_error('Меню недоступно')
+            return
+        if not choice:
+            return
+        if choice.startswith('Сортировка: '):
+            title = choice[len('Сортировка: '):]
+            for key, text in SORT_OPTIONS:
+                if text == title:
+                    STATE.set('sort', key)
+                    break
+        elif choice.startswith('Качество: '):
+            title = choice[len('Качество: '):]
+            for key, text in QUALITY_FILTERS:
+                if text == title:
+                    STATE.set('quality_filter', key)
+                    break
+        self.rebuild()
+
     # ---------------------------------------------------------------
     def build(self):
         # LIB.scan() здесь НЕ вызывается: экран читает уже собранное
@@ -2160,17 +2544,27 @@ class HomeScreen(Screen):
         tf.delegate = self._delegate
         box.add_subview(tf)
 
-        tune = Icon('tune', TXT_2, 1.7, frame=(box.width - 42, h / 2 - 11, 22, 22))
-        box.add_subview(tune)
+        # Значок и его место прежние; сверху — прозрачный ui.Button.
+        active = (STATE.get('sort', 'new') != 'new'
+                  or STATE.get('quality_filter', 'all') != 'all')
+        tune_holder = ui.View(frame=(box.width - 50, h / 2 - 18, 36, 36))
+        tune_holder.background_color = 'clear'
+        tune_holder.add_subview(Icon('tune', ACCENT_2 if active else TXT_2, 1.7,
+                                     frame=(7, 7, 22, 22)))
+        tune_hit = ui.Button(frame=tune_holder.bounds)
+        tune_hit.flex = 'WH'
+        tune_hit.background_color = 'clear'
+        tune_hit.action = self._open_filter_menu
+        tune_holder.add_subview(tune_hit)
+        box.add_subview(tune_holder)
         self.sv.add_subview(box)
         return y + h
 
     # ---------------------------------------------------------------
     def _build_continue(self, w, y):
-        path = STATE.last_opened_path()
-        if not path:
+        item, watch = self._resume_candidate()
+        if item is None:
             return y                       # блок полностью скрыт
-        item = MediaItem(path)
         h = 152.0
         card = card_view((PAD, y, w - PAD * 2, h), CARD, 18, BORDER_2)
         cw = card.width
@@ -2205,14 +2599,24 @@ class HomeScreen(Screen):
         card.add_subview(title)
 
         meta_parts = []
-        if item.duration:
-            meta_parts.append(fmt_duration(item.duration))
+        left = self._remaining(watch)
+        if left:
+            meta_parts.append('Осталось ' + left)
+        q = item.quality_label
+        if q:
+            meta_parts.append(q)
         meta_parts.append(fmt_size(item.size))
         if item.uploader:
-            meta_parts.append(safe_name(item.uploader, 18))
+            meta_parts.append(safe_name(item.uploader, 16))
         meta = make_label('  •  '.join([m for m in meta_parts if m]),
                           (F_REG, 12), TXT_2, frame=(18, 72, cw - 130, 16))
         card.add_subview(meta)
+
+        # Полоса реальная: доля просмотренного из watch_progress.
+        fraction = self._watched_fraction(watch)
+        if fraction is not None:
+            card.add_subview(ProgressBar(fraction,
+                                         frame=(18, 94, cw * 0.52, 5)))
 
         btn = Tappable(action=lambda s: self.app.open_media(item),
                        frame=(18, h - 56, 168, 40))
@@ -2230,6 +2634,55 @@ class HomeScreen(Screen):
 
         self.sv.add_subview(card)
         return y + h + 20
+
+    @staticmethod
+    def _watched_fraction(watch):
+        try:
+            pos = float(watch.get('position') or 0.0)
+            total = float(watch.get('duration') or 0.0)
+        except Exception:
+            return None
+        if total <= 0:
+            return None
+        return max(0.0, min(1.0, pos / total))
+
+    @staticmethod
+    def _remaining(watch):
+        try:
+            pos = float(watch.get('position') or 0.0)
+            total = float(watch.get('duration') or 0.0)
+        except Exception:
+            return ''
+        if total <= 0:
+            return ''
+        return fmt_duration(max(0.0, total - pos))
+
+    def _resume_candidate(self):
+        """
+        Последнее реально недосмотренное видео: позиция больше
+        WATCH_MIN_START и до конца ещё больше WATCH_DONE_TAIL.
+        Ничего подходящего — блок не показывается, заглушек нет.
+        """
+        best, best_watch, best_time = None, None, -1.0
+        for video_id, watch in STATE.watch_map().items():
+            if not isinstance(watch, dict):
+                continue
+            try:
+                pos = float(watch.get('position') or 0.0)
+                total = float(watch.get('duration') or 0.0)
+            except Exception:
+                continue
+            if pos <= WATCH_MIN_START:
+                continue
+            if total > 0 and total - pos <= WATCH_DONE_TAIL:
+                continue
+            item = LIB.find_by_watch_id(video_id)
+            if item is None:
+                continue
+            when = float(watch.get('updated_at') or 0.0)
+            if when > best_time:
+                best, best_watch, best_time = item, watch, when
+        return best, best_watch
 
     # ---------------------------------------------------------------
     def _build_library(self, w, y):
@@ -2377,6 +2830,9 @@ class HomeScreen(Screen):
             st_col = ERR_TXT if job.status == ST_ERROR else ACCENT_2
             if job.status == ST_ERROR:
                 st_icon = 'close'
+            elif job.status == ST_FINISHED:
+                st_icon, st_col = 'check', ACCENT_2
+                bar_value = 1.0
             elif job.status == ST_CANCELLED:
                 st_icon = 'clock'
                 st_col = TXT_2
@@ -2746,6 +3202,9 @@ class DownloadsScreen(Screen):
             st_text = job.short_status()
             if job.status == ST_ERROR:
                 st_icon, st_col, sub_col = 'close', ERR_TXT, ERR_TXT
+            elif job.status == ST_FINISHED:
+                st_icon, st_col, sub_col = 'check', ACCENT_2, ACCENT_2
+                bar_value = 1.0
             elif job.status == ST_CANCELLED:
                 st_icon, st_col, sub_col = 'clock', TXT_2, TXT_3
             elif job.status == ST_DOWNLOADING and bar_value is not None:
@@ -3155,6 +3614,7 @@ class NoxApp(ui.View):
         self._last_tick = -1
         self.indeterminate_phase = 0.0
         self._logged_errors = set()
+        self._recorded_history = set()
 
         STATE.ensure_folder()
         _load_yt_dlp()
@@ -3277,10 +3737,18 @@ class NoxApp(ui.View):
             self.reload_all()
             return
         STATE.remember_opened(item.path)
+        started = time.monotonic()
         try:
             console.quicklook(item.path)
         except Exception:
             nox_error('Не удалось открыть файл')
+        # Просмотрщик iOS позицию не сообщает, поэтому засекается реальное
+        # время, что он был открыт, и накапливается в watch_progress.
+        try:
+            STATE.watch_note(item.watch_id, time.monotonic() - started,
+                             item.duration)
+        except Exception as e:
+            log_debug('watch_note: %r' % (e,))
         try:
             self.home.rebuild()
         except Exception:
@@ -3323,13 +3791,13 @@ class NoxApp(ui.View):
             return
         except Exception:
             return
-        folder = os.path.dirname(item.path)
-        base = re.sub(r'\.f\d+$', '', item.stem)
-        targets = [item.path]
-        for stem in set([item.stem, base]):
-            targets.append(os.path.join(folder, stem + '.info.json'))
-            for ext in IMAGE_EXT:
-                targets.append(os.path.join(folder, stem + ext))
+        # Только спутники ИМЕННО этого видео: .nox.json, обложка,
+        # старый .info.json. Чужие файлы не трогаем.
+        targets = [item.path] + item.sidecar_paths()
+        try:
+            STATE.watch_forget(item.watch_id)
+        except Exception as e:
+            log_debug('watch_forget: %r' % (e,))
         removed = False
         for t in targets:
             try:
@@ -3399,6 +3867,7 @@ class NoxApp(ui.View):
                 if self.indeterminate_phase > 1.0:
                     self.indeterminate_phase = 0.0
             self._persist_debug()
+            self._record_history()
             sig = DOWNLOADER.signature()
             if sig != self._last_sig:
                 # Состав очереди изменился. Сканируем диск, ТОЛЬКО если
@@ -3436,6 +3905,29 @@ class NoxApp(ui.View):
             self.reload_all()
         else:
             self.rebuild_screens()
+
+    def _record_history(self):
+        """
+        История — отдельная сущность: пишется главным потоком, на
+        DownloadManager и активную очередь не влияет.
+        """
+        for job in DOWNLOADER.all_jobs():
+            if job.status not in (ST_FINISHED, ST_ERROR, ST_CANCELLED):
+                continue
+            if job.id in self._recorded_history:
+                continue
+            self._recorded_history.add(job.id)
+            try:
+                STATE.add_history({
+                    'id': job.id,
+                    'title': job.display_title,
+                    'date': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'status': job.status,
+                    'quality': job.quality,
+                    'filesize': int(job.downloaded_bytes or 0),
+                })
+            except Exception as e:
+                log_debug('history: %r' % (e,))
 
     def _persist_debug(self):
         """

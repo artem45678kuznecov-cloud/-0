@@ -1848,6 +1848,7 @@ class DownloadJob(object):
         # ни консоли, ни потоков.
         self.debug_stage = 'created'
         self.debug_stage_time = time.monotonic()
+        self.error_stage = ''      # этап, на котором реально упало
         self.first_hook_received = False
         self.completed_info = {}
         self.extras_status = EXTRAS_NONE
@@ -1901,8 +1902,8 @@ class DownloadJob(object):
                 return 'Скачивается  •  %s / %s' % (
                     fmt_size(self.downloaded_bytes), fmt_size(total))
             return 'Скачивается  •  %s' % fmt_size(self.downloaded_bytes)
-        if self.status == ST_ERROR and self.error:
-            return safe_name(self.error, 46)
+        if self.status == ST_ERROR:
+            return 'Ошибка: ' + (self.error or 'не удалось скачать')
         return STATUS_TEXT.get(self.status, '')
 
     def diag_line(self):
@@ -1924,11 +1925,25 @@ class DownloadJob(object):
         return 'Диагностика: %s · %.1f c · worker %s' % (
             self.debug_stage, elapsed, alive)
 
+    def tech_line(self):
+        """
+        Временная техническая строка ошибки: этап, на котором упало, и
+        полный repr исключения с номером попытки. Полностью, без обрезки,
+        она же уходит в NOX_Data/download_debug.txt.
+        """
+        if self.status != ST_ERROR:
+            return ''
+        parts = [p for p in (self.error_stage, self.debug_error) if p]
+        return ' · '.join(parts)
+
     def detail_line(self):
         """Вторая строка: процент, скорость, остаток — только реальные."""
         diag = self.diag_line()
         if diag:
             return diag
+        tech = self.tech_line()
+        if tech:
+            return tech
         if self.status != ST_DOWNLOADING:
             return ''
         bits = []
@@ -2245,8 +2260,12 @@ class DownloadManager(object):
                 except (cancel_exc, DownloadCancelledByUser):
                     raise
                 except Exception as e:
-                    job.debug_error = 'attempt %d (%s): %r' % (
+                    # Обе попытки сохраняются: видно, упала только IPv4
+                    # или уже первая, обычная.
+                    detail = 'attempt %d (%s): %r' % (
                         number, 'IPv4' if ipv4 else 'обычная сеть', e)
+                    job.debug_error = ((job.debug_error + ' | ' + detail)
+                                       if job.debug_error else detail)
                     if job.cancel_requested:
                         raise
                     if number == 1 and is_network_error(e):
@@ -2276,6 +2295,10 @@ class DownloadManager(object):
             if job.cancel_requested:
                 job.status = ST_CANCELLED
             else:
+                # Сначала запоминаем, где именно упало, и только потом
+                # переводим debug_stage в 'exception' — иначе точка сбоя
+                # теряется.
+                job.error_stage = job.debug_stage
                 job.set_stage('exception')
                 job.status = ST_ERROR
                 job.error = short_error(e)
@@ -3468,9 +3491,12 @@ class DownloadsScreen(Screen):
             # двигает NoxApp._tick, собственного таймера у полосы нет.
             bar.set_phase(self.app.indeterminate_phase)
         # Вторая строка занимает уже существовавшее пустое место под полосой,
-        # ни один элемент карточки не сдвинут.
-        dl = make_label(detail, (F_REG, 10), TXT_4,
-                        frame=(left, 64, cw - left - 16, 14))
+        # ни один элемент карточки не сдвинут. Две строки нужны техническому
+        # тексту ошибки — обычные подписи в одну строку выглядят как прежде.
+        dl = make_label(detail, (F_REG, 9.5),
+                        ERR_TXT if (job is not None and job.status == ST_ERROR)
+                        else TXT_4, lines=2,
+                        frame=(left, 61, cw - left - 16, 24))
         c.add_subview(dl)
 
         st = make_label(st_text, (F_REG, 12), st_col,
@@ -4219,9 +4245,10 @@ class NoxApp(ui.View):
             try:
                 ensure_dirs()
                 with io.open(DEBUG_LOG, 'a', encoding='utf-8') as f:
-                    f.write('%s\t%s\t%s\t%s\n' % (
+                    f.write('%s\t%s\t%s\t%s\t%s\n' % (
                         time.strftime('%Y-%m-%d %H:%M:%S'),
-                        job.url, job.status, job.debug_error))
+                        job.url, job.status,
+                        job.error_stage or job.debug_stage, job.debug_error))
             except Exception:
                 pass
 

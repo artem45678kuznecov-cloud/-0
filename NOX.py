@@ -1454,23 +1454,6 @@ VK_DIRECT = {
 }
 
 
-def format_selector(quality):
-    """
-    Только combined-форматы: и видео, и аудио в одном файле.
-    bestvideo+bestaudio не используется никогда, даже как запасной вариант,
-    потому что объединить их на Pythonista нечем.
-    """
-    h = HEIGHTS.get(quality)
-    parts = list(VK_DIRECT.get(quality, []))
-    if h:
-        parts.append('best[height<=%d][ext=mp4][vcodec!=none][acodec!=none]' % h)
-        parts.append('best[height<=%d][vcodec!=none][acodec!=none]' % h)
-    else:
-        parts.append('best[ext=mp4][vcodec!=none][acodec!=none]')
-    parts.append('best[vcodec!=none][acodec!=none]')
-    return '/'.join(parts)
-
-
 SIDECAR_EXT = '.nox.json'
 THUMB_LIMIT = 8 * 1024 * 1024
 
@@ -1762,22 +1745,6 @@ class ExtrasManager(object):
 EXTRAS = ExtrasManager()
 
 
-class DownloadCancelledByUser(Exception):
-    """Запасное исключение отмены, если DownloadCancelled нет в этой версии."""
-    pass
-
-
-def _cancel_exception():
-    mod = _load_yt_dlp()
-    if mod is not None:
-        try:
-            from yt_dlp.utils import DownloadCancelled
-            return DownloadCancelled
-        except Exception:
-            pass
-    return DownloadCancelledByUser
-
-
 # Признаки сетевого сбоя: после такого делается одна повторная попытка по IPv4.
 NETWORK_HINTS = (
     'timed out', 'timeout', 'urlopen error', 'connection reset',
@@ -1795,17 +1762,20 @@ def is_network_error(exc):
 
 ST_QUEUED = 'queued'
 ST_PREPARING = 'preparing'
+ST_QUEUED_DOWNLOAD = 'queued_download'
 ST_DOWNLOADING = 'downloading'
 ST_PROCESSING = 'processing'
 ST_FINISHED = 'finished'
 ST_ERROR = 'error'
 ST_CANCELLED = 'cancelled'
 
-ACTIVE_STATES = (ST_QUEUED, ST_PREPARING, ST_DOWNLOADING, ST_PROCESSING)
+ACTIVE_STATES = (ST_QUEUED, ST_PREPARING, ST_QUEUED_DOWNLOAD,
+                 ST_DOWNLOADING, ST_PROCESSING)
 
 STATUS_TEXT = {
     ST_QUEUED: 'В очереди',
     ST_PREPARING: 'Получение информации...',
+    ST_QUEUED_DOWNLOAD: 'В очереди',
     ST_DOWNLOADING: 'Скачивается',
     ST_PROCESSING: 'Обработка файла...',
     ST_FINISHED: '✓ Готово',
@@ -1816,12 +1786,112 @@ STATUS_TEXT = {
 STATUS_SHORT = {
     ST_QUEUED: 'В очереди',
     ST_PREPARING: 'Подготовка',
+    ST_QUEUED_DOWNLOAD: 'В очереди',
     ST_DOWNLOADING: 'Скачивается',
     ST_PROCESSING: 'Обработка',
     ST_FINISHED: '✓ Готово',
     ST_ERROR: 'Ошибка',
     ST_CANCELLED: 'Остановлено',
 }
+
+# Параметры прямой HTTP-загрузки.
+HTTP_CHUNK = 256 * 1024
+HTTP_TIMEOUT = 60
+HTTP_RETRIES = 6
+HTTP_RETRY_PAUSE = 3.0
+SPEED_WINDOW = 1.2          # окно усреднения скорости, секунды
+
+# Протоколы, которые наш простой загрузчик тянуть не умеет: они собираются
+# из сегментов и потребовали бы ffmpeg.
+SEGMENTED_HINTS = ('m3u8', 'dash', 'ism', 'f4m')
+
+
+def sanitize_filename(text, limit=120):
+    """Имя файла из названия: те же <title> [<id>].mp4, но безопасно."""
+    text = (text or '').strip()
+    text = re.sub(r'[\\/:*?"<>|]', '_', text)
+    text = re.sub(r'[\x00-\x1f]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip(' .')
+    if not text:
+        text = 'video'
+    return text[:limit].strip(' .')
+
+
+def target_path_for(title, video_id, ext):
+    ext = sanitize_filename(str(ext or 'mp4'), 8).lstrip('.') or 'mp4'
+    name = sanitize_filename(title)
+    raw_id = str(video_id or '').strip()
+    # Пустой id не должен превращаться в подставное имя.
+    vid = sanitize_filename(raw_id, 40) if raw_id else ''
+    stem = '%s [%s]' % (name, vid) if vid else name
+    return os.path.join(MEDIA_DIR, '%s.%s' % (stem, ext))
+
+
+def _is_combined(fmt):
+    """Готовый файл со звуком: и видео, и аудио, и обычный HTTP."""
+    if not isinstance(fmt, dict):
+        return False
+    url = fmt.get('url')
+    if not isinstance(url, str) or not url.startswith('http'):
+        return False
+    vcodec = (fmt.get('vcodec') or 'none').lower()
+    acodec = (fmt.get('acodec') or 'none').lower()
+    if vcodec == 'none' or acodec == 'none':
+        return False           # video-only / audio-only — склеивать нечем
+    proto = (fmt.get('protocol') or '').lower()
+    blob = proto + ' ' + str(fmt.get('format_id') or '').lower()
+    for hint in SEGMENTED_HINTS:
+        if hint in blob:
+            return False       # сегментные потоки требуют ffmpeg
+    return True
+
+
+def _fmt_height(fmt):
+    h = fmt.get('height')
+    if isinstance(h, (int, float)) and h > 0:
+        return int(h)
+    m = re.search(r'(\d{3,4})', str(fmt.get('format_id') or ''))
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return 0
+    return 0
+
+
+def pick_direct_format(info, quality):
+    """
+    Прямой combined-формат: сначала VK urlXXX по лестнице качества,
+    затем лучший combined в пределах нужной высоты. Video-only и
+    audio-only не выбираются никогда — склеивать их нечем.
+    """
+    entry = _entry_of(info)
+    formats = entry.get('formats')
+    if not isinstance(formats, list):
+        formats = []
+    combined = [f for f in formats if _is_combined(f)]
+    if not combined and _is_combined(entry):
+        combined = [entry]          # у некоторых экстракторов формат один
+    if not combined:
+        return None
+    by_id = {}
+    for f in combined:
+        fid = f.get('format_id')
+        if isinstance(fid, str):
+            by_id.setdefault(fid, f)
+    for fid in VK_DIRECT.get(quality, []):
+        if fid in by_id:
+            return by_id[fid]
+    cap = HEIGHTS.get(quality)
+    pool = combined
+    if cap:
+        limited = [f for f in combined if 0 < _fmt_height(f) <= cap]
+        pool = limited or [f for f in combined if _fmt_height(f) == 0] or combined
+    def rank(f):
+        return (_fmt_height(f),
+                f.get('tbr') if isinstance(f.get('tbr'), (int, float)) else 0,
+                f.get('filesize') or f.get('filesize_approx') or 0)
+    return sorted(pool, key=rank)[-1]
 
 
 class DownloadJob(object):
@@ -1842,14 +1912,20 @@ class DownloadJob(object):
         self.filename = ''
         self.error = ''
         self.debug_error = ''      # техническая причина, без консоли
-        # Состояние дополнительных функций отдельно от статуса видео:
-        # их сбой никогда не переводит само задание в error.
         # Телеметрия этапа: только присваивание Python-строки, ни файлов,
         # ни консоли, ни потоков.
-        self.debug_stage = 'created'
+        self.debug_stage = 'resolve-pending'
         self.debug_stage_time = time.monotonic()
         self.error_stage = ''      # этап, на котором реально упало
         self.first_hook_received = False
+        # Результат resolve: прямой HTTPS-адрес и всё для его скачивания.
+        self.resolved_url = ''
+        self.resolved_headers = {}
+        self.resolved_format_id = ''
+        self.resolved_ext = 'mp4'
+        self.expected_size = None
+        # Состояние дополнительных функций отдельно от статуса видео:
+        # их сбой никогда не переводит само задание в error.
         self.completed_info = {}
         self.extras_status = EXTRAS_NONE
         self.extras_error = ''
@@ -1865,9 +1941,14 @@ class DownloadJob(object):
         self.debug_stage_time = time.monotonic()
 
     @property
+    def part_path(self):
+        return (self.filename + '.part') if self.filename else ''
+
+    @property
     def total(self):
-        """Точный размер, иначе оценка yt-dlp, иначе None. Ничего не выдумываем."""
-        for v in (self.total_bytes, self.total_bytes_estimate):
+        """Точный размер, иначе оценка, иначе None. Ничего не выдумываем."""
+        for v in (self.total_bytes, self.total_bytes_estimate,
+                  self.expected_size):
             try:
                 if v and float(v) > 0:
                     return float(v)
@@ -1885,6 +1966,10 @@ class DownloadJob(object):
     @property
     def is_active(self):
         return self.status in ACTIVE_STATES
+
+    @property
+    def needs_resolve(self):
+        return self.status == ST_QUEUED and not self.resolved_url
 
     @property
     def display_title(self):
@@ -1908,12 +1993,12 @@ class DownloadJob(object):
 
     def diag_line(self):
         """
-        Временная телеметрия: если задание висит в «Получение информации...»
-        дольше DIAG_AFTER, существующая строка карточки показывает точный
-        этап, время в нём и состояние рабочего потока. Как только пошла
-        обычная загрузка, строка исчезает сама.
+        Временная телеметрия: если задание висит в подготовке дольше
+        DIAG_AFTER, существующая строка карточки показывает точный этап,
+        время в нём и состояние рабочего потока. Как только пошла обычная
+        загрузка, строка исчезает сама.
         """
-        if self.status != ST_PREPARING:
+        if self.status not in (ST_QUEUED, ST_PREPARING, ST_QUEUED_DOWNLOAD):
             return ''
         try:
             elapsed = time.monotonic() - float(self.debug_stage_time or 0.0)
@@ -1928,8 +2013,8 @@ class DownloadJob(object):
     def tech_line(self):
         """
         Временная техническая строка ошибки: этап, на котором упало, и
-        полный repr исключения с номером попытки. Полностью, без обрезки,
-        она же уходит в NOX_Data/download_debug.txt.
+        полный repr исключения. Полностью, без обрезки, она же уходит в
+        NOX_Data/download_debug.txt.
         """
         if self.status != ST_ERROR:
             return ''
@@ -1968,9 +2053,13 @@ class DownloadJob(object):
 
 class DownloadManager(object):
     """
-    Живёт на уровне приложения, а не экрана: перестроение интерфейса и
-    переключение вкладок его не трогают. Режим последовательный — один
-    рабочий поток, остальные задания ждут в очереди.
+    Разбор ссылки и сама загрузка разделены.
+
+    resolve() выполняется на ГЛАВНОМ потоке и только там: на устройстве
+    yt_dlp.extract_info внутри фонового потока валил Pythonista нативно,
+    тогда как тот же URL на главном потоке проходит. Рабочий поток
+    получает уже готовый прямой HTTPS-адрес и качает его обычным urllib —
+    yt-dlp он не импортирует и не вызывает вообще.
     """
 
     def __init__(self):
@@ -2021,15 +2110,16 @@ class DownloadManager(object):
         except Exception:
             return False
 
+    def pending_resolve(self):
+        return [j for j in self.all_jobs() if j.needs_resolve]
+
     def signature(self):
         """
         Структурный отпечаток очереди: ТОЛЬКО состав видимых заданий.
 
-        Статус сюда не входит намеренно: переходы queued -> preparing ->
-        downloading -> processing меняют лишь содержимое уже существующей
-        карточки, и полный rebuild четырёх экранов на них не нужен.
-        Отпечаток меняется, когда строка реально появилась или исчезла
-        (в том числе когда задание завершилось и ушло из очереди).
+        Статус сюда не входит намеренно: переходы между подготовкой и
+        загрузкой меняют лишь содержимое уже существующей карточки, и
+        полный rebuild четырёх экранов на них не нужен.
         """
         return tuple(j.id for j in self.visible_jobs())
 
@@ -2051,17 +2141,17 @@ class DownloadManager(object):
             job = DownloadJob(url, quality)
             self.jobs.append(job)
             self.revision += 1
-        self._pump()
+        # Поток здесь НЕ запускается: сначала разбор ссылки на главном потоке.
         return True, 'Добавлено в очередь'
 
     def cancel(self, job_id):
-        """Настоящая отмена: рабочий поток прервётся на ближайшем hook."""
+        """Настоящая отмена: рабочий цикл прервётся на ближайшем блоке."""
         job = self.find(job_id)
         if job is None:
             return False
         if job.is_active:
             job.cancel_requested = True
-            if job.status == ST_QUEUED:
+            if job.status in (ST_QUEUED, ST_PREPARING, ST_QUEUED_DOWNLOAD):
                 job.status = ST_CANCELLED
                 job.finished_at = time.time()
         with self._lock:
@@ -2091,26 +2181,105 @@ class DownloadManager(object):
             if len(self.jobs) != before:
                 self.revision += 1
 
-    # -- рабочий поток ---------------------------------------------
+    # -- РАЗБОР ССЫЛКИ: только главный поток ------------------------
+    def resolve_opts(self):
+        """Минимальный набор: разбор ничего не качает и не пишет."""
+        return {
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'socket_timeout': 60,
+            'retries': 5,
+            'fragment_retries': 5,
+            'ffmpeg_location': NO_FFMPEG_PATH,
+            'fixup': 'never',
+        }
+
+    def resolve(self, job):
+        """
+        Единственный вызов yt-dlp во всём приложении, и всегда с
+        download=False. Может подморозить интерфейс на несколько секунд —
+        это осознанный размен на надёжность.
+        """
+        if not job.needs_resolve:
+            return False
+        job.status = ST_PREPARING
+        job.set_stage('resolve-enter')
+        self.tick += 1
+        try:
+            mod = _load_yt_dlp()
+            if mod is None:
+                raise RuntimeError(YTDLP_ERROR or 'Модуль yt-dlp не найден')
+            with mod.YoutubeDL(self.resolve_opts()) as ydl:
+                info = ydl.extract_info(job.url, download=False)
+            job.set_stage('resolve-returned')
+            fmt = pick_direct_format(info, job.quality)
+            if not fmt:
+                raise RuntimeError('Нет прямого формата со звуком')
+            entry = _entry_of(info)
+            title = entry.get('title')
+            if isinstance(title, str) and title.strip():
+                job.title = title.strip()
+            job.resolved_url = fmt.get('url')
+            headers = fmt.get('http_headers') or entry.get('http_headers') or {}
+            job.resolved_headers = {str(k): str(v) for k, v in
+                                    dict(headers).items()}
+            job.resolved_format_id = str(fmt.get('format_id') or '')
+            job.resolved_ext = str(fmt.get('ext') or entry.get('ext') or 'mp4')
+            size = fmt.get('filesize') or fmt.get('filesize_approx')
+            job.expected_size = size if isinstance(size, (int, float)) else None
+            snap = safe_metadata_snapshot(info)
+            # В метаданные попадает то, что реально скачано, а не первый
+            # формат из общего info.
+            snap['format_id'] = job.resolved_format_id
+            snap['ext'] = job.resolved_ext
+            for key in ('width', 'height'):
+                value = fmt.get(key)
+                if isinstance(value, (int, float)) and value > 0:
+                    snap[key] = int(value)
+            if job.expected_size:
+                snap['filesize'] = job.expected_size
+            job.completed_info = snap
+            job.filename = target_path_for(job.title or entry.get('id') or 'video',
+                                           entry.get('id'), job.resolved_ext)
+            job.set_stage('format-selected')
+            job.status = ST_QUEUED_DOWNLOAD
+            job.set_stage('http-queued')
+        except Exception as e:
+            job.error_stage = job.debug_stage
+            job.set_stage('exception')
+            job.status = ST_ERROR
+            job.error = short_error(e)
+            job.debug_error = 'resolve: %r' % (e,)
+            job.finished_at = time.time()
+            with self._lock:
+                self.revision += 1
+            self.tick += 1
+            return False
+        with self._lock:
+            self.revision += 1
+        self.tick += 1
+        self._pump()
+        return True
+
+    # -- рабочий поток: только HTTP --------------------------------
     def _pump(self):
         """
-        Запускает следующее задание, только если поток не занят.
-        Вызывается из add/cancel и из самого потока по завершении, поэтому
-        перестроение интерфейса второй поток создать не может.
+        Запускает следующее разобранное задание, если поток свободен.
+        Вызывается из resolve/cancel и из самого потока по завершении,
+        поэтому перестроение интерфейса второй поток создать не может.
         """
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             nxt = None
             for j in self.jobs:
-                if j.status == ST_QUEUED and not j.cancel_requested:
+                if j.status == ST_QUEUED_DOWNLOAD and not j.cancel_requested:
                     nxt = j
                     break
             if nxt is None:
                 self._thread = None
                 return
-            nxt.status = ST_PREPARING
-            self.revision += 1
             nxt.set_stage('before-thread-create')
             self._thread = threading.Thread(target=self._run, args=(nxt,),
                                             name='nox-download', daemon=True)
@@ -2119,191 +2288,82 @@ class DownloadManager(object):
             if nxt.debug_stage == 'before-thread-create':
                 nxt.set_stage('thread-start-called')
 
-    def _hook(self, job, d):
-        if not job.first_hook_received:
-            job.first_hook_received = True
-            job.set_stage('first-hook')
-        if job.cancel_requested:
-            raise _cancel_exception()('Загрузка остановлена пользователем')
-        # Отдельного metadata-запроса больше нет, поэтому название приходит
-        # сюда — с первым же вызовом hook, как только yt-dlp его знает.
-        info = d.get('info_dict') or {}
-        title = info.get('title')
-        if isinstance(title, str) and title.strip():
-            job.title = title.strip()
-        st = d.get('status')
-        if st == 'downloading':
-            job.set_stage('downloading')
-            job.status = ST_DOWNLOADING
-            job.downloaded_bytes = d.get('downloaded_bytes') or 0
-            job.total_bytes = d.get('total_bytes')
-            job.total_bytes_estimate = d.get('total_bytes_estimate')
-            job.speed = d.get('speed')
-            job.eta = d.get('eta')
-            name = d.get('filename')
-            if not name:
-                info = d.get('info_dict') or {}
-                name = info.get('_filename') or info.get('filepath')
-            if name:
-                job.filename = name
-        elif st == 'finished':
-            job.set_stage('hook-finished')
-            job.status = ST_PROCESSING
-            done = d.get('total_bytes') or d.get('downloaded_bytes')
-            if done:
-                job.downloaded_bytes = done
-                if not job.total_bytes:
-                    job.total_bytes = done
-            job.speed = None
-            job.eta = None
-            name = d.get('filename')
-            if name:
-                job.filename = name
-        elif st == 'error':
-            job.status = ST_ERROR
-            if not job.error:
-                job.error = 'Загрузка прервана'
-        self.tick += 1
-
-    def _ydl_opts(self, job, ipv4=False):
-        """
-        Ровно тот набор, что дошёл до 100% в контрольном тесте на iPhone.
-
-        Без logger: собственный логгер уводил вывод yt-dlp в консольный мост
-        Pythonista прямо из фонового потока при открытом fullscreen ui.View.
-        Без verbose — он тянул за собой диагностику ffmpeg через subprocess.
-        writeinfojson и writethumbnail временно выключены: в проверенном
-        сценарии их не было, вернём после подтверждения этого пути.
-        """
-        opts = {
-            'format': format_selector(job.quality),
-            'outtmpl': os.path.join(MEDIA_DIR, '%(title)s [%(id)s].%(ext)s'),
-
-            # Путь заведомо несуществующий — так yt-dlp считает ffmpeg
-            # недоступным и не пытается его прощупать через subprocess,
-            # которого на iOS нет. fixup выключен по той же причине.
-            'ffmpeg_location': NO_FFMPEG_PATH,
-            'fixup': 'never',
-
-            'socket_timeout': 60,
-            'retries': 5,
-            'fragment_retries': 5,
-
-            'continuedl': True,
-            'noplaylist': True,
-
-            'quiet': True,
-            'no_warnings': True,
-
-            'progress_hooks': [lambda d, _j=job: self._hook(_j, d)],
-        }
-        if ipv4:
-            # Единственное отличие второй попытки; первая идёт 1:1 как в тесте.
-            opts['source_address'] = '0.0.0.0'
-        return opts
-
-    def _absorb_info(self, job, info):
-        """Название из результата единственного extract_info(download=True)."""
-        if not isinstance(info, dict):
+    def _note_progress(self, job, state, chunk_len):
+        """Скорость по окну ~1.2 c, а не по одному блоку."""
+        job.downloaded_bytes += chunk_len
+        state['bytes'] += chunk_len
+        now = time.monotonic()
+        delta = now - state['time']
+        if delta < SPEED_WINDOW:
             return
-        entries = info.get('entries')
-        if isinstance(entries, list) and entries:
-            info = entries[0] or {}
-        title = info.get('title')
-        if isinstance(title, str) and title.strip():
-            job.title = title.strip()
-        path = info.get('filepath') or info.get('_filename')
-        if isinstance(path, str) and path:
-            job.filename = path
+        speed = state['bytes'] / delta if delta > 0 else 0.0
+        job.speed = speed if speed > 0 else None
+        total = job.total
+        if total and job.speed:
+            remain = max(0.0, total - job.downloaded_bytes)
+            job.eta = int(remain / job.speed)
+        else:
+            job.eta = None
+        state['bytes'] = 0
+        state['time'] = now
         self.tick += 1
-
-    def _attempt(self, job, ipv4):
-        """
-        ОДИН вызов extract_info(download=True): он же получает метаданные,
-        он же выбирает формат, он же качает. Отдельного metadata-запроса,
-        на котором раньше выпадал timeout, больше не существует.
-        """
-        job.set_stage('before-load-ytdlp')
-        mod = _load_yt_dlp()
-        if mod is None:
-            raise RuntimeError(YTDLP_ERROR or 'Модуль yt-dlp не найден')
-        job.set_stage('ytdlp-loaded')
-        job.set_stage('ytdlp-constructor')
-        with mod.YoutubeDL(self._ydl_opts(job, ipv4)) as ydl:
-            job.set_stage('ytdlp-created')
-            job.set_stage('extract-info-enter')
-            info = ydl.extract_info(job.url, download=True)
-            job.set_stage('extract-info-returned')
-        self._absorb_info(job, info)
-        return info
 
     def _run(self, job):
         """
-        Рабочий поток. Ни print, ни console.*, ни ui.* — только Python-данные,
-        yt-dlp и поля DownloadJob. Диагностика копится в job.debug_error,
-        а на экран её позже переносит главный поток.
+        Рабочий поток. yt-dlp здесь не импортируется и не вызывается:
+        только urllib, файлы и поля DownloadJob. Ни print, ни console,
+        ни ui.
         """
         job.set_stage('worker-entered')
-        job.set_stage('before-cancel-exception')
-        cancel_exc = _cancel_exception()
-        job.set_stage('after-cancel-exception')
-        info = None
+        final = job.filename
+        part = job.part_path
+        state = {'bytes': 0, 'time': time.monotonic()}
+        last_error = None
         try:
-            # Попытка 1 — обычная сеть; попытка 2 — та же задача по IPv4,
-            # и только если первая упала именно на сети.
-            for number, ipv4 in ((1, False), (2, True)):
+            for attempt in range(1, HTTP_RETRIES + 1):
                 if job.cancel_requested:
-                    raise cancel_exc('Загрузка остановлена пользователем')
-                try:
-                    info = self._attempt(job, ipv4)
                     break
-                except (cancel_exc, DownloadCancelledByUser):
-                    raise
-                except Exception as e:
-                    # Обе попытки сохраняются: видно, упала только IPv4
-                    # или уже первая, обычная.
-                    detail = 'attempt %d (%s): %r' % (
-                        number, 'IPv4' if ipv4 else 'обычная сеть', e)
-                    job.debug_error = ((job.debug_error + ' | ' + detail)
-                                       if job.debug_error else detail)
+                if attempt > 1:
+                    job.set_stage('http-retry')
+                    self.tick += 1
+                    slept = 0.0
+                    while slept < HTTP_RETRY_PAUSE and not job.cancel_requested:
+                        time.sleep(0.2)
+                        slept += 0.2
                     if job.cancel_requested:
+                        break
+                try:
+                    done = self._transfer(job, part, state)
+                except Exception as e:
+                    last_error = e
+                    if job.cancel_requested:
+                        break
+                    if not is_network_error(e) and attempt >= 2:
                         raise
-                    if number == 1 and is_network_error(e):
-                        job.debug_error += ' -> retry via IPv4'
-                        job.status = ST_PREPARING
-                        job.speed = None
-                        job.eta = None
-                        self.tick += 1
-                        continue
-                    raise
+                    continue
+                if done:
+                    last_error = None
+                    break
             if job.cancel_requested:
-                job.status = ST_CANCELLED
+                job.status = ST_CANCELLED           # .part остаётся
+            elif last_error is not None:
+                raise last_error
             else:
-                # Только чистые Python-данные в память. Ни сети, ни файлов,
-                # ни UI: рабочий поток заканчивается ровно там же, где в
-                # доказанной версии. Метаданные и обложку сделает потом
-                # отдельный ExtrasManager, уже после смерти этого потока.
-                job.set_stage('before-finished')
-                job.completed_info = safe_metadata_snapshot(info)
+                os.replace(part, final)
+                job.set_stage('http-finished')
                 job.status = ST_FINISHED
                 job.set_stage('finished')
-        except cancel_exc:
-            job.status = ST_CANCELLED
-        except DownloadCancelledByUser:
-            job.status = ST_CANCELLED
         except Exception as e:
             if job.cancel_requested:
                 job.status = ST_CANCELLED
             else:
-                # Сначала запоминаем, где именно упало, и только потом
-                # переводим debug_stage в 'exception' — иначе точка сбоя
-                # теряется.
                 job.error_stage = job.debug_stage
                 job.set_stage('exception')
                 job.status = ST_ERROR
                 job.error = short_error(e)
-                if not job.debug_error:
-                    job.debug_error = repr(e)
+                detail = 'http: %r' % (e,)
+                job.debug_error = ((job.debug_error + ' | ' + detail)
+                                   if job.debug_error else detail)
         finally:
             job.finished_at = time.time()
             job.speed = None
@@ -2317,6 +2377,89 @@ class DownloadManager(object):
             except Exception as e:
                 job.debug_error = (job.debug_error + ' | ') if job.debug_error else ''
                 job.debug_error += 'pump: %r' % (e,)
+
+    def _transfer(self, job, part, state):
+        """
+        Одна попытка передачи. Возвращает True, если файл дошёл до конца.
+        Докачивает через Range; если сервер Range проигнорировал — файл
+        начинается заново, чтобы не получить битый MP4.
+        """
+        job.set_stage('http-opening')
+        offset = 0
+        try:
+            if os.path.exists(part):
+                offset = os.path.getsize(part)
+        except Exception:
+            offset = 0
+        headers = dict(job.resolved_headers or {})
+        headers.setdefault('User-Agent', 'NOX/1.0')
+        if offset > 0:
+            headers['Range'] = 'bytes=%d-' % offset
+        req = urllib.request.Request(job.resolved_url, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
+        try:
+            code = resp.getcode()
+            mode = 'wb'
+            total = None
+            if offset > 0 and code == 206:
+                mode = 'ab'
+                total = _total_from_content_range(
+                    resp.headers.get('Content-Range'))
+                if total is None:
+                    length = _int_or_none(resp.headers.get('Content-Length'))
+                    total = (offset + length) if length else None
+            else:
+                # 200 на запрос с Range означает, что сервер его не понял:
+                # дописывать к старому файлу нельзя, начинаем заново.
+                offset = 0
+                total = _int_or_none(resp.headers.get('Content-Length'))
+            job.downloaded_bytes = offset
+            if total:
+                job.total_bytes = total
+            state['bytes'] = 0
+            state['time'] = time.monotonic()
+            job.status = ST_DOWNLOADING
+            job.set_stage('http-downloading')
+            self.tick += 1
+            with io.open(part, mode) as f:
+                while True:
+                    if job.cancel_requested:
+                        return False
+                    chunk = resp.read(HTTP_CHUNK)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    self._note_progress(job, state, len(chunk))
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        if job.cancel_requested:
+            return False
+        total = job.total_bytes
+        if total and job.downloaded_bytes < total:
+            raise IOError('соединение оборвалось: %d из %d байт'
+                          % (job.downloaded_bytes, total))
+        return True
+
+
+def _int_or_none(value):
+    try:
+        n = int(str(value).strip())
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def _total_from_content_range(value):
+    """'bytes 1000-1999/500000000' -> 500000000."""
+    if not value:
+        return None
+    m = re.search(r'/\s*(\d+)\s*$', str(value))
+    if not m:
+        return None
+    return _int_or_none(m.group(1))
 
 
 def short_error(exc):
@@ -3404,7 +3547,9 @@ class DownloadsScreen(Screen):
                 self._url_field.text = ''
             # Никакого синхронного rebuild и никакого сканирования диска
             # в момент старта: карточку добавит единственный корневой такт,
-            # когда увидит новое задание в signature().
+            # когда увидит новое задание в signature(). Он же следом
+            # разберёт ссылку — на главном потоке.
+            run_on_main(self.app.tick_soon)
         else:
             nox_error(msg)
 
@@ -3883,6 +4028,7 @@ class NoxApp(ui.View):
         self.indeterminate_phase = 0.0
         self._logged_errors = set()
         self._recorded_history = set()
+        self._resolving = False
         # Синхронизируемся со стартовым значением: иначе первый же такт
         # принял бы «изменение» за отработавшие extras и сделал reload_all.
         self._last_extras_tick = EXTRAS.tick
@@ -4144,6 +4290,7 @@ class NoxApp(ui.View):
                 self.indeterminate_phase += 0.08
                 if self.indeterminate_phase > 1.0:
                     self.indeterminate_phase = 0.0
+            self._resolve_pending()
             self._persist_debug()
             self._record_history()
             self._drive_extras(active)
@@ -4168,6 +4315,19 @@ class NoxApp(ui.View):
         except Exception:
             self._alive = False
 
+    def tick_soon(self):
+        """
+        Два одноразовых шага и ни одного нового таймера: сначала показать
+        карточку, следом — разобрать ссылку. _tick отсюда не вызывается,
+        иначе появилась бы вторая периодическая цепочка.
+        """
+        try:
+            if DOWNLOADER.signature() != self._last_sig:
+                self.after_downloads_changed(rescan=False)
+        except Exception as e:
+            log_debug('tick_soon: %r' % (e,))
+        run_on_main(self._resolve_pending)
+
     def sync_downloads(self):
         """Отметить текущий состав очереди как уже показанный."""
         self._last_sig = DOWNLOADER.signature()
@@ -4184,6 +4344,27 @@ class NoxApp(ui.View):
             self.reload_all()
         else:
             self.rebuild_screens()
+
+    def _resolve_pending(self):
+        """
+        Единственное место, где вызывается yt-dlp, и всегда на ГЛАВНОМ
+        потоке. За один заход разбирается одна ссылка: вызов блокирующий,
+        интерфейс на это время замирает — осознанный размен на надёжность.
+        """
+        if self._resolving:
+            return
+        if DOWNLOADER.signature() != self._last_sig:
+            return          # карточку ещё не показали — разбор следующим шагом
+        pending = DOWNLOADER.pending_resolve()
+        if not pending:
+            return
+        self._resolving = True
+        try:
+            DOWNLOADER.resolve(pending[0])
+        except Exception as e:
+            log_debug('resolve: %r' % (e,))
+        finally:
+            self._resolving = False
 
     def _drive_extras(self, active_downloads):
         """

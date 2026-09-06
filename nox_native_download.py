@@ -93,6 +93,60 @@ def unavailable_reason():
     return OBJC_ERROR or 'objc_util недоступен'
 
 
+def is_main_thread():
+    """
+    Главный ли это поток С ТОЧКИ ЗРЕНИЯ iOS.
+
+    Спрашивать об этом Python нельзя, и это стоило одной сломанной
+    сборки. Pythonista вызывает такт интерфейса с настоящего главного
+    потока UIKit, но Python видит его как чужой поток и называет
+    Dummy-1: threading.main_thread() — это поток, в котором стартовал
+    интерпретатор, а не тот, на котором UIKit крутит цикл событий.
+    Проверка `current_thread() is main_thread()` возвращала False на
+    самом что ни на есть главном потоке, нативный старт не выполнялся
+    никогда, а HTTP-путь такие задания намеренно пропускает — очередь
+    вставала целиком.
+
+    Ответ даёт сама система: +[NSThread isMainThread]. На рабочем потоке
+    nox-download он вернёт False, и ObjC оттуда по-прежнему не тронут.
+
+    Имя Dummy-N само по себе не значит НИЧЕГО и главным потоком не
+    считается: спрашивается всегда NSThread.
+    """
+    try:
+        if threading.current_thread() is threading.main_thread():
+            return True
+    except Exception:
+        pass
+    if not available():
+        return False
+    try:
+        return bool(objc_util.ObjCClass('NSThread').isMainThread())
+    except Exception:
+        return False
+
+
+def thread_report():
+    """
+    Что именно видно про текущий поток. Для одного диагностического
+    события перед первым нативным стартом — не для каждого такта.
+    """
+    report = {'python_thread': '?', 'python_main': False, 'objc_main': False}
+    try:
+        report['python_thread'] = threading.current_thread().name
+        report['python_main'] = (threading.current_thread()
+                                 is threading.main_thread())
+    except Exception:
+        pass
+    if available():
+        try:
+            report['objc_main'] = bool(
+                objc_util.ObjCClass('NSThread').isMainThread())
+        except Exception:
+            pass
+    return report
+
+
 def _ns(text):
     return objc_util.ns(str(text))
 

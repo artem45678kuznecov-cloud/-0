@@ -472,9 +472,27 @@ def _is_main_thread():
     Главный ли это поток. Нативные вызовы делаются только отсюда: pump()
     зовут и рабочие потоки из своего finally, а трогать ObjC оттуда
     незачем.
+
+    Одного `current_thread() is main_thread()` НЕДОСТАТОЧНО, и это
+    выяснилось на устройстве. Pythonista вызывает такт интерфейса с
+    настоящего главного потока UIKit, но Python видит его как чужой и
+    называет Dummy-1: threading.main_thread() — это поток, где стартовал
+    интерпретатор, а не тот, на котором UIKit крутит цикл событий.
+    Проверка возвращала False на самом главном потоке, _pump_native не
+    вызывался никогда, а HTTP-путь нативные задания намеренно
+    пропускает — очередь вставала на ST_QUEUED_DOWNLOAD навсегда.
+
+    Поэтому вопрос переадресуется системе: NSThread.isMainThread(). Имя
+    Dummy-N само по себе главным потоком не считается — спрашивается
+    всегда NSThread, и на рабочем потоке nox-download он ответит False.
     """
     try:
-        return threading.current_thread() is threading.main_thread()
+        if threading.current_thread() is threading.main_thread():
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(native.is_main_thread())
     except Exception:
         return False
 
@@ -1066,6 +1084,9 @@ class DownloadManager(object):
         # Пачка помечена закрывающейся: новые задачи в неё не набираются,
         # приостановленные с неё сняты, ждём только конца работающих.
         self._batch_closing = False
+        # Последний ответ на вопрос «что это за поток»: чтобы одно и то
+        # же не писалось в журнал на каждом такте.
+        self._thread_check = None
 
     def mark_dirty(self):
         self.dirty += 1
@@ -1682,6 +1703,23 @@ class DownloadManager(object):
             return False
         return self.native_enabled()
 
+    def _log_thread_check(self):
+        """
+        Одно событие о том, как выглядит текущий поток. Пишется перед
+        первым нативным стартом и потом только если ответ изменился —
+        на каждом такте такое не нужно.
+        """
+        try:
+            report = native.thread_report()
+        except Exception:
+            return
+        stamp = (report.get('python_thread'), report.get('python_main'),
+                 report.get('objc_main'))
+        if stamp == self._thread_check:
+            return
+        self._thread_check = stamp
+        nox_debug.event('native-main-thread-check', **report)
+
     def _start_native(self, job):
         """
         Создать нативную задачу. Зовётся ТОЛЬКО с главного потока.
@@ -2214,7 +2252,11 @@ class DownloadManager(object):
                     entry.get('id'), job.resolved_ext)
             job.set_stage('format-selected')
             job.status = ST_QUEUED_DOWNLOAD
-            job.set_stage('http-queued')
+            # Статус прежний, ST_QUEUED_DOWNLOAD; меняется только имя
+            # стадии в диагностике, чтобы «http-queued» не сбивало с
+            # толку у задания, которое поедет нативным транспортом.
+            job.set_stage('native-queued' if self._wants_native(job)
+                          else 'http-queued')
             self.mark_dirty()
             nox_debug.job_event('resolve-main-success', job,
                                 format_id=job.resolved_format_id,
@@ -2447,6 +2489,7 @@ class DownloadManager(object):
                 ready.append(j)
         if not ready:
             return
+        self._log_thread_check()
         fresh = not self.native.session_live()
         for job in ready:
             if not self._start_native(job):

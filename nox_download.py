@@ -27,9 +27,15 @@ import http.client
 # ни одного файла не открывает. Алгоритм загрузки эти вызовы не трогают.
 import nox_debug
 
+# Нативный транспорт. Импорт безопасен где угодно: objc_util внутри
+# загружается лениво, и на настольном Python модуль просто сообщает, что
+# нативного пути нет.
+import nox_native_download as native
+
 from nox_core import (
     JOBS_KEY, SIDECAR_EXT, QUALITIES, fmt_size, fmt_speed, fmt_eta,
-    safe_name, PROJECT_DIR, MEDIA_DIR, YT_DLP_DIR, ensure_dirs, STATE,
+    safe_name, PROJECT_DIR, MEDIA_DIR, YT_DLP_DIR, DATA_DIR, ensure_dirs,
+    STATE,
 )
 
 
@@ -461,6 +467,18 @@ TRANSPORT_ERRORS = (
 )
 
 
+def _is_main_thread():
+    """
+    Главный ли это поток. Нативные вызовы делаются только отсюда: pump()
+    зовут и рабочие потоки из своего finally, а трогать ObjC оттуда
+    незачем.
+    """
+    try:
+        return threading.current_thread() is threading.main_thread()
+    except Exception:
+        return False
+
+
 def is_transport_error(exc):
     """
     Сбой HTTP-клиента при отправке запроса или чтении ответа.
@@ -568,6 +586,39 @@ class RangeNotSupported(Exception):
 # Сколько видео реально качается ОДНОВРЕМЕННО. Очередь при этом не
 # ограничена: остальные задания ждут свободного слота.
 MAX_CONCURRENT_DOWNLOADS = 3
+
+# =====================================================================
+#  ТРАНСПОРТ: ЧЕМ ИМЕННО ТЯНУТСЯ БАЙТЫ
+# =====================================================================
+# Очередь, состояния, пауза, .part и разбор ссылки остались там же, где
+# были. Заменяется только нижний слой: кто именно перекладывает байты из
+# сети в файл.
+#
+#   native — NSURLSessionDownloadTask. Передачей занимается iOS, поэтому
+#            она продолжается, когда Pythonista свёрнута. Проверено на
+#            устройстве: Home Screen, блокировка экрана, другое
+#            приложение — байты продолжали приходить.
+#   http   — прежний рабочий путь на urllib с конечными Range-блоками.
+#            Он НЕ удалён и остаётся запасным: нативный транспорт ещё не
+#            прошёл боевой цикл на многогигабайтных файлах внутри NOX.
+TRANSPORT_NATIVE = 'native'
+TRANSPORT_HTTP = 'http'
+
+# Общий выключатель. Интерфейс о нём не знает и знать не должен.
+NATIVE_BACKGROUND_ENABLED = True
+
+# Размер куска при слиянии скачанного системой остатка с существующим
+# .part. Читаем и пишем именно кусками: файл может быть на гигабайты.
+MERGE_CHUNK = 1024 * 1024
+
+# Сколько секунд после последнего добавления ссылки ждать, прежде чем
+# открывать нативную сессию.
+#
+# Живая сессия закрывает окно для yt-dlp, поэтому пачку выгоднее собрать
+# целиком. Без этой паузы человек, добавивший три ссылки подряд, получил
+# бы три последовательные загрузки вместо трёх параллельных: первая
+# успела бы открыть сессию раньше, чем разобралась вторая.
+NATIVE_BATCH_GRACE = 1.2
 
 # Параметры прямой HTTP-загрузки.
 HTTP_CHUNK = 256 * 1024
@@ -790,6 +841,17 @@ class DownloadJob(object):
         self.attempt_no = 0        # сколько попыток сделал текущий worker
         self.last_read = 0         # байт, полученных последней попыткой
         self.restored = False
+        # Чем тянуть байты. Для UI поле не существует: он видит только
+        # status. Старые сохранённые задания без этого поля поднимаются
+        # как обычные — значение подставляется по умолчанию.
+        self.transport = TRANSPORT_NATIVE
+        # Смещение, с которого систему попросили качать остаток, и путь
+        # к этому остатку, когда он уже лежит на диске.
+        self.native_base = 0
+        self.native_segment = ''
+        # Сколько раз подряд нативная передача срывалась без единого
+        # признака протухшей ссылки. Считается ровно как в HTTP-пути.
+        self.native_retries = 0
 
     def set_stage(self, stage):
         self.debug_stage = stage
@@ -991,6 +1053,16 @@ class DownloadManager(object):
         # Последний сбой заполнения очереди, если он вообще был. Строка,
         # а не запись в файл: pump() зовут и рабочие потоки.
         self.pump_error = ''
+        # Нативный транспорт. Объект создаётся сразу, но НИ ОДНОГО
+        # нативного вызова при этом не делает: сессия поднимается лениво
+        # и только когда есть что качать.
+        self.native = native.NativeTransport(data_dir=DATA_DIR)
+        self.native_error = ''
+        # Окно усреднения скорости для нативных задач: job.id -> замер.
+        self._native_speed = {}
+        # Когда последний раз добавляли ссылку: по этому моменту ждём
+        # соседей по пачке, прежде чем открывать сессию.
+        self._last_add_at = 0.0
 
     def mark_dirty(self):
         self.dirty += 1
@@ -1062,10 +1134,45 @@ class DownloadManager(object):
         return False
 
     def live_workers(self):
-        """Сколько слотов занято прямо сейчас. Только живые потоки."""
+        """
+        Сколько слотов занято прямо сейчас.
+
+        Слот занимает и живой поток, и работающая нативная задача:
+        лимит в три одновременные загрузки один на оба транспорта.
+        Приостановленная нативная задача слот НЕ держит — ровно та же
+        семантика, что была у паузы всегда.
+        """
         with self._lock:
             self._reap_workers()
-            return len(self._workers)
+            threads = len(self._workers)
+        return threads + self._native_running()
+
+    def _native_running(self):
+        try:
+            return int(self.native.running_count())
+        except Exception:
+            return 0
+
+    def native_enabled(self):
+        """Доступен ли нативный транспорт прямо сейчас."""
+        if not NATIVE_BACKGROUND_ENABLED:
+            return False
+        try:
+            return bool(native.available())
+        except Exception:
+            return False
+
+    def native_busy(self):
+        """
+        Держит ли кто-то живую нативную сессию.
+
+        Пока держит — yt-dlp звать нельзя: на устройстве extract_info при
+        живой фоновой сессии завершал Pythonista нативно.
+        """
+        try:
+            return int(self.native.busy_count()) > 0
+        except Exception:
+            return False
 
     def free_slots(self):
         return max(0, MAX_CONCURRENT_DOWNLOADS - self.live_workers())
@@ -1154,6 +1261,9 @@ class DownloadManager(object):
             job = DownloadJob(url, quality)
             self.jobs.append(job)
             self.revision += 1
+        # Отметка для сборки пачки: следующая ссылка может прийти сразу
+        # за этой, и тогда обе поедут в одной нативной сессии.
+        self._last_add_at = time.monotonic()
         self.mark_dirty()
         nox_debug.job_event('job-added', job, url=url, quality=quality)
         nox_debug.job_event('queued', job)
@@ -1171,7 +1281,19 @@ class DownloadManager(object):
         if job is None or not job.can_pause:
             return False
         job.pause_requested = True
-        if job.status == ST_DOWNLOADING and self.worker_alive(job.id):
+        if self._native_ctx(job) is not None:
+            # Нативная задача: система просто перестаёт получать байты.
+            # Ни задача, ни системный временный файл, ни .part не
+            # уничтожаются, поэтому продолжение пойдёт с того же места и
+            # yt-dlp для него не понадобится.
+            ok, err = self.native.suspend(job.id)
+            job.status = ST_PAUSED
+            job.speed = None
+            job.eta = None
+            job.set_stage('native-paused')
+            if not ok:
+                job.debug_error = 'native suspend: %s' % err
+        elif job.status == ST_DOWNLOADING and self.worker_alive(job.id):
             # Останавливает рабочий поток сам цикл чтения: он закроет
             # соединение и файл штатно, .part не тронет.
             pass
@@ -1218,6 +1340,26 @@ class DownloadManager(object):
         job.refresh_resolve_attempts = 0
         job.refresh_reason = ''
         job.http_diag = ''
+        ctx = self._native_ctx(job)
+        if ctx is not None:
+            # Живая нативная задача просто продолжается с того места, где
+            # её остановили. Смещение пересчитывать НЕЛЬЗЯ: часть остатка
+            # уже лежит в системном временном файле, и .part про неё
+            # ничего не знает. yt-dlp здесь не участвует.
+            ok, err = self.native.resume(job.id)
+            job.downloaded_bytes = ctx.effective
+            job.status = ST_DOWNLOADING
+            job.set_stage('native-downloading')
+            if not ok:
+                job.debug_error = 'native resume: %s' % err
+            with self._lock:
+                self.revision += 1
+            self.tick += 1
+            self.mark_dirty()
+            nox_debug.job_event('resumed', job, part_size=job.downloaded_bytes,
+                                direct=True, transport=TRANSPORT_NATIVE)
+            self.pump()
+            return True
         # Размер .part — единственный источник правды про смещение.
         job.downloaded_bytes = self.part_size(job)
         direct = bool(job.resolved_url and job.filename)
@@ -1304,6 +1446,18 @@ class DownloadManager(object):
         job.cancel_requested = True
         job.pause_requested = False
         nox_debug.job_event('delete-request', job)
+        if self._native_ctx(job) is not None:
+            # Нативную задачу останавливаем и убираем из реестра: её
+            # поздние колбэки после этого никого не воскресят.
+            self.native.cancel(job.id)
+            self.native.forget(job.id)
+            self._remove_segment(job)
+            self._remove_part(job)
+            self._drop_job(job_id)
+            self.tick += 1
+            nox_debug.job_event('deleted', job, transport=TRANSPORT_NATIVE)
+            self.pump()
+            return True
         if job.status == ST_DOWNLOADING and self.worker_alive(job.id):
             job.status = ST_DELETING
             job.speed = None
@@ -1365,6 +1519,7 @@ class DownloadManager(object):
                 'resolved_url': j.resolved_url,
                 'resolved_headers': dict(j.resolved_headers or {}),
                 'started_at': j.started_at,
+                'transport': getattr(j, 'transport', TRANSPORT_NATIVE),
             })
         return out
 
@@ -1441,8 +1596,25 @@ class DownloadManager(object):
                 job.exact_total = int(total)
                 job.total_bytes = int(total)
             job.downloaded_bytes = size
+            # Транспорт из записи, а у старых записей его просто нет —
+            # тогда работает значение по умолчанию.
+            saved = entry.get('transport')
+            job.transport = (saved if saved in (TRANSPORT_NATIVE,
+                                                TRANSPORT_HTTP)
+                             else TRANSPORT_NATIVE)
+            # Процесс новый, реестр нативных задач пуст. Заданию НЕ
+            # приписывается ни «завершено», ни живая задача: оно встаёт
+            # приостановленным, .part цел, и продолжение нажимает человек.
+            # Байты, которые прежняя нативная задача успела положить в
+            # системный временный файл, этому процессу недоступны —
+            # источник правды один, размер .part.
+            job.native_base = 0
+            job.native_segment = ''
+            job.native_retries = 0
             job.status = ST_PAUSED
             job.set_stage('restored-paused')
+            nox_debug.job_event('restored-paused', job, part_size=size,
+                                transport=job.transport)
             with self._lock:
                 self.jobs.append(job)
                 self.revision += 1
@@ -1450,6 +1622,298 @@ class DownloadManager(object):
         if restored:
             self.mark_dirty()
         return restored
+
+    # =================================================================
+    #  ТРАНСПОРТНЫЙ АДАПТЕР
+    # =================================================================
+    # Очередь, состояния и .part выше по коду не изменились. Здесь только
+    # переключение нижнего слоя и перекладывание того, что сообщила
+    # система, в те же самые поля DownloadJob, которые интерфейс читал
+    # всегда. Ни одного нового статуса и ни одного нового таймера.
+
+    def _native_ctx(self, job):
+        """Живая нативная задача этого задания, если она есть."""
+        if job is None:
+            return None
+        try:
+            return self.native.context_of_job(job.id)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _remove_segment(job):
+        """Скачанный системой остаток. Удаляется вместе с заданием."""
+        path = getattr(job, 'native_segment', '')
+        job.native_segment = ''
+        if not path:
+            return False
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _wants_native(self, job):
+        """Пойдёт ли это задание нативным путём."""
+        if getattr(job, 'transport', TRANSPORT_NATIVE) != TRANSPORT_NATIVE:
+            return False
+        return self.native_enabled()
+
+    def _start_native(self, job):
+        """
+        Создать нативную задачу. Зовётся ТОЛЬКО с главного потока.
+
+        Смещение берётся из .part: система привезёт остаток, а всё уже
+        скачанное останется на диске нетронутым.
+        """
+        offset = self.part_size(job)
+        key, err = self.native.start(job.id, job.resolved_url,
+                                     job.resolved_headers, offset)
+        if key is None:
+            # Управляемый отказ: перекладываем задание на прежний
+            # HTTP-путь. Нативный крах так поймать нельзя, а вот обычное
+            # исключение — можно, и оно не должно ронять загрузку.
+            job.transport = TRANSPORT_HTTP
+            self.native_error = err or ''
+            job.set_stage('native-fallback')
+            nox_debug.job_event('native-fallback-http', job, error=err)
+            return False
+        job.native_base = offset
+        job.downloaded_bytes = offset
+        job.status = ST_DOWNLOADING
+        job.set_stage('native-downloading')
+        self.tick += 1
+        return True
+
+    def poll_native(self):
+        """
+        Перенести показания системы в поля задания. Главный поток, тот же
+        такт, что и раньше: своего таймера нативный транспорт не имеет.
+        """
+        if not self.native_enabled():
+            return
+        for kind, fields in native.drain_events():
+            if kind.endswith('-error'):
+                self.native_error = str(fields.get('exc')
+                                        or fields.get('error') or kind)
+            nox_debug.event(kind, **fields)
+        for job in self.all_jobs():
+            ctx = self._native_ctx(job)
+            if ctx is None:
+                continue
+            if ctx.state == native.ST_RUNNING:
+                self._native_progress(job, ctx)
+            elif ctx.state == native.ST_DONE:
+                self._native_done(job, ctx)
+            elif ctx.state == native.ST_FAILED:
+                self._native_failed(job, ctx)
+        # Батч закончился: живых задач нет, значит сессию можно закрыть и
+        # снова открыть окно для разбора ссылок.
+        try:
+            if self.native.session_live() and not self.native_busy():
+                self.native.invalidate()
+                nox_debug.event('native-batch-end')
+        except Exception as e:
+            self.native_error = repr(e)
+
+    def _native_progress(self, job, ctx):
+        """Байты, скорость и ETA — теми же полями, что и у HTTP-пути."""
+        if job.status in (ST_PAUSED, ST_DELETING, ST_ERROR):
+            return
+        got = ctx.effective
+        if ctx.total:
+            job.total_bytes = ctx.total
+            job.exact_total = ctx.total
+        state = self._native_speed.setdefault(
+            job.id, {'bytes': got, 'time': time.monotonic()})
+        now = time.monotonic()
+        delta = now - state['time']
+        if got != job.downloaded_bytes:
+            job.downloaded_bytes = got
+            job.status = ST_DOWNLOADING
+            # Пришли байты — значит попытка удалась, и счётчик подряд
+            # идущих срывов начинается заново. Ровно то же правило, что
+            # и у HTTP-пути: полученный байт это прогресс, а не сбой.
+            job.native_retries = 0
+            self.tick += 1
+        if delta >= SPEED_WINDOW:
+            speed = max(0, got - state['bytes']) / delta
+            job.speed = speed if speed > 0 else None
+            total = job.total
+            if total and job.speed:
+                job.eta = int(max(0.0, total - got) / job.speed)
+            else:
+                job.eta = None
+            state['bytes'] = got
+            state['time'] = now
+            nox_debug.job_event('native-task-progress', job,
+                                received=ctx.received,
+                                base_offset=ctx.base_offset, total=total)
+
+    def _native_done(self, job, ctx):
+        """
+        Остаток скачан и уже лежит в staging. Дальше — слияние, и делает
+        его рабочий поток, а не главный: копировать гигабайты на такте
+        интерфейса нельзя.
+        """
+        job.native_segment = ctx.segment_path
+        job.native_base = ctx.base_offset
+        if ctx.total:
+            job.exact_total = ctx.total
+            job.total_bytes = ctx.total
+        self.native.forget(job.id)
+        self._native_speed.pop(job.id, None)
+        job.speed = None
+        job.eta = None
+        job.status = ST_PROCESSING
+        job.set_stage('native-merge-pending')
+        with self._lock:
+            self.revision += 1
+        self.tick += 1
+        nox_debug.job_event('native-merge-start', job,
+                            segment=ctx.segment_path,
+                            base_offset=ctx.base_offset)
+        self.pump()
+
+    def _native_failed(self, job, ctx):
+        """
+        Решение принимает ЗДЕСЬ менеджер, а не делегат. Делегат только
+        записал код ответа и текст ошибки.
+        """
+        self.native.forget(job.id)
+        self._native_speed.pop(job.id, None)
+        job.speed = None
+        job.eta = None
+        code = int(ctx.http_status or 0)
+        expired = code in EXPIRED_CODES or ctx.range_ignored
+        if expired:
+            # .part не трогаем: его продолжит свежий адрес.
+            reason = 'range-ignored' if ctx.range_ignored else 'expired'
+            nox_debug.job_event('native-http-expired', job, http=code,
+                                reason=reason, part_size=self.part_size(job))
+            job.resolved_url = ''
+            job.refresh_reason = reason
+            job.status = ST_NEEDS_RESOLVE
+            job.set_stage('needs-resolve')
+            job.downloaded_bytes = self.part_size(job)
+            with self._lock:
+                self.revision += 1
+            self.tick += 1
+            self.mark_dirty()
+            self.pump()
+            return
+        job.native_retries += 1
+        nox_debug.job_event('native-task-error', job, http=code,
+                            error=ctx.error, retries=job.native_retries)
+        if job.native_retries < HTTP_RETRIES:
+            # Обычный сетевой сбой: адрес не трогаем, задание вернётся в
+            # очередь и стартует заново с того же .part.
+            job.status = ST_QUEUED_DOWNLOAD
+            job.set_stage('native-retry')
+            job.downloaded_bytes = self.part_size(job)
+        else:
+            job.status = ST_ERROR
+            job.error = short_error(ctx.error or 'нативная передача сорвалась')
+            job.error_stage = 'native'
+            job.debug_error = 'native: %s (http=%s)' % (ctx.error, code)
+        with self._lock:
+            self.revision += 1
+        self.tick += 1
+        self.mark_dirty()
+        self.pump()
+
+    def _next_merge(self, skip):
+        """Задание, у которого готовый остаток ждёт слияния. Под _lock."""
+        for j in self.jobs:
+            if j.id in skip or j.id in self._workers:
+                continue
+            if j.status != ST_PROCESSING or not j.native_segment:
+                continue
+            if j.delete_requested or j.cancel_requested:
+                continue
+            if self._path_busy(j):
+                continue
+            return j
+        return None
+
+    def _run_merge(self, job):
+        """
+        .part + остаток -> готовый файл.
+
+        Идёт в обычном рабочем потоке nox-download и занимает обычный
+        слот: нового постоянного пула потоков не появляется, а лимит в три
+        одновременные операции остаётся общим на сеть и на слияние.
+        Читаем и пишем кусками по MERGE_CHUNK — файл целиком в память не
+        попадает ни на секунду.
+        """
+        part = job.part_path
+        final = job.filename
+        seg = job.native_segment
+        try:
+            if not seg or not os.path.exists(seg):
+                raise IOError('скачанный остаток исчез')
+            if job.native_base <= 0 and not os.path.exists(part):
+                # Файл качался с нуля — копировать нечего, достаточно
+                # переименования. На другом томе оно невозможно, и тогда
+                # идёт обычное дописывание кусками.
+                try:
+                    os.replace(seg, part)
+                except OSError:
+                    self._append_segment(job, seg, part)
+            else:
+                self._append_segment(job, seg, part)
+            self._remove_segment(job)
+            self._verify_size(job, part)
+            os.replace(part, final)
+            job.downloaded_bytes = self.part_size(job) or job.downloaded_bytes
+            job.status = ST_FINISHED
+            job.set_stage('finished')
+            nox_debug.job_event('native-merge-complete', job,
+                                size=_int_or_none(os.path.getsize(final)))
+        except Exception as e:
+            if job.delete_requested:
+                job.set_stage('deleting')
+            else:
+                job.status = ST_ERROR
+                job.error = short_error(e)
+                job.error_stage = 'native-merge'
+                job.debug_error = 'merge: %r' % (e,)
+                nox_debug.job_event('native-task-error', job, stage='merge',
+                                    exc=repr(e))
+        finally:
+            if job.delete_requested:
+                self._remove_segment(job)
+                self._remove_part(job)
+                self._drop_job(job.id)
+            if job.status in (ST_FINISHED, ST_ERROR, ST_CANCELLED):
+                job.finished_at = time.time()
+            job.speed = None
+            job.eta = None
+            with self._lock:
+                self.revision += 1
+                self._workers.pop(job.id, None)
+            self.tick += 1
+            self.mark_dirty()
+            self.pump()
+
+    def _append_segment(self, job, seg, part):
+        """Дописать остаток в .part кусками. В память файл не читается."""
+        written = 0
+        with io.open(seg, 'rb') as src:
+            with io.open(part, 'ab' if os.path.exists(part) else 'wb') as dst:
+                while True:
+                    if job.delete_requested:
+                        raise IOError('удаление во время слияния')
+                    chunk = src.read(MERGE_CHUNK)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    written += len(chunk)
+                    job.downloaded_bytes = job.native_base + written
+                    self.tick += 1
+        return written
 
     # -- РАЗБОР ССЫЛКИ: ТОЛЬКО ГЛАВНЫЙ ПОТОК ------------------------
     #
@@ -1470,6 +1934,24 @@ class DownloadManager(object):
             pending = self.pending_resolve()
             if not pending:
                 return False
+            if self.native_enabled():
+                # ФАЗА ПЕРЕДАЧИ. Пока жива хоть одна нативная задача,
+                # yt-dlp звать нельзя: на устройстве extract_info при
+                # живой фоновой сессии завершал Pythonista нативно.
+                # Разбор просто ждёт конца батча, а не отменяется.
+                if self.native_busy():
+                    for j in pending:
+                        if j.debug_stage != 'waiting-native-resolve':
+                            j.set_stage('waiting-native-resolve')
+                            nox_debug.job_event('native-resolve-deferred', j,
+                                                running=self._native_running())
+                    return False
+                # Задач нет, но сессия ещё открыта — закрываем её и этим
+                # открываем окно для разбора. Это и есть граница батчей.
+                if self.native.session_live():
+                    self.native.invalidate()
+                    nox_debug.event('native-batch-end', reason='before-resolve')
+                    return False        # разберём на следующем такте
             return self.resolve(pending[0])
         except Exception as e:
             self.pump_error = 'resolve_next: %r' % (e,)
@@ -1657,6 +2139,11 @@ class DownloadManager(object):
         освободил.
         """
         try:
+            if _is_main_thread():
+                # Показания нативных задач переносим в поля заданий на
+                # том же такте, что и раньше: своего таймера у нового
+                # транспорта нет.
+                self.poll_native()
             self._pump()
         except Exception as e:
             # Причину запоминаем строкой, а не пишем в файл: pump()
@@ -1702,44 +2189,141 @@ class DownloadManager(object):
         """
         started = []
         skip = set()
+        # Нативные задачи создаются ТОЛЬКО с главного потока: pump()
+        # зовут и рабочие потоки из своего finally, а трогать ObjC
+        # оттуда незачем — задание подождёт один такт интерфейса.
+        if _is_main_thread() and self.native_enabled():
+            self._pump_native()
         with self._lock:
             self._reap_workers()
-            free = MAX_CONCURRENT_DOWNLOADS - len(self._workers)
+            free = (MAX_CONCURRENT_DOWNLOADS - len(self._workers)
+                    - self._native_running())
             while free > 0:
+                nxt = self._next_merge(skip)
+                if nxt is not None:
+                    # Слияние остатка с .part — такая же работа со своим
+                    # слотом, и делает её тот же nox-download.
+                    self._spawn(nxt, self._run_merge, skip, started)
+                    free -= 1
+                    continue
                 nxt = self._next_queued(skip)
                 if nxt is None:
                     break
-                nxt.set_stage('before-thread-create')
-                nox_debug.job_event('worker-create', nxt,
-                                    live_workers=len(self._workers))
-                t = threading.Thread(target=self._run, args=(nxt,),
-                                     name='nox-download', daemon=True)
-                self._workers[nxt.id] = t
-                try:
-                    t.start()
-                except Exception as e:
-                    # Поток не создался — на iOS такое бывает под нехваткой
-                    # памяти. Слот при этом НЕ занят: снимаем регистрацию,
-                    # задание остаётся в очереди и поедет на следующем
-                    # такте. Остальные свободные слоты заполняем дальше —
-                    # раньше исключение выходило наружу и вся очередь
-                    # вставала до следующего разбора ссылки.
-                    self._workers.pop(nxt.id, None)
-                    nxt.set_stage('thread-start-failed')
-                    detail = 'thread: %r' % (e,)
-                    nxt.debug_error = ((nxt.debug_error + ' | ' + detail)
-                                       if nxt.debug_error else detail)
+                if self._wants_native(nxt):
+                    # Нативное задание слот через поток не занимает.
                     skip.add(nxt.id)
-                    nox_debug.job_event('worker-error', nxt, exc=repr(e))
                     continue
-                started.append(nxt)
-                nox_debug.job_event('worker-started', nxt,
-                                    live_workers=len(self._workers))
-                free -= 1
+                if self._spawn(nxt, self._run, skip, started):
+                    free -= 1
         for job in started:
             # Поток мог успеть шагнуть дальше — не затираем более поздний этап.
             if job.debug_stage == 'before-thread-create':
                 job.set_stage('thread-start-called')
+
+    def _spawn(self, job, target, skip, started):
+        """
+        Запустить рабочий поток и занять им слот. Только под _lock.
+
+        Вынесено из _pump без изменений в поведении: тем же способом
+        теперь стартует и загрузка, и слияние остатка с .part. Имя потока
+        одно и то же — новых видов потоков в приложении не появилось.
+        """
+        job.set_stage('before-thread-create')
+        nox_debug.job_event('worker-create', job,
+                            live_workers=len(self._workers))
+        t = threading.Thread(target=target, args=(job,),
+                             name='nox-download', daemon=True)
+        self._workers[job.id] = t
+        try:
+            t.start()
+        except Exception as e:
+            # Поток не создался — на iOS такое бывает под нехваткой
+            # памяти. Слот при этом НЕ занят: снимаем регистрацию,
+            # задание остаётся в очереди и поедет на следующем такте.
+            self._workers.pop(job.id, None)
+            job.set_stage('thread-start-failed')
+            detail = 'thread: %r' % (e,)
+            job.debug_error = ((job.debug_error + ' | ' + detail)
+                               if job.debug_error else detail)
+            skip.add(job.id)
+            nox_debug.job_event('worker-error', job, exc=repr(e))
+            return False
+        started.append(job)
+        nox_debug.job_event('worker-started', job,
+                            live_workers=len(self._workers))
+        return True
+
+    def _resolve_phase_done(self):
+        """
+        Можно ли переходить к передаче.
+
+        Сессия и yt-dlp несовместимы, поэтому разбор и передача разведены
+        по времени. Пачка считается собранной, когда разбирать больше
+        нечего ИЛИ уже набрано столько готовых заданий, сколько всё равно
+        поместится в слоты. Открывать сессию раньше значило бы запереть
+        разбор остальных ссылок до конца первой загрузки.
+        """
+        if self.native.session_live():
+            return True         # передача уже идёт
+        ready = 0
+        with self._lock:
+            for j in self.jobs:
+                if j.status == ST_QUEUED_DOWNLOAD and self._wants_native(j) \
+                        and j.resolved_url and j.filename \
+                        and not j.pause_requested and not j.delete_requested:
+                    ready += 1
+        if ready >= MAX_CONCURRENT_DOWNLOADS:
+            return True         # больше в слоты всё равно не влезет
+        if self.pending_resolve():
+            return False        # разбирать ещё есть что
+        # Разбирать нечего. Если ссылку только что добавили, ждём пару
+        # секунд: следующая может прийти сразу за ней, и обе поедут одной
+        # пачкой. Продолжение с паузы и восстановление ничего не ждут —
+        # у них добавления не было.
+        return (time.monotonic() - self._last_add_at) >= NATIVE_BATCH_GRACE
+
+    def _pump_native(self):
+        """
+        Занять свободные слоты нативными задачами. Только главный поток.
+
+        Сессия поднимается ЗДЕСЬ и только здесь — то есть уже после того,
+        как разбор ссылок закончен и у заданий есть прямые адреса. Обратный
+        порядок (живая сессия, потом yt-dlp) завершал Pythonista нативно.
+        """
+        if not self._resolve_phase_done():
+            # ФАЗА РАЗБОРА ещё не кончилась. Сессию не открываем: пока её
+            # нет, yt-dlp безопасен, и пачка добирается до конца.
+            return
+        with self._lock:
+            self._reap_workers()
+            free = (MAX_CONCURRENT_DOWNLOADS - len(self._workers)
+                    - self._native_running())
+            ready = []
+            for j in self.jobs:
+                if free <= len(ready):
+                    break
+                if j.status != ST_QUEUED_DOWNLOAD:
+                    continue
+                if j.cancel_requested or j.pause_requested \
+                        or j.delete_requested:
+                    continue
+                if j.id in self._workers or not self._wants_native(j):
+                    continue
+                if not j.resolved_url or not j.filename:
+                    continue
+                if self._path_busy(j) or self._native_ctx(j) is not None:
+                    continue
+                ready.append(j)
+        if not ready:
+            return
+        fresh = not self.native.session_live()
+        for job in ready:
+            if not self._start_native(job):
+                continue
+            if fresh:
+                fresh = False
+                nox_debug.event('native-batch-start',
+                                generation=self.native.generation)
 
     def _path_busy(self, job):
         """

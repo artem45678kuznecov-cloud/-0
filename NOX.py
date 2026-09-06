@@ -30,10 +30,15 @@ if _HERE not in sys.path:
 
 import ui
 
+import nox_debug
 from nox_ui import NoxApp
 
 
 def main():
+    # Чёрный ящик поднимаем первым: если запуск сорвётся дальше, в
+    # NOX_Data останется и номер сессии, и полная трассировка.
+    nox_debug.start_session()
+    nox_debug.install_exception_hooks()
     try:
         w, h = ui.get_screen_size()
     except Exception:

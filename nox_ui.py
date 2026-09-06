@@ -25,6 +25,7 @@ except ImportError:                                    # pragma: no cover
 # "from ... import" нельзя: копия имени осталась бы навсегда пустой,
 # поэтому экраны читают их как атрибуты модуля.
 import nox_download
+import nox_debug
 
 from nox_core import (
     APP_NAME, APP_VERSION, WATCH_DONE_TAIL, WATCH_MIN_START, SORT_OPTIONS,
@@ -3985,6 +3986,11 @@ class NoxApp(ui.View):
             # освободил. Своего таймера у очереди нет и не появляется:
             # три загрузки по-прежнему обслуживает один этот цикл.
             DOWNLOADER.pump()
+            # Чёрный ящик тоже живёт на этом такте и своего таймера не
+            # заводит: heartbeat снимает состояние, flush пишет накопленное.
+            # Обе функции сами ограничивают себя одним разом в секунду.
+            nox_debug.heartbeat(DOWNLOADER)
+            nox_debug.flush()
             self._resolve_pending()
             self._persist_jobs()
             self._persist_debug()
@@ -4163,6 +4169,10 @@ class NoxApp(ui.View):
         except Exception:
             pass
         keep_screen_awake(False)
+        # Штатное закрытие: следующий запуск не должен принять его за
+        # аварийное завершение.
+        nox_debug.heartbeat(DOWNLOADER, force=True)
+        nox_debug.mark_clean_exit()
         try:
             ui.cancel_delays()
         except Exception:

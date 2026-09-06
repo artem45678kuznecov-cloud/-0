@@ -22,6 +22,10 @@ import threading
 import urllib.request
 import urllib.error
 
+# Чёрный ящик. Внутри — только очередь в памяти: рабочий поток отсюда
+# ни одного файла не открывает. Алгоритм загрузки эти вызовы не трогают.
+import nox_debug
+
 from nox_core import (
     JOBS_KEY, SIDECAR_EXT, QUALITIES, fmt_size, fmt_speed, fmt_eta,
     safe_name, PROJECT_DIR, MEDIA_DIR, YT_DLP_DIR, ensure_dirs, STATE,
@@ -1067,6 +1071,8 @@ class DownloadManager(object):
             self.jobs.append(job)
             self.revision += 1
         self.mark_dirty()
+        nox_debug.job_event('job-added', job, url=url, quality=quality)
+        nox_debug.job_event('queued', job)
         # Поток здесь НЕ запускается: сначала разбор ссылки на главном потоке.
         return True, 'Добавлено в очередь'
 
@@ -1093,6 +1099,7 @@ class DownloadManager(object):
             self.revision += 1
         self.tick += 1
         self.mark_dirty()
+        nox_debug.job_event('paused', job)
         # Слот мог освободиться прямо сейчас — следующее задание из
         # очереди обязано стартовать немедленно, а не ждать чужого события.
         self.pump()
@@ -1130,6 +1137,7 @@ class DownloadManager(object):
             self.revision += 1
         self.tick += 1
         self.mark_dirty()
+        nox_debug.job_event('resumed', job, part_size=self.part_size(job))
         # Соседей это не трогает: их потоки продолжают качать свои файлы.
         # Само задание уходит за свежей ссылкой и встаёт в общую очередь.
         self.pump()
@@ -1184,6 +1192,7 @@ class DownloadManager(object):
         job.delete_requested = True
         job.cancel_requested = True
         job.pause_requested = False
+        nox_debug.job_event('delete-request', job)
         if job.status == ST_DOWNLOADING and self.worker_alive(job.id):
             job.status = ST_DELETING
             job.speed = None
@@ -1198,6 +1207,7 @@ class DownloadManager(object):
         self._remove_part(job)
         self._drop_job(job_id)
         self.tick += 1
+        nox_debug.job_event('deleted', job)
         self.pump()
         return True
 
@@ -1349,14 +1359,30 @@ class DownloadManager(object):
                     % (job.refresh_reason or '-',
                        job.refresh_resolve_attempts - 1)) if p])
                 job.finished_at = time.time()
+                nox_debug.job_event('refresh-give-up', job,
+                                    error=job.error,
+                                    error_stage=job.error_stage,
+                                    http_diag=job.http_diag)
+                nox_debug.job_event('error', job, error=job.error,
+                                    error_stage=job.error_stage)
                 with self._lock:
                     self.revision += 1
                 self.tick += 1
                 self.mark_dirty()
                 return False
+            nox_debug.job_event('refresh-start', job,
+                                reason=job.refresh_reason,
+                                part_size=self.part_size(job))
         job.status = ST_PREPARING
         job.set_stage('refresh-enter' if refreshing else 'resolve-enter')
         self.tick += 1
+        nox_debug.job_event('resolve-start', job, url=job.url,
+                            quality=job.quality, refreshing=refreshing,
+                            part_size=self.part_size(job))
+        # extract_info идёт на ГЛАВНОМ потоке и может замереть на десятки
+        # секунд. Одна короткая запись перед ним — единственный способ
+        # узнать потом, что приложение остановилось именно здесь.
+        nox_debug.flush(force=True)
         try:
             mod = _load_yt_dlp()
             if mod is None:
@@ -1403,6 +1429,13 @@ class DownloadManager(object):
             job.status = ST_QUEUED_DOWNLOAD
             job.set_stage('http-queued')
             self.mark_dirty()
+            nox_debug.job_event('resolve-success', job,
+                                format_id=job.resolved_format_id,
+                                expected_size=job.expected_size,
+                                resolved_host=nox_debug._host_of(
+                                    job.resolved_url))
+            nox_debug.job_event('queued-download', job,
+                                filename=os.path.basename(job.filename or ''))
         except Exception as e:
             job.error_stage = job.debug_stage
             job.set_stage('exception')
@@ -1410,6 +1443,9 @@ class DownloadManager(object):
             job.error = short_error(e)
             job.debug_error = 'resolve: %r' % (e,)
             job.finished_at = time.time()
+            nox_debug.job_event('resolve-error', job,
+                                error=job.error, error_stage=job.error_stage,
+                                exc=repr(e))
             with self._lock:
                 self.revision += 1
             self.tick += 1
@@ -1487,6 +1523,8 @@ class DownloadManager(object):
                 if nxt is None:
                     break
                 nxt.set_stage('before-thread-create')
+                nox_debug.job_event('worker-create', nxt,
+                                    live_workers=len(self._workers))
                 t = threading.Thread(target=self._run, args=(nxt,),
                                      name='nox-download', daemon=True)
                 self._workers[nxt.id] = t
@@ -1505,8 +1543,11 @@ class DownloadManager(object):
                     nxt.debug_error = ((nxt.debug_error + ' | ' + detail)
                                        if nxt.debug_error else detail)
                     skip.add(nxt.id)
+                    nox_debug.job_event('worker-error', nxt, exc=repr(e))
                     continue
                 started.append(nxt)
+                nox_debug.job_event('worker-started', nxt,
+                                    live_workers=len(self._workers))
                 free -= 1
         for job in started:
             # Поток мог успеть шагнуть дальше — не затираем более поздний этап.
@@ -1570,6 +1611,9 @@ class DownloadManager(object):
         ни ui.
         """
         job.set_stage('worker-entered')
+        nox_debug.job_event('worker-enter', job,
+                            part_size=self.part_size(job),
+                            resolved_host=nox_debug._host_of(job.resolved_url))
         final = job.filename
         part = job.part_path
         state = {'bytes': 0, 'time': time.monotonic()}
@@ -1591,6 +1635,8 @@ class DownloadManager(object):
                         slept += 0.2
                     if job.cancel_requested or job.pause_requested:
                         break
+                    nox_debug.job_event('http-retry', job, left=left,
+                                        strikes=strikes)
                 left -= 1
                 try:
                     done = self._transfer(job, part, state)
@@ -1601,6 +1647,9 @@ class DownloadManager(object):
                     refresh = 'expired'
                     last_error = None
                     self._note_refresh(job, 'expired: %r' % (e,))
+                    nox_debug.job_event('http-error', job, reason='expired',
+                                        exc=repr(e),
+                                        http_diag=job.http_diag)
                     break
                 except RangeNotSupported as e:
                     # Докачку по этому адресу не принимают. .part цел,
@@ -1608,6 +1657,9 @@ class DownloadManager(object):
                     refresh = 'range-ignored'
                     last_error = None
                     self._note_refresh(job, 'range-ignored: %r' % (e,))
+                    nox_debug.job_event('range-ignored', job, exc=repr(e),
+                                        part_size=self.part_size(job),
+                                        http_diag=job.http_diag)
                     break
                 except Exception as e:
                     last_error = e
@@ -1617,6 +1669,10 @@ class DownloadManager(object):
                         if job.attempt_no >= 2:
                             raise
                         continue
+                    nox_debug.job_event('http-error', job, exc=repr(e),
+                                        strikes=strikes,
+                                        last_read=job.last_read,
+                                        http_diag=job.http_diag)
                     if isinstance(e, urllib.error.HTTPError):
                         # 429 и 5xx: адрес жив, сервер занят или прилёг.
                         # Это лечится временем, а не новым разбором ссылки.
@@ -1636,6 +1692,8 @@ class DownloadManager(object):
                         refresh = 'network'
                         last_error = None
                         self._note_refresh(job, 'network x%d: %r' % (strikes, e))
+                        nox_debug.job_event('http-error', job, reason='network',
+                                            strikes=strikes, exc=repr(e))
                         break
                     continue
                 strikes = 0
@@ -1650,6 +1708,8 @@ class DownloadManager(object):
                 job.refresh_reason = refresh
                 job.status = ST_NEEDS_RESOLVE
                 job.set_stage('needs-resolve')
+                nox_debug.job_event('needs-resolve', job, reason=refresh,
+                                    part_size=self.part_size(job))
             elif job.pause_requested:
                 job.status = ST_PAUSED               # .part остаётся целиком
                 job.set_stage('paused')
@@ -1664,6 +1724,7 @@ class DownloadManager(object):
                 job.set_stage('http-finished')
                 job.status = ST_FINISHED
                 job.set_stage('finished')
+                nox_debug.job_event('finished', job)
         except Exception as e:
             if job.delete_requested:
                 job.set_stage('deleting')
@@ -1678,6 +1739,9 @@ class DownloadManager(object):
                 job.error = short_error(e)
                 job.debug_error = ' | '.join(
                     [p for p in (job.http_diag, 'http: %r' % (e,)) if p])
+                nox_debug.job_event('error', job, error=job.error,
+                                    error_stage=job.error_stage, exc=repr(e),
+                                    http_diag=job.http_diag)
         finally:
             if job.delete_requested:
                 # Соединение закрыто, файл закрыт — только теперь удаление
@@ -1695,6 +1759,8 @@ class DownloadManager(object):
                 self._workers.pop(job.id, None)
             self.tick += 1
             self.mark_dirty()
+            nox_debug.job_event('worker-exit', job,
+                                part_size=self.part_size(job))
             # Слот освобождён — следующее задание стартует отсюда же.
             # Ошибка этого задания на очередь не влияет: pump() исключения
             # наружу не выпускает.
@@ -1754,6 +1820,11 @@ class DownloadManager(object):
                 'code': '-', 'len': '-', 'crange': '-', 'aranges': '-',
                 'read': 0, 'ignored': False, 'err': '-'}
         job.http_diag = _diag_text(diag)
+        nox_debug.http_event('http-open', job, offset=offset,
+                             part_size=offset, range=rng or None,
+                             bytes_before=job.downloaded_bytes)
+        nox_debug.http_event('range-request', job, offset=offset,
+                             range=rng or None)
         req = urllib.request.Request(job.resolved_url, headers=headers)
         try:
             resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
@@ -1762,6 +1833,8 @@ class DownloadManager(object):
             diag['code'] = code
             diag['err'] = repr(e)
             job.http_diag = _diag_text(diag)
+            nox_debug.http_event('http-response', job, resp=e, offset=offset,
+                                 range=rng or None, exc=repr(e))
             if code == 416:
                 return self._handle_416(job, offset, e)
             if code in EXPIRED_CODES:
@@ -1772,6 +1845,8 @@ class DownloadManager(object):
         except Exception as e:
             diag['err'] = repr(e)
             job.http_diag = _diag_text(diag)
+            nox_debug.http_event('http-error', job, offset=offset,
+                                 range=rng or None, exc=repr(e))
             raise
         try:
             code = resp.getcode()
@@ -1780,15 +1855,23 @@ class DownloadManager(object):
             diag['crange'] = resp.headers.get('Content-Range') or '-'
             diag['aranges'] = resp.headers.get('Accept-Ranges') or '-'
             job.http_diag = _diag_text(diag)
+            nox_debug.http_event('http-response', job, resp=resp,
+                                 offset=offset, range=rng or None,
+                                 bytes_before=job.downloaded_bytes)
             if offset > 0 and code != 206:
                 # Докачку не приняли. Существующий .part остаётся целым:
                 # свежий прямой адрес продолжит его с того же места.
                 diag['ignored'] = True
                 job.http_diag = _diag_text(diag)
+                nox_debug.http_event('range-ignored', job, resp=resp,
+                                     offset=offset, range=rng or None,
+                                     part_size=offset)
                 raise RangeNotSupported(
                     'на Range получен ответ %s вместо 206' % code)
             mode = 'wb'
             if offset > 0:
+                nox_debug.http_event('range-206', job, resp=resp,
+                                     offset=offset, range=rng or None)
                 mode = 'ab'
                 total = _total_from_content_range(
                     resp.headers.get('Content-Range'))
@@ -1816,9 +1899,13 @@ class DownloadManager(object):
                         return False
                     chunk = resp.read(HTTP_CHUNK)
                     if not chunk:
+                        nox_debug.job_event('http-eof', job,
+                                            bytes_read_this_attempt=
+                                            job.last_read)
                         break
                     f.write(chunk)
                     job.last_read += len(chunk)
+                    nox_debug.first_bytes(job, len(chunk))
                     if job.refresh_resolve_attempts:
                         # Свежий адрес отдаёт байты — значит, обновление
                         # ссылки сработало, и счётчик обновлений начинается
@@ -1854,6 +1941,8 @@ class DownloadManager(object):
             total = _total_from_content_range(err.headers.get('Content-Range'))
         except Exception:
             total = None
+        nox_debug.http_event('range-416', job, offset=offset,
+                             content_range=total, part_size=offset)
         if total and offset == int(total):
             job.exact_total = int(total)
             job.total_bytes = int(total)

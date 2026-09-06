@@ -381,10 +381,28 @@ class ExtrasManager(object):
 
     def pump(self, downloads_busy):
         """
-        Тоже только главный поток. Пока жив рабочий поток загрузки,
-        extras не стартуют — они не должны идти параллельно с yt-dlp.
+        Тоже только главный поток.
+
+        Аргумент приходит из интерфейса как live_workers() > 0 и БОЛЬШЕ НЕ
+        используется как запрет. Он перестал означать то, что означал:
+        с тех пор как передачей занимается iOS, в live_workers входят и
+        нативные задачи. На устройстве это дало настоящий баг — готовое
+        видео появилось в медиатеке без обложки, потому что рядом качались
+        два других файла, и extras не стартовали вообще.
+
+        Нативная передача extras не мешает ничем: она идёт в системе, а не
+        в Python. Мешает только живой ПИТОНОВСКИЙ поток — загрузка по
+        старому пути или слияние остатка с .part, — и именно его и
+        спрашиваем. Значение live_workers() при этом не тронуто: оно
+        по-прежнему считает слоты для лимита в три загрузки и для UI.
         """
-        if downloads_busy or self.busy():
+        del downloads_busy          # намеренно: см. выше
+        try:
+            if DOWNLOADER.extras_blocked():
+                return
+        except Exception:
+            pass
+        if self.busy():
             return
         with self._lock:
             if not self.tasks:
@@ -394,30 +412,103 @@ class ExtrasManager(object):
                                             name='nox-extras', daemon=True)
             self._thread.start()
 
+    def enqueue_repair(self, path, snap):
+        """
+        Доделать обложку у уже готового файла, у которого её нет.
+
+        Задания при этом может не существовать вовсе: оно завершилось в
+        прошлой жизни приложения. Всё, что нужно, лежит в sidecar рядом с
+        видео, поэтому второго extract_info не требуется — только скачать
+        картинку по уже известному адресу.
+        """
+        if not ENABLE_EXTRAS or not path:
+            return False
+        with self._lock:
+            for task in self.tasks:
+                if task.get('path') == path:
+                    return False
+            self.tasks.append({'job': None, 'path': path,
+                               'snap': dict(snap or {}), 'repair': True})
+        return True
+
+    def scan_missing_covers(self, media_dir):
+        """
+        Один проход по медиатеке при запуске: у каких готовых видео есть
+        sidecar с адресом обложки, но нет самой картинки.
+
+        Так чинится сценарий, который на устройстве и случился: файл
+        докачался, обложка не успела, приложение умерло — и задания,
+        которое могло бы её доделать, больше нет. Ни сети, ни потоков
+        здесь: только чтение каталога и маленьких json.
+        """
+        found = 0
+        try:
+            names = sorted(os.listdir(media_dir))
+        except Exception:
+            return 0
+        for name in names:
+            if not name.lower().endswith('.mp4'):
+                continue
+            path = os.path.join(media_dir, name)
+            base = os.path.splitext(path)[0]
+            if any(os.path.exists(base + ext) for ext in SAFE_IMAGE_TYPES):
+                continue                # обложка уже есть
+            side = base + SIDECAR_EXT
+            if not os.path.exists(side):
+                continue                # без sidecar адреса обложки нет
+            try:
+                with io.open(side, encoding='utf-8') as f:
+                    snap = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(snap, dict):
+                continue
+            thumb = snap.get('thumbnail')
+            if not (isinstance(thumb, str) and thumb.startswith('http')):
+                continue
+            if self.enqueue_repair(path, snap):
+                found += 1
+                nox_debug.event('extras-cover-repair',
+                                file=os.path.basename(path))
+        return found
+
     def _run(self, task):
         job = task['job']
         path = task['path']
         snap = task['snap']
-        job.extras_status = EXTRAS_RUNNING
+        repair = bool(task.get('repair'))
+        if job is not None:
+            job.extras_status = EXTRAS_RUNNING
         self.tick += 1
-        # 1) sidecar — маленькая локальная операция
-        try:
-            write_sidecar(path, snap)
-            job.metadata_ready = True
-        except Exception as e:
-            job.extras_error = 'sidecar: %r' % (e,)
+        # 1) sidecar — маленькая локальная операция. У починки обложки он
+        #    уже есть и переписывать его незачем.
+        meta_ok = repair
+        if not repair:
+            try:
+                write_sidecar(path, snap)
+                meta_ok = True
+            except Exception as e:
+                if job is not None:
+                    job.extras_error = 'sidecar: %r' % (e,)
         # 2) обложка — отдельный необязательный этап
+        thumb_ok = False
         try:
-            if fetch_thumbnail(path, snap):
-                job.thumbnail_ready = True
+            thumb_ok = bool(fetch_thumbnail(path, snap))
         except Exception as e:
-            job.thumbnail_error = repr(e)
-        if job.metadata_ready and job.thumbnail_ready:
-            job.extras_status = EXTRAS_READY
-        elif job.metadata_ready or job.thumbnail_ready:
-            job.extras_status = EXTRAS_PARTIAL
-        else:
-            job.extras_status = EXTRAS_ERROR
+            if job is not None:
+                job.thumbnail_error = repr(e)
+        if job is not None:
+            job.metadata_ready = job.metadata_ready or meta_ok
+            job.thumbnail_ready = job.thumbnail_ready or thumb_ok
+            if job.metadata_ready and job.thumbnail_ready:
+                job.extras_status = EXTRAS_READY
+            elif job.metadata_ready or job.thumbnail_ready:
+                job.extras_status = EXTRAS_PARTIAL
+            else:
+                job.extras_status = EXTRAS_ERROR
+        elif repair:
+            nox_debug.event('extras-cover-repaired',
+                            file=os.path.basename(path), ok=thumb_ok)
         with self._lock:
             self._thread = None
         self.tick += 1
@@ -1219,6 +1310,24 @@ class DownloadManager(object):
     def free_slots(self):
         return max(0, MAX_CONCURRENT_DOWNLOADS - self.live_workers())
 
+    def extras_blocked(self):
+        """
+        Мешает ли что-то запустить метаданные и обложку прямо сейчас.
+
+        Мешает ТОЛЬКО живой питоновский поток: загрузка по старому пути
+        или слияние остатка с .part. Нативные задачи не мешают ничем —
+        байты тянет система, а не Python, и ждать их окончания незачем.
+
+        Отдельный метод нужен потому, что live_workers() отвечает на
+        другой вопрос — сколько занято слотов из трёх, — и включает
+        нативные задачи. Использовать его как запрет для extras было
+        ошибкой: готовое видео оставалось без обложки, пока рядом
+        качались другие файлы.
+        """
+        with self._lock:
+            self._reap_workers()
+            return len(self._workers) > 0
+
     def _reap_workers(self):
         """Убрать из реестра завершившиеся потоки. Только под _lock."""
         dead = []
@@ -1657,12 +1766,24 @@ class DownloadManager(object):
             job.set_stage('restored-paused')
             nox_debug.job_event('restored-paused', job, part_size=size,
                                 transport=job.transport)
+            # Единственный устойчивый источник правды после перезапуска —
+            # размер .part. Байты, которые прошлая нативная задача успела
+            # положить в системный временный файл, этому процессу
+            # недоступны, и делать вид, что они есть, нельзя.
+            nox_debug.job_event('native-restart-from-part', job,
+                                part_size=size)
             with self._lock:
                 self.jobs.append(job)
                 self.revision += 1
             restored += 1
         if restored:
             self.mark_dirty()
+        # Заодно смотрим, не осталось ли готовых видео без обложки:
+        # приложение могло умереть между переименованием файла и extras.
+        try:
+            EXTRAS.scan_missing_covers(MEDIA_DIR)
+        except Exception as e:
+            nox_debug.event('extras-scan-error', exc=repr(e))
         return restored
 
     # =================================================================
@@ -2006,6 +2127,7 @@ class DownloadManager(object):
             self._verify_size(job, part)
             os.replace(part, final)
             job.downloaded_bytes = self.part_size(job) or job.downloaded_bytes
+            self._write_sidecar_now(job)
             job.status = ST_FINISHED
             job.set_stage('finished')
             nox_debug.job_event('native-merge-complete', job,
@@ -2704,6 +2826,7 @@ class DownloadManager(object):
                 # Переименование — только после сверки с точным размером.
                 self._verify_size(job, part)
                 os.replace(part, final)
+                self._write_sidecar_now(job)
                 job.set_stage('http-finished')
                 job.status = ST_FINISHED
                 job.set_stage('finished')
@@ -2748,6 +2871,29 @@ class DownloadManager(object):
             # Ошибка этого задания на очередь не влияет: pump() исключения
             # наружу не выпускает.
             self.pump()
+
+    @staticmethod
+    def _write_sidecar_now(job):
+        """
+        Записать sidecar В МОМЕНТ завершения файла, не дожидаясь extras.
+
+        Всё нужное уже лежит в job.completed_info с разбора ссылки, и
+        операция чисто локальная: маленький json рядом с видео. Зато
+        адрес обложки переживёт что угодно, и после перезапуска её можно
+        будет доделать без второго обращения к yt-dlp. Раньше sidecar
+        писали только extras — а если приложение умирало до них, вместе с
+        заданием исчезала и последняя память о том, откуда брать картинку.
+        """
+        try:
+            snap = dict(job.completed_info or {})
+            if not snap:
+                return False
+            write_sidecar(job.filename, snap)
+            job.metadata_ready = True
+            return True
+        except Exception as e:
+            nox_debug.job_event('sidecar-error', job, exc=repr(e))
+            return False
 
     @staticmethod
     def _verify_size(job, part):

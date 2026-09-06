@@ -41,7 +41,31 @@ import threading
 
 # Идентификатор фоновой сессии NOX. Постоянный: именно по нему iOS
 # отличает нашу сессию от чужих.
-NATIVE_SESSION_ID = 'com.nox.pythonista.download.v1'
+# Префикс идентификатора фоновой сессии. Сам идентификатор к нему
+# добавляет токен ЗАПУСКА и номер пачки, и получается вроде
+# com.nox.pythonista.download.v2.a7f28c41.1
+#
+# Почему не один постоянный идентификатор, как было в v1. Reattach к
+# задачам прошлой жизни процесса мы не делаем и не можем: getAllTasks
+# запрещён, он уже нативно ронял Pythonista. А постоянный идентификатор
+# ровно это и провоцировал — новый запуск поднимал сессию, к которой iOS
+# честно доставляла колбэки задач ПРОШЛОГО запуска. Реестр их не знал,
+# каждая писала native-stale-callback, и десятки таких колбэков в секунду
+# заваливали главную очередь. Разные идентификаторы разводят запуски
+# полностью.
+NATIVE_SESSION_PREFIX = 'com.nox.pythonista.download.v2'
+
+# Не чаще одного сообщения в столько секунд на одну и ту же чужую задачу.
+STALE_LOG_EVERY = 10.0
+
+
+def _boot_token():
+    """Короткий идентификатор ЗАПУСКА. Годится и в имя ObjC-класса."""
+    try:
+        import uuid
+        return uuid.uuid4().hex[:8]
+    except Exception:
+        return '%08x' % (int(time.time() * 1000) & 0xFFFFFFFF)
 
 # Куда складывается скачанный системой кусок до слияния с .part.
 STAGING_DIRNAME = 'native_staging'
@@ -333,8 +357,13 @@ class NativeTransport(object):
     живой сессии нет и можно безопасно позвать yt-dlp.
     """
 
-    def __init__(self, session_id=NATIVE_SESSION_ID, data_dir=None):
-        self.session_id = session_id
+    def __init__(self, session_id=None, data_dir=None):
+        # Токен этого запуска. Всё, что создаётся ниже — имя класса
+        # делегата и идентификаторы сессий — включает его, поэтому чужой
+        # жизни процесса здесь принадлежать не может ничто.
+        self.boot_token = _boot_token()
+        self.session_prefix = session_id or NATIVE_SESSION_PREFIX
+        self.session_id = ''      # идентификатор ТЕКУЩЕЙ сессии
         self.data_dir = data_dir
         self.generation = 0
         self.config_report = {}
@@ -345,10 +374,19 @@ class NativeTransport(object):
         self._session = None
         self._delegate = None
         self._delegate_class = None
+        self.delegate_name = ''
         self._config = None
         self._tasks = {}          # key -> ObjC task
         self._ctx = {}            # key -> NativeContext
         self._by_job = {}         # job_id -> key
+        # Указатель ObjC-сессии -> её идентификатор. По нему колбэк
+        # находит ТУ сессию, которая пришла ему аргументом, а не ту, что
+        # у транспорта считается текущей.
+        self._sessions_by_ptr = {}
+        # Учёт чужих колбэков: (сессия, номер задачи) -> [когда писали,
+        # сколько подавили]. Нужен, чтобы поток чужих колбэков не
+        # превращался в поток записей в журнал.
+        self._stale = {}
 
     # -- состояние -------------------------------------------------
     def session_live(self):
@@ -440,7 +478,7 @@ class NativeTransport(object):
             self.forget(job_id)
             return lost, repr(e)
         self.forget(job_id)
-        _emit('native-checkpoint-drop', job_id=job_id, task_id=key[2],
+        _emit('native-checkpoint-drop', job_id=job_id, task_id=key[1],
               lost_bytes=lost)
         return lost, ''
 
@@ -463,10 +501,15 @@ class NativeTransport(object):
         if not available():
             self.last_error = unavailable_reason()
             return False, self.last_error
+        # Идентификатор новой пачки: префикс, токен запуска, номер.
+        # Один и тот же на всю жизнь этой сессии — Home Screen, блокировка
+        # экрана и переход в другое приложение её не меняют.
+        session_id = '%s.%s.%d' % (self.session_prefix, self.boot_token,
+                                   self.generation + 1)
         try:
             cfg_cls = objc_util.ObjCClass('NSURLSessionConfiguration')
             cfg = cfg_cls.backgroundSessionConfigurationWithIdentifier_(
-                _ns(self.session_id))
+                _ns(session_id))
             if cfg is None:
                 raise RuntimeError('backgroundSessionConfiguration вернул nil')
         except Exception as e:
@@ -496,9 +539,11 @@ class NativeTransport(object):
             self._config = cfg
             self._session = session
             self.generation += 1
+            self.session_id = session_id
+            self._sessions_by_ptr[_ptr_of(session)] = session_id
             self.config_report = report
         self.last_error = ''
-        _emit('native-session-created', identifier=self.session_id,
+        _emit('native-session-created', identifier=session_id,
               generation=self.generation, queue='mainQueue')
         return True, ''
 
@@ -517,7 +562,13 @@ class NativeTransport(object):
             self._tasks.clear()
             self._ctx.clear()
             self._by_job.clear()
+            self._stale.clear()
+            # Указатель закрытой сессии снимаем с учёта: её поздние
+            # колбэки должны считаться чужими, а не попадать в новую пачку.
+            if session is not None:
+                self._sessions_by_ptr.pop(_ptr_of(session), None)
             generation = self.generation
+            self.session_id = ''
         if session is None:
             return True, ''
         try:
@@ -578,14 +629,19 @@ class NativeTransport(object):
             _emit('native-task-error', job_id=job_id, stage='create',
                   exc=repr(e))
             return None, repr(e)
-        key = (self.session_id, self.generation, tid)
+        # Ключ включает идентификатор ИМЕННО ЭТОЙ сессии. Номера задач в
+        # новой сессии снова начинаются с единицы, и без идентификатора
+        # колбэк чужой задачи мог бы попасть в чужое задание.
+        with self._lock:
+            session_id = self.session_id
+        key = (session_id, tid)
         ctx = NativeContext(key, job_id, offset)
         with self._lock:
             self._tasks[key] = task
             self._ctx[key] = ctx
             self._by_job[job_id] = key
         _emit('native-task-created', job_id=job_id, task_id=tid,
-              generation=self.generation, base_offset=offset,
+              session=session_id, base_offset=offset,
               headers=','.join(sent), ranged=bool(offset))
         try:
             task.resume()
@@ -614,7 +670,7 @@ class NativeTransport(object):
             if ctx is not None:
                 ctx.state = ST_SUSPENDED
                 ctx.updated = time.time()
-        _emit('native-task-pause', job_id=job_id, task_id=key[2])
+        _emit('native-task-pause', job_id=job_id, task_id=key[1])
         return True, ''
 
     def resume(self, job_id):
@@ -631,7 +687,7 @@ class NativeTransport(object):
             if ctx is not None:
                 ctx.state = ST_RUNNING
                 ctx.updated = time.time()
-        _emit('native-task-resume', job_id=job_id, task_id=key[2])
+        _emit('native-task-resume', job_id=job_id, task_id=key[1])
         return True, ''
 
     def cancel(self, job_id):
@@ -652,7 +708,7 @@ class NativeTransport(object):
             if ctx is not None:
                 ctx.state = ST_CANCELLED
                 ctx.updated = time.time()
-        _emit('native-task-cancel', job_id=job_id, task_id=key[2])
+        _emit('native-task-cancel', job_id=job_id, task_id=key[1])
         return True, ''
 
     def forget(self, job_id):
@@ -673,27 +729,76 @@ class NativeTransport(object):
             return key, self._tasks.get(key)
 
     # -- делегат ---------------------------------------------------
-    def _lookup(self, task_ptr):
+    def _lookup(self, session_ptr, task_ptr):
         """
-        Единственный способ связать колбэк с заданием: ключ задачи.
+        Связать колбэк с заданием по ТОЙ сессии, которая пришла ему
+        аргументом, — а не по той, что транспорт считает текущей сейчас.
 
-        Ни current_job, ни last_job здесь нет и быть не может — в
-        эксперименте именно такая связь давала перепутанные показания.
-        Неизвестный ключ означает задачу мёртвого поколения или уже
-        удалённое задание: такой колбэк не применяется вообще.
+        Так было не всегда, и это стоило лавины чужих колбэков после
+        перезапуска: ключ строился из self.generation НА МОМЕНТ ПОЛУЧЕНИЯ
+        колбэка, поэтому поздний колбэк закрытой сессии сравнивался с
+        номерами живой. Теперь указатель сессии переводится в её
+        собственный идентификатор, и чужая сессия просто не находится.
+
+        Ни current_job, ни last_job здесь нет и быть не может.
         """
         try:
             tid = int(objc_util.ObjCInstance(task_ptr).taskIdentifier())
         except Exception:
+            tid = -1
+        try:
+            with self._lock:
+                token = self._sessions_by_ptr.get(_ptr_of(session_ptr))
+        except Exception:
+            token = None
+        if token is None:
+            self._note_stale(None, tid)
             return None, None
+        key = (token, tid)
         with self._lock:
-            key = (self.session_id, self.generation, tid)
             ctx = self._ctx.get(key)
         if ctx is None:
-            _emit('native-stale-callback', task_id=tid,
-                  generation=self.generation)
+            self._note_stale(token, tid)
             return None, None
         return key, ctx
+
+    def _note_stale(self, token, tid):
+        """
+        Чужой колбэк. Ничего не меняем и почти ничего не пишем.
+
+        Считать это ошибкой нельзя: система вправе досылать колбэки
+        задачам, которых мы больше не ведём. А вот писать о каждом в
+        журнал — нельзя тем более: на устройстве такие сообщения шли
+        десятками в секунду и сами по себе нагружали главную очередь.
+        Пишем первый раз и потом не чаще раза в STALE_LOG_EVERY, указывая,
+        сколько сообщений было подавлено.
+        """
+        pair = (token or 'unknown', tid)
+        now = time.monotonic()
+        report = None
+        try:
+            with self._lock:
+                seen = self._stale.get(pair)
+                if seen is None:
+                    if len(self._stale) > 64:
+                        self._stale.clear()
+                    self._stale[pair] = [now, 0]
+                    report = 0
+                else:
+                    seen[1] += 1
+                    if now - seen[0] >= STALE_LOG_EVERY:
+                        report = seen[1]
+                        seen[0] = now
+                        seen[1] = 0
+        except Exception:
+            return
+        if report is None:
+            return
+        if report:
+            _emit('native-stale-callback', session=pair[0], task_id=tid,
+                  suppressed=report)
+        else:
+            _emit('native-stale-callback', session=pair[0], task_id=tid)
 
     def _build_delegate(self):
         if self._delegate is not None:
@@ -704,7 +809,7 @@ class NativeTransport(object):
                 _self, _cmd, session, task, written, total_written,
                 total_expected):
             try:
-                key, ctx = transport._lookup(task)
+                key, ctx = transport._lookup(session, task)
                 if ctx is None:
                     return
                 with transport._lock:
@@ -719,7 +824,7 @@ class NativeTransport(object):
         def URLSession_downloadTask_didFinishDownloadingToURL_(
                 _self, _cmd, session, task, location):
             try:
-                key, ctx = transport._lookup(task)
+                key, ctx = transport._lookup(session, task)
                 if ctx is None:
                     return
                 transport._finish(key, ctx, task, location)
@@ -729,7 +834,7 @@ class NativeTransport(object):
         def URLSession_task_didCompleteWithError_(_self, _cmd, session, task,
                                                   err):
             try:
-                key, ctx = transport._lookup(task)
+                key, ctx = transport._lookup(session, task)
                 if ctx is None:
                     return
                 text = ''
@@ -754,7 +859,7 @@ class NativeTransport(object):
                             else ST_DONE
                     ctx.updated = time.time()
                 _emit('native-task-complete', job_id=ctx.job_id,
-                      task_id=key[2], http=code, error=text or None,
+                      task_id=key[1], http=code, error=text or None,
                       received=ctx.received)
             except Exception:
                 pass
@@ -769,7 +874,7 @@ class NativeTransport(object):
         def URLSession_downloadTask_didResumeAtOffset_expectedTotalBytes_(
                 _self, _cmd, session, task, offset, expected):
             try:
-                key, ctx = transport._lookup(task)
+                key, ctx = transport._lookup(session, task)
                 if ctx is None:
                     return
                 with transport._lock:
@@ -793,17 +898,27 @@ class NativeTransport(object):
         for fn, enc in zip(methods, (b'v@:@@qqq', b'v@:@@@', b'v@:@@@',
                                      b'v@:@', b'v@:@@qq')):
             fn.encoding = enc
-        name = 'NOXDownloadDelegate'
-        try:
-            cls = objc_util.create_objc_class(
-                name, objc_util.ObjCClass('NSObject'), methods=methods,
-                protocols=['NSURLSessionDelegate', 'NSURLSessionTaskDelegate',
-                           'NSURLSessionDownloadDelegate'])
-        except Exception:
-            # Класс уже зарегистрирован — повторный запуск скрипта в живом
-            # интерпретаторе. Берём существующий, а не падаем.
-            cls = objc_util.ObjCClass(name)
+        # Имя КЛАССА включает токен запуска, и это принципиально.
+        #
+        # Objective-C класс остаётся зарегистрированным в рантайме и после
+        # того, как Python-скрипт перезапустили. Раньше имя было
+        # постоянным, и при повторном запуске сюда приходило исключение
+        # «класс уже есть», а код молча брал старый класс. Его методы —
+        # это Python-функции ПРОШЛОГО запуска, замкнутые на ПРОШЛЫЙ
+        # transport. Колбэки уходили в объект, которого в новой жизни
+        # приложения уже нет.
+        #
+        # Уникальное имя убирает это целиком: каждый запуск получает свой
+        # класс, свои функции и свой transport. Подхвата чужого класса
+        # здесь больше нет — если создать не удалось, это управляемый
+        # отказ, и работает запасной HTTP-путь.
+        name = 'NOXDownloadDelegate_%s' % self.boot_token.upper()
+        cls = objc_util.create_objc_class(
+            name, objc_util.ObjCClass('NSObject'), methods=methods,
+            protocols=['NSURLSessionDelegate', 'NSURLSessionTaskDelegate',
+                       'NSURLSessionDownloadDelegate'])
         self._delegate_class = cls
+        self.delegate_name = name
         self._delegate = cls.alloc().init()
         return self._delegate
 
@@ -845,7 +960,7 @@ class NativeTransport(object):
                 ctx.state = ST_FAILED
                 ctx.error = 'HTTP %d' % code
                 ctx.updated = time.time()
-            _emit('native-http-expired', job_id=ctx.job_id, task_id=key[2],
+            _emit('native-http-expired', job_id=ctx.job_id, task_id=key[1],
                   http=code)
             return
         if ranged and code == 200:
@@ -857,7 +972,7 @@ class NativeTransport(object):
                 ctx.state = ST_FAILED
                 ctx.error = 'сервер ответил 200 на Range'
                 ctx.updated = time.time()
-            _emit('native-range-ignored', job_id=ctx.job_id, task_id=key[2])
+            _emit('native-range-ignored', job_id=ctx.job_id, task_id=key[1])
             return
         target_dir = staging_dir(near=self.data_dir, source=src)
         dest = os.path.join(target_dir,
@@ -896,9 +1011,36 @@ class NativeTransport(object):
                 ctx.error = 'не удалось забрать временный файл'
             ctx.updated = time.time()
         if moved:
-            _emit('native-temp-moved', job_id=ctx.job_id, task_id=key[2],
+            _emit('native-temp-moved', job_id=ctx.job_id, task_id=key[1],
                   path=moved, size=_size_of(moved),
                   same_device=_same_device(target_dir, os.path.dirname(src)))
+
+
+def _ptr_of(obj):
+    """
+    Устойчивый числовой идентификатор ObjC-объекта.
+
+    Нужен ровно для одного: понять, ОТ КАКОЙ сессии пришёл колбэк.
+    Указатель для этого годится и стоит дёшево; если моста нет или у
+    объекта нет ptr, берём id() — в подделке стенда и в тестах этого
+    достаточно, а на устройстве работает первый путь.
+    """
+    try:
+        inst = objc_util.ObjCInstance(obj) if objc_util is not None else obj
+    except Exception:
+        inst = obj
+    try:
+        raw = getattr(inst, 'ptr', None)
+        if raw is not None:
+            value = getattr(raw, 'value', raw)
+            if value is not None:
+                return int(value)
+    except Exception:
+        pass
+    try:
+        return int(id(inst))
+    except Exception:
+        return 0
 
 
 def _size_of(path):

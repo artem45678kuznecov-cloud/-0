@@ -320,21 +320,82 @@ class NativeTransport(object):
         with self._lock:
             return self._by_job.get(job_id)
 
-    def busy_count(self):
-        """
-        Сколько задач ещё держат сессию: работающие и приостановленные.
-
-        Приостановленная задача жива и продолжит с того же места, поэтому
-        сессию из-за неё закрывать нельзя.
-        """
-        with self._lock:
-            return len([c for c in self._ctx.values()
-                        if c.state in (ST_RUNNING, ST_SUSPENDED)])
-
+    # Три РАЗНЫХ вопроса, которые раньше отвечались одним числом и от
+    # этого путались:
+    #
+    #   running_count()  — сколько задач реально тянут байты. Это и есть
+    #                      занятые слоты передачи.
+    #   paused_count()   — сколько задач приостановлено. Слот они не
+    #                      занимают, но сессию держат: iOS не считает
+    #                      сессию завершённой, пока у неё есть
+    #                      незаконченные задачи, в том числе suspended.
+    #   session_live()   — существует ли объект сессии. Пока существует,
+    #                      yt-dlp звать нельзя.
+    #   transfer_active()— идёт ли передача прямо сейчас.
+    #
+    # Смешивать их в busy_count() было ошибкой: приостановленное задание
+    # запрещало разбор новых ссылок ровно так же, как работающее.
     def running_count(self):
         with self._lock:
             return len([c for c in self._ctx.values()
                         if c.state == ST_RUNNING])
+
+    def paused_count(self):
+        with self._lock:
+            return len([c for c in self._ctx.values()
+                        if c.state == ST_SUSPENDED])
+
+    def transfer_active(self):
+        return self.running_count() > 0
+
+    def pinned_contexts(self):
+        """
+        Приостановленные задачи, которые держат сессию, и сколько байт у
+        каждой лежит только во временном файле системы.
+
+        Эти байты нигде больше не существуют: в .part они попадают лишь
+        после того, как задача ЗАВЕРШИТСЯ и её файл будет слит. Поэтому
+        решение «отпустить задачу ради разбора новой ссылки» — это всегда
+        решение потерять ровно столько байт, и принимать его должен
+        менеджер, зная число.
+        """
+        with self._lock:
+            return [c.copy() for c in self._ctx.values()
+                    if c.state == ST_SUSPENDED]
+
+    def release(self, job_id):
+        """
+        Отпустить задачу и снять её с сессии.
+
+        task.cancel() без resumeData уничтожает временный файл системы:
+        всё, что задача успела скачать и не успело попасть в .part,
+        пропадает. Поэтому метод называется release, а не pause, и зовут
+        его только осознанно — когда сессию нужно освободить.
+
+        Возвращает, сколько байт при этом потеряно.
+        """
+        key, task = self._task_of(job_id)
+        if task is None:
+            return 0, 'задачи нет'
+        with self._lock:
+            ctx = self._ctx.get(key)
+            lost = int(ctx.received or 0) if ctx is not None else 0
+        try:
+            task.cancel()
+        except Exception as e:
+            self.forget(job_id)
+            return lost, repr(e)
+        self.forget(job_id)
+        _emit('native-checkpoint-drop', job_id=job_id, task_id=key[2],
+              lost_bytes=lost)
+        return lost, ''
+
+    def busy_count(self):
+        """
+        Устаревшее: сумма работающих и приостановленных. Оставлено, чтобы
+        не ломать внешних читателей, но в решениях НЕ участвует.
+        """
+        return self.running_count() + self.paused_count()
 
     # -- сессия ----------------------------------------------------
     def open_session(self):

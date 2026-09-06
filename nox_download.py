@@ -1063,6 +1063,9 @@ class DownloadManager(object):
         # Когда последний раз добавляли ссылку: по этому моменту ждём
         # соседей по пачке, прежде чем открывать сессию.
         self._last_add_at = 0.0
+        # Пачка помечена закрывающейся: новые задачи в неё не набираются,
+        # приостановленные с неё сняты, ждём только конца работающих.
+        self._batch_closing = False
 
     def mark_dirty(self):
         self.dirty += 1
@@ -1162,15 +1165,33 @@ class DownloadManager(object):
         except Exception:
             return False
 
+    def native_transfer_active(self):
+        """Идёт ли прямо сейчас нативная передача."""
+        return self._native_running() > 0
+
+    def paused_native_count(self):
+        """Сколько нативных задач приостановлено и держит сессию."""
+        try:
+            return int(self.native.paused_count())
+        except Exception:
+            return 0
+
     def native_busy(self):
         """
-        Держит ли кто-то живую нативную сессию.
+        Мешает ли нативный транспорт разобрать новую ссылку.
 
-        Пока держит — yt-dlp звать нельзя: на устройстве extract_info при
-        живой фоновой сессии завершал Pythonista нативно.
+        Раньше здесь было busy_count() — сумма работающих и
+        приостановленных, — и это было прямой ошибкой. Приостановленное
+        задание запрещало разбор ровно так же, как работающее: человек
+        нажимал ⏸ на тридцатичасовой загрузке, добавлял новую ссылку и
+        она висела, пока первую не доведут до конца или не удалят.
+        Пауза обязана освобождать возможность добавлять ссылки.
+
+        Теперь мешает только ЖИВАЯ СЕССИЯ, а приостановленные задачи
+        менеджер умеет с неё снимать (release_pinned_for_resolve).
         """
         try:
-            return int(self.native.busy_count()) > 0
+            return bool(self.native.session_live())
         except Exception:
             return False
 
@@ -1709,14 +1730,93 @@ class DownloadManager(object):
                 self._native_done(job, ctx)
             elif ctx.state == native.ST_FAILED:
                 self._native_failed(job, ctx)
-        # Батч закончился: живых задач нет, значит сессию можно закрыть и
-        # снова открыть окно для разбора ссылок.
+        # Сессия закрывается при первой возможности: пока она жива,
+        # разбор новых ссылок запрещён, и держать её «на всякий случай»
+        # означает запирать очередь.
         try:
-            if self.native.session_live() and not self.native_busy():
-                self.native.invalidate()
-                nox_debug.event('native-batch-end')
+            self._close_batch_if_possible()
         except Exception as e:
             self.native_error = repr(e)
+
+    def _close_batch_if_possible(self):
+        """
+        Закрыть пачку, как только она перестала быть нужна.
+
+        Пачку держат ДВЕ разные вещи, и путать их нельзя:
+
+        - работающая задача: её нельзя трогать, она качает файл;
+        - приостановленная задача: она ничего не качает, но iOS считает
+          её незавершённой, и сессия из-за неё не закрывается.
+
+        Приостановленные снимаются с сессии, если разбор кого-то ждёт
+        (см. release_pinned_for_resolve) или если терять при этом нечего.
+        Когда не осталось ни работающих, ни приостановленных — сессия
+        закрывается, и снова открывается окно для yt-dlp.
+        """
+        if not self.native.session_live():
+            return False
+        if self._native_running() > 0 or self._native_merging() > 0:
+            return False
+        if self.paused_native_count() > 0:
+            # Задача, которая ничего не скачала сверх .part, держит
+            # сессию впустую: отпустить её можно без потерь вообще.
+            self.release_pinned_for_resolve(only_free=True)
+            if self.paused_native_count() > 0:
+                return False
+        self.native.invalidate()
+        self._batch_closing = False
+        nox_debug.event('native-batch-end')
+        return True
+
+    def _native_merging(self):
+        """Сколько остатков сейчас сливается с .part."""
+        return len([j for j in self.all_jobs()
+                    if j.status == ST_PROCESSING and j.native_segment])
+
+    def release_pinned_for_resolve(self, only_free=False):
+        """
+        Снять приостановленные задачи с сессии, чтобы разбор мог пойти.
+
+        Честно про цену. Отпустить приостановленную задачу можно только
+        через task.cancel(), а он уничтожает временный файл системы. Всё,
+        что задача успела скачать и что ещё не попало в .part, при этом
+        пропадает: получить эти байты обратно нечем. Единственный
+        публичный способ их сохранить — cancelByProducingResumeData:, а он
+        требует Python-блока, и на устройстве Python-блок уже один раз
+        завершил Pythonista. Пока это не проверено отдельным probe, в
+        рабочий путь оно не идёт.
+
+        Поэтому решение принимается с числом в руках:
+
+        only_free=True   отпускаем только те, у которых терять нечего
+                         (ноль принятых байт);
+        only_free=False  отпускаем всё: разбор ждёт, и это осознанная
+                         плата, записанная в журнал до байта.
+
+        Сам файл .part не трогается никогда. Задание остаётся ST_PAUSED,
+        и следующее ▶ создаст новую задачу с Range от размера .part.
+        """
+        released, lost_total = 0, 0
+        for ctx in self.native.pinned_contexts():
+            lost = int(ctx.received or 0)
+            if only_free and lost > 0:
+                continue
+            job = self.find(ctx.job_id)
+            got, err = self.native.release(ctx.job_id)
+            released += 1
+            lost_total += int(got or 0)
+            self._native_speed.pop(ctx.job_id, None)
+            if job is not None:
+                job.native_base = 0
+                job.downloaded_bytes = self.part_size(job)
+                job.set_stage('native-released')
+                nox_debug.job_event('native-checkpoint-drop', job,
+                                    lost_bytes=got, error=err or None,
+                                    part_size=job.downloaded_bytes)
+        if released:
+            self.mark_dirty()
+            self.tick += 1
+        return released, lost_total
 
     def _native_progress(self, job, ctx):
         """Байты, скорость и ETA — теми же полями, что и у HTTP-пути."""
@@ -1934,28 +2034,54 @@ class DownloadManager(object):
             pending = self.pending_resolve()
             if not pending:
                 return False
-            if self.native_enabled():
-                # ФАЗА ПЕРЕДАЧИ. Пока жива хоть одна нативная задача,
-                # yt-dlp звать нельзя: на устройстве extract_info при
-                # живой фоновой сессии завершал Pythonista нативно.
-                # Разбор просто ждёт конца батча, а не отменяется.
-                if self.native_busy():
-                    for j in pending:
-                        if j.debug_stage != 'waiting-native-resolve':
-                            j.set_stage('waiting-native-resolve')
-                            nox_debug.job_event('native-resolve-deferred', j,
-                                                running=self._native_running())
-                    return False
-                # Задач нет, но сессия ещё открыта — закрываем её и этим
-                # открываем окно для разбора. Это и есть граница батчей.
-                if self.native.session_live():
-                    self.native.invalidate()
-                    nox_debug.event('native-batch-end', reason='before-resolve')
-                    return False        # разберём на следующем такте
+            if self.native_enabled() and self.native.session_live():
+                # ФАЗА ПЕРЕДАЧИ. Пока сессия жива, yt-dlp звать нельзя: на
+                # устройстве extract_info при живой фоновой сессии
+                # завершал Pythonista нативно. Но ждать конца загрузки
+                # ссылка не должна — надо ЗАКРЫТЬ пачку, а не терпеть.
+                self._request_batch_close(pending)
+                if not self._close_batch_if_possible():
+                    return False        # закрыть пока нечем: идёт передача
+                return False            # закрыли — разберём следующим тактом
             return self.resolve(pending[0])
         except Exception as e:
             self.pump_error = 'resolve_next: %r' % (e,)
             return False
+
+    def _request_batch_close(self, pending):
+        """
+        Кто-то ждёт разбора: пачку надо сворачивать.
+
+        Что здесь делается и чего НЕ делается.
+
+        Делается: приостановленные задачи снимаются с сессии — они не
+        качают, а сессию держат, и именно из-за них ⏸ раньше блокировала
+        добавление новых ссылок на часы. Новые задачи в эту пачку больше
+        не набираются (батч помечен закрывающимся), поэтому освободившийся
+        слот не занимается заново.
+
+        НЕ делается: работающая задача не отменяется НИКОГДА. Отменить её
+        значило бы выбросить всё, что она скачала после последнего
+        слияния, ради разбора чужой ссылки. Поэтому ссылка, добавленная
+        при идущей передаче, ждёт конца текущей передачи — честно, без
+        выдуманного таймаута.
+        """
+        if not self._batch_closing:
+            self._batch_closing = True
+            nox_debug.event('native-batch-closing',
+                            running=self._native_running(),
+                            paused=self.paused_native_count())
+        for j in pending:
+            if j.debug_stage != 'waiting-native-resolve':
+                j.set_stage('waiting-native-resolve')
+                nox_debug.job_event('native-resolve-deferred', j,
+                                    running=self._native_running(),
+                                    paused=self.paused_native_count())
+        if self.paused_native_count() > 0:
+            # Приостановленные держат сессию впустую. Отпускаем — с
+            # записью в журнал, сколько байт временного файла при этом
+            # потеряно, и с сохранением .part.
+            self.release_pinned_for_resolve(only_free=False)
 
     def resolve_opts(self):
         """Минимальный набор: разбор ничего не качает и не пишет."""
@@ -2290,6 +2416,11 @@ class DownloadManager(object):
         как разбор ссылок закончен и у заданий есть прямые адреса. Обратный
         порядок (живая сессия, потом yt-dlp) завершал Pythonista нативно.
         """
+        if self._batch_closing:
+            # Пачка сворачивается: кто-то ждёт разбора, и занимать
+            # освободившийся слот новой задачей нельзя — иначе сессия
+            # никогда не закроется, а ссылка никогда не разберётся.
+            return
         if not self._resolve_phase_done():
             # ФАЗА РАЗБОРА ещё не кончилась. Сессию не открываем: пока её
             # нет, yt-dlp безопасен, и пачка добирается до конца.

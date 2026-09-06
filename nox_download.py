@@ -21,6 +21,7 @@ import time
 import threading
 import urllib.request
 import urllib.error
+import http.client
 
 # Чёрный ящик. Внутри — только очередь в памяти: рабочий поток отсюда
 # ни одного файла не открывает. Алгоритм загрузки эти вызовы не трогают.
@@ -437,7 +438,45 @@ NETWORK_HINTS = (
 RETRY_CODES = (408, 425, 429, 500, 502, 503, 504)
 
 
+# Сбои САМОГО HTTP-клиента, а не ответа сервера. http.client держит у
+# соединения маленький автомат состояний, и когда сокет ломается не
+# вовремя — например, между отправкой строки запроса и отправкой
+# заголовков, — endheaders() поднимает CannotSendHeader. По тексту такое
+# исключение не опознать: у него пустое сообщение, и NETWORK_HINTS его
+# не ловят.
+#
+# Это транспортный сбой, ровно как обрыв соединения. Он НИЧЕГО не
+# говорит про прямую ссылку: она может быть совершенно жива. Поэтому
+# такие исключения повторяются, но никогда не считаются доказательством
+# протухшего адреса и не запускают свежий разбор.
+#
+# ImproperConnectionState — общий предок CannotSendRequest,
+# CannotSendHeader и ResponseNotReady; RemoteDisconnected наследуется от
+# BadStatusLine и от ConnectionResetError.
+TRANSPORT_ERRORS = (
+    http.client.ImproperConnectionState,
+    http.client.BadStatusLine,
+    http.client.LineTooLong,
+    http.client.IncompleteRead,
+)
+
+
+def is_transport_error(exc):
+    """
+    Сбой HTTP-клиента при отправке запроса или чтении ответа.
+
+    urllib заворачивает часть таких исключений в URLError, поэтому
+    смотрим и на исходную причину.
+    """
+    if isinstance(exc, TRANSPORT_ERRORS):
+        return True
+    reason = getattr(exc, 'reason', None)
+    return isinstance(reason, TRANSPORT_ERRORS)
+
+
 def is_network_error(exc):
+    if is_transport_error(exc):
+        return True
     try:
         code = int(getattr(exc, 'code', 0) or 0)
     except Exception:
@@ -446,6 +485,15 @@ def is_network_error(exc):
         return True
     text = ('%r %s' % (exc, exc)).lower()
     return any(hint in text for hint in NETWORK_HINTS)
+
+
+def _close_quietly(obj):
+    """Закрыть ответ/поток и никогда не упасть на этом."""
+    try:
+        if obj is not None:
+            obj.close()
+    except Exception:
+        pass
 
 
 ST_QUEUED = 'queued'
@@ -532,8 +580,16 @@ SPEED_WINDOW = 1.2          # окно усреднения скорости, с
 # бесконечным ответом на гигабайты, а чередой конечных блоков: VK-CDN
 # закрывает длинное соединение через считанные сотни килобайт, и весь
 # смысл в том, чтобы это было нормальным ходом дела, а не сбоем.
-# Это НЕ размер resp.read() — тот остаётся HTTP_CHUNK.
-HTTP_RANGE_BLOCK = 1024 * 1024
+#
+# Это НЕ размер resp.read() — тот остаётся HTTP_CHUNK. Тело любого блока
+# читается теми же маленькими порциями и сразу дописывается в .part, так
+# что расход памяти от величины блока не зависит вообще.
+#
+# Блок в мегабайт означал для файла на 5 ГБ около пяти тысяч отдельных
+# HTTP-запросов. На iPhone на шестьдесят третьем из них http.client
+# отдал CannotSendHeader. Тридцать два мегабайта — те же пять гигабайт
+# за полторы сотни запросов вместо пяти тысяч.
+HTTP_RANGE_BLOCK = 32 * 1024 * 1024
 
 # Сколько попыток ПОДРЯД должны не дать НИ ОДНОГО НОВОГО БАЙТА, чтобы
 # прямой адрес был признан негодным и задание пошло за свежим. Ответ,
@@ -1800,8 +1856,13 @@ class DownloadManager(object):
                     last_error = e
                     if job.cancel_requested or job.pause_requested:
                         break
+                    # Сбой HTTP-клиента (CannotSendHeader и родня) — это
+                    # транспорт, а не приговор ссылке. Повторяем, но за
+                    # свежим адресом из-за него не идём никогда.
+                    transport = is_transport_error(e)
                     nox_debug.job_event('http-error', job, exc=repr(e),
                                         idle=idle, last_read=job.last_read,
+                                        transport=transport,
                                         http_diag=job.http_diag)
                     if job.last_read > 0:
                         # Байты дошли, а потом соединение оборвалось. Это
@@ -1817,6 +1878,7 @@ class DownloadManager(object):
                         raise
                     idle += 1
                     if idle >= NO_PROGRESS_STRIKES and is_network_error(e) \
+                            and not transport \
                             and not isinstance(e, urllib.error.HTTPError):
                         # Ни одного байта несколько попыток подряд: адрес
                         # мёртв, дальше его мучить бессмысленно.
@@ -2008,7 +2070,11 @@ class DownloadManager(object):
                              bytes_before=job.downloaded_bytes)
         nox_debug.http_event('http-open', job, offset=offset,
                              part_size=offset, range=rng or None)
+        # Свой Request и свой urlopen на КАЖДУЮ попытку: ни соединение, ни
+        # ответ между блоками не переиспользуются и в полях менеджера не
+        # живут. Оба объекта локальные, и умирают вместе с попыткой.
         req = urllib.request.Request(job.resolved_url, headers=headers)
+        resp = None
         try:
             resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
         except urllib.error.HTTPError as e:
@@ -2018,17 +2084,33 @@ class DownloadManager(object):
             job.http_diag = _diag_text(diag)
             nox_debug.http_event('http-response', job, resp=e, offset=offset,
                                  range=rng or None, exc=repr(e))
-            if code == 416:
-                return self._handle_416(job, offset, e)
-            if code in EXPIRED_CODES:
-                # 429, таймауты и 5xx сюда НЕ попадают: это обычные сбои,
-                # их лечит обычный повтор, а не новый разбор ссылки.
-                raise DirectUrlExpired('HTTP %d' % code)
-            raise
+            try:
+                if code == 416:
+                    return self._handle_416(job, offset, e)
+                if code in EXPIRED_CODES:
+                    # 429, таймауты и 5xx сюда НЕ попадают: это обычные
+                    # сбои, их лечит обычный повтор, а не новый разбор.
+                    raise DirectUrlExpired('HTTP %d' % code)
+                raise
+            finally:
+                # У HTTPError внутри живой сокет: без close() он останется
+                # висеть до сборки мусора.
+                _close_quietly(e)
         except Exception as e:
+            # Сюда попадает и CannotSendHeader. Ответа не существует —
+            # запрос не успел уйти, — но если urlopen всё-таки что-то
+            # вернул до сбоя, закрываем и это.
+            _close_quietly(resp)
+            resp = None
             diag['err'] = repr(e)
             job.http_diag = _diag_text(diag)
-            nox_debug.http_event('http-error', job, offset=offset,
+            # Сбой HTTP-клиента при отправке запроса получает своё имя в
+            # журнале: это не ответ сервера и не протухшая ссылка. .part
+            # не трогаем, downloaded_bytes не откатываем — следующая
+            # попытка возьмёт offset заново из файла.
+            kind = ('http-cannot-send-header' if is_transport_error(e)
+                    else 'http-error')
+            nox_debug.http_event(kind, job, offset=offset, part_size=offset,
                                  range=rng or None, exc=repr(e))
             raise
         try:
@@ -2096,13 +2178,21 @@ class DownloadManager(object):
                         # была успешной.
                         job.refresh_resolve_attempts = 0
                     self._note_progress(job, state, len(chunk))
+        except Exception as e:
+            diag['err'] = repr(e)
+            kind = ('http-cannot-send-header' if is_transport_error(e)
+                    else 'http-body-error')
+            nox_debug.http_event(kind, job, offset=offset,
+                                 part_size=self.part_size(job),
+                                 range=rng or None, exc=repr(e))
+            raise
         finally:
             diag['read'] = job.last_read
             job.http_diag = _diag_text(diag)
-            try:
-                resp.close()
-            except Exception:
-                pass
+            # Ответ закрывается ВСЕГДА и ровно один раз: и после штатного
+            # конца блока, и по паузе, и по любому исключению. Двух живых
+            # ответов у одного задания не бывает — этот единственный.
+            _close_quietly(resp)
         if job.cancel_requested or job.pause_requested:
             return False
         size = self.part_size(job)

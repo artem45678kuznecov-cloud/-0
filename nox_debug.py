@@ -673,6 +673,23 @@ def _fmt_time(ts):
         return '—'
 
 
+def session_verdict(session):
+    """
+    Чем кончилась сессия — ровно тем, что известно, без догадок.
+
+    Пойманное исключение Python — факт. Отсутствие отметки о штатном
+    закрытии фактом убийства процесса не является: её точно так же не
+    будет, если человек просто запустил другой скрипт.
+    """
+    if not isinstance(session, dict):
+        return 'НЕТ ДАННЫХ'
+    if session.get('last_exception'):
+        return 'PYTHON EXCEPTION'
+    if session.get('clean_exit'):
+        return 'NORMAL EXIT'
+    return 'НЕ ОТМЕЧЕНО ШТАТНОЕ ЗАВЕРШЕНИЕ'
+
+
 def report_text(session=None, events=None, limit=50):
     """
     Читаемая сводка последней сессии. Ничего не импортирует из NOX и
@@ -689,16 +706,19 @@ def report_text(session=None, events=None, limit=50):
     clean = bool(session.get('clean_exit'))
     exc = session.get('last_exception')
     lines.append('')
-    lines.append('ПОСЛЕДНЯЯ СЕССИЯ: ' +
-                 ('NORMAL EXIT' if clean else 'UNEXPECTED TERMINATION'))
-    if not clean:
-        lines.append('')
-        lines.append('Python exception: ' +
-                     ('captured' if exc else 'none captured'))
-        if not exc:
-            lines.append('Процесс завершился без исключения Python. Причину')
-            lines.append('такого завершения изнутри Python узнать нельзя —')
-            lines.append('ниже последнее состояние, снятое перед этим.')
+    lines.append('ПОСЛЕДНЯЯ СЕССИЯ: %s' % session_verdict(session))
+    lines.append('')
+    lines.append('Python exception: ' +
+                 ('captured' if exc else 'none captured'))
+    if not clean and not exc:
+        # Не выдаём догадку за доказанный kill: отметку о штатном
+        # закрытии могло не быть и просто потому, что человек запустил
+        # другой скрипт Pythonista.
+        lines.append('Предыдущая сессия не успела отметить штатное закрытие.')
+        lines.append('Это может означать принудительное завершение процесса,')
+        lines.append('перезапуск скрипта или остановку Pythonista.')
+        lines.append('Точную причину без системного crash report iOS')
+        lines.append('определить нельзя.')
     lines.append('')
     lines.append('Session ID     : %s' % session.get('session_id'))
     lines.append('Начало         : %s' % _fmt_time(session.get('started_at')))
@@ -790,66 +810,166 @@ def report_text(session=None, events=None, limit=50):
 # ---------------------------------------------------------------------
 #  Просмотрщик: запуск самого nox_debug.py
 # ---------------------------------------------------------------------
+# Цвета просмотрщика. К теме NOX отношения не имеют: это отдельный
+# служебный экран, и системная светлая тема ему запрещена.
+BG = '#07080f'
+FG = '#d8dcf0'
+PANEL = '#161a33'
+
+
+def _safe_insets(width, height):
+    """
+    Отступы под чёлку и домашний индикатор. Точных значений Pythonista
+    не даёт, а тянуть objc_util в чёрный ящик незачем: у высоких экранов
+    берём типовые 44/34, у остальных — обычные поля.
+    """
+    if height >= 800 or width >= 800:
+        return 44.0, 34.0
+    return 20.0, 8.0
+
+
+_VIEW_CLASS = []
+
+
+def _debug_view_class():
+    """
+    Класс экрана создаётся при первом обращении: ui нужен ТОЛЬКО
+    просмотрщику, а nox_debug импортируют и загрузчик, и интерфейс.
+    Держать import ui на уровне модуля ради этого нельзя.
+    """
+    if _VIEW_CLASS:
+        return _VIEW_CLASS[0]
+    import ui
+
+    class DebugView(ui.View):
+        """
+        Экран диагностики. Отдельный класс, а НЕ view.layout = функция:
+        присвоенная объекту функция в Pythonista не вызывается как метод, и
+        TextView так и оставался стандартным прямоугольником 100x100 в углу.
+        Здесь layout — настоящий метод, и он же срабатывает при повороте.
+        """
+
+        def __init__(self, width=393.0, height=852.0, **kwargs):
+            ui.View.__init__(self, **kwargs)
+            # Пока не собраны все части, layout не считает: присвоение
+            # frame само дёргает layout, и без этого флага первый же вызов
+            # приходил бы на полупустой объект.
+            self._built = False
+            self.name = 'NOX DEBUG'
+            self.background_color = BG
+            self.frame = (0, 0, width, height)
+
+            self.title = ui.Label(frame=(16, 20, width - 100, 26))
+            self.title.text = 'NOX DEBUG'
+            self.title.text_color = FG
+            self.title.font = ('Menlo-Bold', 17)
+            self.add_subview(self.title)
+
+            self.close_button = ui.Button(title='Закрыть')
+            self.close_button.frame = (width - 92, 18, 76, 30)
+            self.close_button.background_color = PANEL
+            self.close_button.tint_color = FG
+            self.close_button.corner_radius = 8
+            self.close_button.action = self.do_close
+            self.add_subview(self.close_button)
+
+            # Рамка задаётся сразу: даже если layout по какой-то причине не
+            # позовут, текст всё равно займёт экран, а не угол.
+            self.text = ui.TextView(frame=(8, 56, width - 16, height - 110))
+            self.text.background_color = BG
+            self.text.text_color = FG
+            self.text.font = ('Menlo', 11)
+            self.text.editable = False
+            self.text.selectable = True
+            self.text.flex = 'WH'
+            self.add_subview(self.text)
+
+            self.buttons = []
+            for title, action in (('Обновить', self.do_refresh),
+                                  ('Скопировать отчёт', self.do_copy),
+                                  ('Очистить журнал', self.do_clear)):
+                b = ui.Button(title=title)
+                b.background_color = PANEL
+                b.tint_color = FG
+                b.corner_radius = 8
+                b.font = ('Menlo', 12)
+                b.action = action
+                self.add_subview(b)
+                self.buttons.append(b)
+
+            self._built = True
+            self.layout()
+            self.do_refresh(None)
+
+        def layout(self):
+            """Пересчёт при первом показе, при повороте и при смене размера."""
+            if not getattr(self, '_built', False):
+                return
+            w, h = float(self.width), float(self.height)
+            if w <= 1 or h <= 1:
+                return
+            top, bottom = _safe_insets(w, h)
+            pad, head, bh = 8.0, 30.0, 36.0
+            self.title.frame = (pad + 8, top, max(60.0, w - 116.0), head)
+            self.close_button.frame = (w - 84.0, top - 2.0, 76.0, head + 4.0)
+            row = h - bottom - bh
+            count = len(self.buttons) or 1
+            bw = (w - pad * (count + 1)) / count
+            for i, b in enumerate(self.buttons):
+                b.frame = (pad + i * (bw + pad), row, bw, bh)
+            text_top = top + head + pad
+            self.text.frame = (pad, text_top, w - pad * 2,
+                               max(40.0, row - text_top - pad))
+
+        # -- кнопки ----------------------------------------------------
+        def do_refresh(self, sender):
+            self.text.text = report_text()
+
+        def do_copy(self, sender):
+            try:
+                import clipboard
+                clipboard.set(self.text.text)
+                sender.title = 'Скопировано'
+            except Exception:
+                if sender is not None:
+                    sender.title = 'Буфер недоступен'
+
+        def do_clear(self, sender):
+            # Очистка — только со второго нажатия.
+            if sender is not None and sender.title != 'Точно очистить?':
+                sender.title = 'Точно очистить?'
+                return
+            clear_log()
+            if sender is not None:
+                sender.title = 'Очистить журнал'
+            self.do_refresh(None)
+
+        def do_close(self, sender):
+            try:
+                self.close()
+            except Exception:
+                pass
+
+
+
+    _VIEW_CLASS.append(DebugView)
+    return DebugView
+
+
+def build_view(width=393.0, height=852.0):
+    """Собрать экран без показа — этим же путём его проверяет стенд."""
+    return _debug_view_class()(width=width, height=height)
+
+
 def _viewer():
-    """
-    Отдельный тёмный экран. Это не дизайн NOX и не должен им быть:
-    здесь важна только читаемость. Если ui недоступен — печатаем отчёт.
-    """
-    import ui                                  # только в просмотрщике
-
-    view = ui.View(background_color='#07080f')
-    view.name = 'NOX DEBUG'
-
-    text = ui.TextView()
-    text.background_color = '#07080f'
-    text.text_color = '#d8dcf0'
-    text.font = ('Menlo', 11)
-    text.editable = False
-    text.text = report_text()
-    view.add_subview(text)
-
-    buttons = []
-
-    def refresh(sender):
-        text.text = report_text()
-
-    def copy(sender):
-        try:
-            import clipboard
-            clipboard.set(text.text)
-            sender.title = 'Скопировано'
-        except Exception:
-            sender.title = 'Буфер недоступен'
-
-    def wipe(sender):
-        if sender.title != 'Точно очистить?':
-            sender.title = 'Точно очистить?'
-            return
-        clear_log()
-        sender.title = 'Очистить журнал'
-        text.text = report_text()
-
-    for title, action in (('Обновить', refresh),
-                          ('Скопировать отчёт', copy),
-                          ('Очистить журнал', wipe)):
-        b = ui.Button(title=title)
-        b.background_color = '#161a33'
-        b.tint_color = '#cfd4ff'
-        b.corner_radius = 8
-        b.action = action
-        view.add_subview(b)
-        buttons.append(b)
-
-    def layout():
-        w, h = view.width, view.height
-        pad, bh = 8.0, 34.0
-        bw = (w - pad * (len(buttons) + 1)) / len(buttons)
-        for i, b in enumerate(buttons):
-            b.frame = (pad + i * (bw + pad), h - bh - pad, bw, bh)
-        text.frame = (pad, pad, w - pad * 2, h - bh - pad * 3)
-
-    view.layout = layout
-    view.present('fullscreen')
+    """Тёмный экран во весь iPhone. Красота не нужна, нужна читаемость."""
+    try:
+        import ui
+        width, height = ui.get_screen_size()
+    except Exception:
+        width, height = 393.0, 852.0
+    view = build_view(width, height)
+    view.present('fullscreen', hide_title_bar=False)
 
 
 def main():

@@ -528,11 +528,19 @@ HTTP_RETRIES = 6
 HTTP_RETRY_PAUSE = 3.0
 SPEED_WINDOW = 1.2          # окно усреднения скорости, секунды
 
-# Сколько попыток ПОДРЯД должны не дать ни одного байта, чтобы прямой
-# адрес был признан негодным и задание пошло за свежим. Обрыв, после
-# которого файл всё-таки вырос, адрес негодным не делает: такое лечится
-# обычной докачкой через Range, а не новым разбором ссылки.
+# Диапазон ОДНОГО HTTP-запроса. Большой файл забирается не одним
+# бесконечным ответом на гигабайты, а чередой конечных блоков: VK-CDN
+# закрывает длинное соединение через считанные сотни килобайт, и весь
+# смысл в том, чтобы это было нормальным ходом дела, а не сбоем.
+# Это НЕ размер resp.read() — тот остаётся HTTP_CHUNK.
+HTTP_RANGE_BLOCK = 1024 * 1024
+
+# Сколько попыток ПОДРЯД должны не дать НИ ОДНОГО НОВОГО БАЙТА, чтобы
+# прямой адрес был признан негодным и задание пошло за свежим. Ответ,
+# после которого файл вырос хотя бы на байт, — это прогресс, а не сбой,
+# и счётчик обнуляется, сколько бы раз соединение ни закрывалось.
 URL_DEAD_STRIKES = 2
+NO_PROGRESS_STRIKES = 3
 
 # Протоколы, которые наш простой загрузчик тянуть не умеет: они собираются
 # из сегментов и потребовали бы ffmpeg.
@@ -1575,6 +1583,21 @@ class DownloadManager(object):
                 continue
         return False
 
+    def _idle_pause(self, job, idle):
+        """
+        Пауза перед повтором — ТОЛЬКО после попытки, не давшей ни байта.
+        Продуктивный блок продолжается сразу: ждать между кусками файла,
+        которые реально приходят, незачем.
+        """
+        job.set_stage('http-retry')
+        self.tick += 1
+        nox_debug.job_event('http-retry', job, idle=idle)
+        slept = 0.0
+        while slept < HTTP_RETRY_PAUSE and not job.cancel_requested \
+                and not job.pause_requested:
+            time.sleep(0.2)
+            slept += 0.2
+
     @staticmethod
     def _note_refresh(job, detail):
         """
@@ -1619,25 +1642,14 @@ class DownloadManager(object):
         state = {'bytes': 0, 'time': time.monotonic()}
         last_error = None
         refresh = ''          # почему нужен свежий прямой адрес
-        strikes = 0           # попыток подряд, не давших ни одного байта
-        left = HTTP_RETRIES   # бюджет попыток по ТЕКУЩЕМУ адресу
+        # Попыток ПОДРЯД без единого нового байта. Любой полученный байт
+        # обнуляет счётчик: обрыв соединения после реальных данных —
+        # обычный ход дела, а не повод менять адрес или сдаваться.
+        idle = 0
         try:
-            while left > 0:
+            while True:
                 if job.cancel_requested or job.pause_requested:
                     break
-                if job.attempt_no > 0:
-                    job.set_stage('http-retry')
-                    self.tick += 1
-                    slept = 0.0
-                    while slept < HTTP_RETRY_PAUSE and not job.cancel_requested \
-                            and not job.pause_requested:
-                        time.sleep(0.2)
-                        slept += 0.2
-                    if job.cancel_requested or job.pause_requested:
-                        break
-                    nox_debug.job_event('http-retry', job, left=left,
-                                        strikes=strikes)
-                left -= 1
                 try:
                     done = self._transfer(job, part, state)
                 except DirectUrlExpired as e:
@@ -1665,41 +1677,63 @@ class DownloadManager(object):
                     last_error = e
                     if job.cancel_requested or job.pause_requested:
                         break
-                    if not is_network_error(e):
-                        if job.attempt_no >= 2:
-                            raise
-                        continue
                     nox_debug.job_event('http-error', job, exc=repr(e),
-                                        strikes=strikes,
-                                        last_read=job.last_read,
+                                        idle=idle, last_read=job.last_read,
                                         http_diag=job.http_diag)
-                    if isinstance(e, urllib.error.HTTPError):
-                        # 429 и 5xx: адрес жив, сервер занят или прилёг.
-                        # Это лечится временем, а не новым разбором ссылки.
-                        continue
                     if job.last_read > 0:
-                        # Связь рвётся, но адрес отдаёт байты: лечится
-                        # докачкой. Бюджет попыток начинается заново —
-                        # иначе многочасовая загрузка не пережила бы шести
-                        # обрывов за всё время.
-                        strikes = 0
-                        left = HTTP_RETRIES
+                        # Байты дошли, а потом соединение оборвалось. Это
+                        # НЕ ошибка: следующий блок пойдёт с нового размера
+                        # .part, и так хоть тысячу раз подряд.
+                        last_error = None
+                        idle = 0
+                        nox_debug.job_event('range-next', job,
+                                            part_size=self.part_size(job),
+                                            after='drop')
                         continue
-                    strikes += 1
-                    if strikes >= URL_DEAD_STRIKES:
-                        # Адрес подряд не дал ни байта: дальше его мучить
-                        # бессмысленно, нужен свежий.
+                    if not is_network_error(e) and job.attempt_no >= 2:
+                        raise
+                    idle += 1
+                    if idle >= NO_PROGRESS_STRIKES and is_network_error(e) \
+                            and not isinstance(e, urllib.error.HTTPError):
+                        # Ни одного байта несколько попыток подряд: адрес
+                        # мёртв, дальше его мучить бессмысленно.
                         refresh = 'network'
                         last_error = None
-                        self._note_refresh(job, 'network x%d: %r' % (strikes, e))
-                        nox_debug.job_event('http-error', job, reason='network',
-                                            strikes=strikes, exc=repr(e))
+                        self._note_refresh(job, 'no-progress x%d: %r'
+                                           % (idle, e))
+                        nox_debug.job_event('range-refresh', job,
+                                            reason='network', idle=idle,
+                                            exc=repr(e))
                         break
+                    if idle >= HTTP_RETRIES:
+                        # 429/5xx и прочее, что новым адресом не лечится.
+                        raise
+                    self._idle_pause(job, idle)
                     continue
-                strikes = 0
                 if done:
                     last_error = None
                     break
+                if job.last_read > 0:
+                    # Блок закончился штатно — сразу следующий, без пауз.
+                    idle = 0
+                    last_error = None
+                    nox_debug.job_event('range-next', job,
+                                        part_size=self.part_size(job),
+                                        after='block')
+                    continue
+                # 206 пришёл, а тело оказалось пустым: вот это и есть
+                # настоящий отказ адреса.
+                idle += 1
+                if idle >= NO_PROGRESS_STRIKES:
+                    refresh = 'network'
+                    self._note_refresh(job, 'no-progress x%d: пустое тело'
+                                       % (idle,))
+                    nox_debug.job_event('range-refresh', job,
+                                        reason='empty-body', idle=idle)
+                    break
+                if idle >= HTTP_RETRIES:
+                    raise IOError('сервер не отдаёт данные')
+                self._idle_pause(job, idle)
             if job.delete_requested:
                 job.set_stage('deleting')            # .part уберём в finally
             elif refresh:
@@ -1784,15 +1818,28 @@ class DownloadManager(object):
         if got != int(total):
             raise IOError('размер не сошёлся: %d из %d байт' % (got, int(total)))
 
+    def _block_end(self, job, offset):
+        """
+        Конец запрашиваемого блока. None — размер ещё неизвестен, и тогда
+        это самый первый запрос: он идёт без Range и сам приносит размер.
+        """
+        total = job.exact_total
+        if not total:
+            return None
+        end = min(int(total) - 1, offset + HTTP_RANGE_BLOCK - 1)
+        return end if end >= offset else None
+
     def _transfer(self, job, part, state):
         """
-        Одна попытка передачи. Возвращает True, если файл дошёл до конца.
+        ОДИН конечный Range-блок. True — файл собран целиком, False —
+        блок кончился, нужен следующий.
 
-        Докачивает через Range. Если на запрос с Range сервер ответил не
-        206 — поднимаем RangeNotSupported и НЕ трогаем файл: раньше .part
-        в этом месте обрезался до нуля, и загрузка уходила в цикл
-        «256 КБ -> обрыв -> обрезали -> 256 КБ», из которого выход был
-        только через ошибку.
+        Длинного ответа на весь файл здесь больше нет. VK-CDN закрывает
+        соединение через 256 КБ независимо от того, что обещал в
+        Content-Length, и на длинном потоке загрузка навсегда замирала на
+        первом блоке. Теперь короткий ответ — обычное дело: сколько байт
+        дошло, столько и записали, а следующий запрос идёт с нового
+        размера .part. Файл — единственный источник истины про offset.
 
         Разбор попытки складывается в job.http_diag — строку в памяти.
         Своего файла журнала у рабочего потока нет.
@@ -1801,18 +1848,23 @@ class DownloadManager(object):
         job.attempt_no += 1
         job.last_read = 0
         offset = self.part_size(job)
+        # Счётчик всегда равен тому, что реально лежит на диске: переход
+        # между блоками не должен выглядеть как начатая заново загрузка.
+        job.downloaded_bytes = offset
+        end = self._block_end(job, offset)
         headers = dict(job.resolved_headers or {})
         # Заголовки формата от yt-dlp (User-Agent, Referer, Origin) идут
-        # как есть и на первой попытке, и на любой докачке.
+        # как есть и на первой попытке, и на любом следующем блоке.
         headers.setdefault('User-Agent', 'NOX/1.0')
         # Без сжатия: и границы Range, и Content-Length должны считаться в
         # тех же байтах, которые лягут на диск и будут сверены перед
         # переименованием.
         headers.setdefault('Accept-Encoding', 'identity')
         rng = ''
-        if offset > 0:
-            rng = 'bytes=%d-' % offset
+        if offset > 0 or end is not None:
+            rng = 'bytes=%d-%s' % (offset, end if end is not None else '')
             headers['Range'] = rng
+        want = (end - offset + 1) if end is not None else None
         diag = {'attempt': job.attempt_no,
                 'refresh': job.refresh_resolve_attempts,
                 'offset': offset, 'range': rng or '-',
@@ -1820,11 +1872,13 @@ class DownloadManager(object):
                 'code': '-', 'len': '-', 'crange': '-', 'aranges': '-',
                 'read': 0, 'ignored': False, 'err': '-'}
         job.http_diag = _diag_text(diag)
-        nox_debug.http_event('http-open', job, offset=offset,
+        nox_debug.http_event('range-block-open', job, offset=offset,
                              part_size=offset, range=rng or None,
+                             requested_start=offset, requested_end=end,
+                             requested=want, exact_total=job.exact_total,
                              bytes_before=job.downloaded_bytes)
-        nox_debug.http_event('range-request', job, offset=offset,
-                             range=rng or None)
+        nox_debug.http_event('http-open', job, offset=offset,
+                             part_size=offset, range=rng or None)
         req = urllib.request.Request(job.resolved_url, headers=headers)
         try:
             resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
@@ -1857,6 +1911,7 @@ class DownloadManager(object):
             job.http_diag = _diag_text(diag)
             nox_debug.http_event('http-response', job, resp=resp,
                                  offset=offset, range=rng or None,
+                                 requested_start=offset, requested_end=end,
                                  bytes_before=job.downloaded_bytes)
             if offset > 0 and code != 206:
                 # Докачку не приняли. Существующий .part остаётся целым:
@@ -1868,11 +1923,9 @@ class DownloadManager(object):
                                      part_size=offset)
                 raise RangeNotSupported(
                     'на Range получен ответ %s вместо 206' % code)
-            mode = 'wb'
-            if offset > 0:
+            if code == 206:
                 nox_debug.http_event('range-206', job, resp=resp,
                                      offset=offset, range=rng or None)
-                mode = 'ab'
                 total = _total_from_content_range(
                     resp.headers.get('Content-Range'))
                 if total is None:
@@ -1880,14 +1933,14 @@ class DownloadManager(object):
                     total = (offset + length) if length else None
             else:
                 total = _int_or_none(resp.headers.get('Content-Length'))
-            job.downloaded_bytes = offset
             if total:
                 # Размер пришёл от сервера — он точный, в отличие от
                 # filesize_approx, и именно по нему проверяем файл в конце.
                 job.total_bytes = int(total)
                 job.exact_total = int(total)
-            state['bytes'] = 0
-            state['time'] = time.monotonic()
+            # offset > 0 -> только дописывание. Обрезать уже скачанное
+            # нельзя ни при каких ответах сервера.
+            mode = 'ab' if offset > 0 else 'wb'
             job.status = ST_DOWNLOADING
             job.set_stage('http-downloading')
             self.tick += 1
@@ -1923,19 +1976,37 @@ class DownloadManager(object):
                 pass
         if job.cancel_requested or job.pause_requested:
             return False
+        size = self.part_size(job)
+        job.downloaded_bytes = size
+        nox_debug.http_event(
+            'range-block-complete' if want and job.last_read >= want else (
+                'range-block-short' if job.last_read > 0
+                else 'range-zero-progress'),
+            job, offset=offset, range=rng or None, requested=want,
+            bytes_read_this_attempt=job.last_read, part_size_after=size,
+            exact_total=job.exact_total)
         total = job.exact_total or job.total_bytes
-        if total and job.downloaded_bytes < total:
-            raise IOError('соединение оборвалось: %d из %d байт'
-                          % (job.downloaded_bytes, int(total)))
+        if total:
+            if size >= int(total):
+                return True          # файл собран целиком
+            return False             # блок кончился, нужен следующий
+        # Размера сервер не назвал: тело кончилось — кончился и файл.
         return True
 
     def _handle_416(self, job, offset, err):
         """
         416 Range Not Satisfiable. В заголовке приходит 'bytes */TOTAL'.
 
-        Если на диске уже лежит ровно TOTAL байт — файл дошёл до конца, и
-        серверу просто нечего отдать: это успех. Если .part больше или
-        меньше, он источнику не соответствует, и его надо качать заново.
+        Три разных случая, и удаление допустимо ровно в одном:
+
+        .part == TOTAL   файл уже полный, серверу просто нечего отдать —
+                         это успех, дальше сверка размера и rename;
+        .part >  TOTAL   на диске больше, чем есть у источника: такой
+                         файл этому источнику не соответствует ДОКАЗАННО,
+                         только тут .part удаляется и качается заново;
+        .part <  TOTAL   сервер отказал в диапазоне, который обязан был
+                         отдать. Несовместимость НЕ доказана, файл не
+                         трогаем — идём за свежим прямым адресом.
         """
         try:
             total = _total_from_content_range(err.headers.get('Content-Range'))
@@ -1950,6 +2021,12 @@ class DownloadManager(object):
             job.set_stage('http-416-complete')
             self.tick += 1
             return True
+        if total and offset < int(total):
+            job.set_stage('http-416-refresh')
+            self.tick += 1
+            raise RangeNotSupported(
+                'сервер отклонил докачку (416) на %d из %d байт'
+                % (offset, int(total)))
         self._remove_part(job)
         job.downloaded_bytes = 0
         job.exact_total = None

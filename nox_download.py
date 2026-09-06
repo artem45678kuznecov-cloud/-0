@@ -2,9 +2,9 @@
 """
 NOX / подсистема загрузок.
 
-yt-dlp resolve(download=False) на главном потоке, выбор прямого формата,
-HTTP-передача через urllib с Range и .part, очередь, пауза, продолжение,
-удаление, сохранение состояния, обложки и метаданные.
+yt-dlp resolve(download=False) в своём последовательном потоке, выбор
+прямого формата, HTTP-передача через urllib с Range и .part, очередь,
+пауза, продолжение, удаление, сохранение состояния, обложки и метаданные.
 
 Модуль НЕ импортирует ui и не знает, что интерфейс существует: он лишь
 меняет поля DownloadJob, а показывает их кто угодно.
@@ -508,6 +508,14 @@ class DirectUrlExpired(Exception):
     pass
 
 
+class _StaleResolve(Exception):
+    """
+    Разбор ссылки вернулся, но применять его уже некуда: задание сняли,
+    приостановили или переспросили заново, пока мы ждали ответа.
+    """
+    pass
+
+
 class RangeNotSupported(Exception):
     """
     На запрос с Range сервер ответил не 206: продолжить по этому адресу
@@ -541,6 +549,16 @@ HTTP_RANGE_BLOCK = 1024 * 1024
 # и счётчик обнуляется, сколько бы раз соединение ни закрывалось.
 URL_DEAD_STRIKES = 2
 NO_PROGRESS_STRIKES = 3
+
+# Разбор ссылки — своя подсистема со своими повторами. Сеть у metadata и
+# у самого файла ведёт себя по-разному: страница VK может не ответить
+# из-за SSL handshake, а уже открытая передача при этом идёт нормально.
+RESOLVE_RETRIES = 3
+RESOLVE_RETRY_PAUSE = 2.0
+# Свой таймаут сокета для metadata, отдельно от HTTP_TIMEOUT загрузки.
+# Шестьдесят секунд ожидания одного handshake — это минута, которую
+# человек ждёт впустую; двадцати достаточно, а отказ лечит повтор.
+RESOLVE_SOCKET_TIMEOUT = 20
 
 # Протоколы, которые наш простой загрузчик тянуть не умеет: они собираются
 # из сегментов и потребовали бы ffmpeg.
@@ -717,6 +735,12 @@ class DownloadJob(object):
         self.delete_requested = False
         # Сколько раз уже обновляли протухшую прямую ссылку.
         self.refresh_resolve_attempts = 0
+        # Поколение разбора ссылки. Растёт на каждом действии человека —
+        # ▶, ⏸, ×. Результат разбора, начатого в прошлом поколении,
+        # применять уже нельзя: за минуту ожидания VK задание могли
+        # приостановить или удалить.
+        self.resolve_generation = 0
+        self.resolve_attempt = 0
         # Почему понадобился свежий адрес: expired | network | range-ignored.
         # От этого зависит текст ошибки, если обновления не помогли.
         self.refresh_reason = ''
@@ -770,7 +794,7 @@ class DownloadJob(object):
 
     @property
     def needs_refresh(self):
-        """Прямая ссылка протухла: нужен свежий resolve на главном потоке."""
+        """Прямая ссылка протухла: нужен свежий resolve."""
         return self.status == ST_NEEDS_RESOLVE
 
     @property
@@ -900,11 +924,13 @@ class DownloadManager(object):
     """
     Разбор ссылки и сама загрузка разделены.
 
-    resolve() выполняется на ГЛАВНОМ потоке и только там: на устройстве
-    yt_dlp.extract_info внутри фонового потока валил Pythonista нативно,
-    тогда как тот же URL на главном потоке проходит. Рабочий поток
-    получает уже готовый прямой HTTPS-адрес и качает его обычным urllib —
-    yt-dlp он не импортирует и не вызывает вообще.
+    Разбор идёт в ЕДИНСТВЕННОМ потоке nox-resolver, строго по одному за
+    раз. На главном потоке его больше нет: журнал с iPhone показал, что
+    один SSL handshake VK на 60 секунд замораживал весь интерфейс, пока
+    соседняя загрузка спокойно качалась своим потоком.
+
+    Рабочий поток загрузки получает уже готовый прямой HTTPS-адрес и
+    качает его обычным urllib — yt-dlp он не импортирует и не вызывает.
     """
 
     def __init__(self):
@@ -923,6 +949,13 @@ class DownloadManager(object):
         # Последний сбой заполнения очереди, если он вообще был. Строка,
         # а не запись в файл: pump() зовут и рабочие потоки.
         self.pump_error = ''
+        # Разбор ссылок: СВОЯ очередь и РОВНО ОДИН последовательный поток.
+        # Слотов загрузки он не занимает — три файла качаются, пока он
+        # ждёт ответа VK.
+        self._resolve_queue = []      # [(job_id, generation), ...]
+        self._resolve_waiting = set()  # job.id, уже стоящие в очереди
+        self._resolve_active = None   # job.id, который сейчас в extract_info
+        self._resolver = None         # единственный поток nox-resolver
 
     def mark_dirty(self):
         self.dirty += 1
@@ -1081,7 +1114,8 @@ class DownloadManager(object):
         self.mark_dirty()
         nox_debug.job_event('job-added', job, url=url, quality=quality)
         nox_debug.job_event('queued', job)
-        # Поток здесь НЕ запускается: сначала разбор ссылки на главном потоке.
+        # Поток загрузки здесь НЕ запускается: сначала разбор ссылки,
+        # и им займётся отдельный поток nox-resolver.
         return True, 'Добавлено в очередь'
 
     # -- пауза, продолжение, удаление ------------------------------
@@ -1094,6 +1128,8 @@ class DownloadManager(object):
         if job is None or not job.can_pause:
             return False
         job.pause_requested = True
+        # Разбор, начатый до паузы, применять уже нельзя.
+        self.bump_generation(job)
         if job.status == ST_DOWNLOADING and self.worker_alive(job.id):
             # Останавливает рабочий поток сам цикл чтения: он закроет
             # соединение и файл штатно, .part не тронет.
@@ -1125,6 +1161,9 @@ class DownloadManager(object):
         job.pause_requested = False
         job.cancel_requested = False
         job.delete_requested = False
+        # Новое поколение: за свежей ссылкой пойдёт именно этот ▶, а
+        # результат прошлого разбора будет отброшен.
+        self.bump_generation(job)
         job.error = ''
         job.debug_error = ''
         job.error_stage = ''
@@ -1182,6 +1221,12 @@ class DownloadManager(object):
             self.jobs = [j for j in self.jobs if j.id != job_id]
             if len(self.jobs) != before:
                 self.revision += 1
+            # Из очереди разбора снятое задание убираем сразу; уже
+            # начатый для него extract_info прервать нельзя, но его
+            # результат будет отброшен как устаревший.
+            self._resolve_waiting.discard(job_id)
+            self._resolve_queue = [(i, g) for i, g in self._resolve_queue
+                                   if i != job_id]
         self.mark_dirty()
 
     def delete(self, job_id):
@@ -1200,6 +1245,7 @@ class DownloadManager(object):
         job.delete_requested = True
         job.cancel_requested = True
         job.pause_requested = False
+        self.bump_generation(job)
         nox_debug.job_event('delete-request', job)
         if job.status == ST_DOWNLOADING and self.worker_alive(job.id):
             job.status = ST_DELETING
@@ -1326,25 +1372,230 @@ class DownloadManager(object):
             self.mark_dirty()
         return restored
 
-    # -- РАЗБОР ССЫЛКИ: только главный поток ------------------------
+    # -- РАЗБОР ССЫЛКИ: своя очередь и ОДИН последовательный поток ---
+    def bump_generation(self, job):
+        """
+        Человек что-то сделал с заданием: ▶, ⏸ или ×. Всё, что разбор
+        принесёт из прошлого поколения, применять уже нельзя.
+        """
+        with self._lock:
+            job.resolve_generation += 1
+            self._resolve_waiting.discard(job.id)
+        return job.resolve_generation
+
+    def resolver_busy(self):
+        """Идёт ли сейчас extract_info. Слотом загрузки это не является."""
+        with self._lock:
+            return self._resolve_active is not None
+
+    def resolve_queue_length(self):
+        with self._lock:
+            return len(self._resolve_queue)
+
+    def enqueue_resolve(self, job):
+        """
+        Поставить задание в очередь разбора. Идемпотентно: одно задание
+        живёт в очереди максимум один раз, сколько бы тактов интерфейса
+        ни прошло.
+        """
+        if job is None:
+            return False
+        with self._lock:
+            if job.id in self._resolve_waiting \
+                    or self._resolve_active == job.id:
+                return False
+            self._resolve_waiting.add(job.id)
+            self._resolve_queue.append((job.id, job.resolve_generation))
+            depth = len(self._resolve_queue)
+        nox_debug.job_event('resolve-queued', job,
+                            generation=job.resolve_generation, queue=depth,
+                            part_size=self.part_size(job))
+        self._start_resolver()
+        return True
+
+    def resolve_pump(self):
+        """
+        Единственное, что делает интерфейс: складывает нуждающиеся в
+        разборе задания в очередь и сразу возвращает управление. Сеть
+        отсюда не трогается вообще — ни DNS, ни SSL, ни VK.
+        """
+        try:
+            for job in self.pending_resolve():
+                self.enqueue_resolve(job)
+            self._start_resolver()
+        except Exception as e:
+            self.pump_error = 'resolve_pump: %r' % (e,)
+
+    def _start_resolver(self):
+        """Поднять поток разбора, если очередь не пуста, а его нет."""
+        try:
+            with self._lock:
+                if not self._resolve_queue:
+                    return False
+                alive = False
+                try:
+                    alive = self._resolver is not None and \
+                        self._resolver.is_alive()
+                except Exception:
+                    alive = False
+                if alive:
+                    return False
+                t = threading.Thread(target=self._resolve_worker,
+                                     name='nox-resolver', daemon=True)
+                self._resolver = t
+                try:
+                    t.start()
+                except Exception as e:
+                    # Поток не создался: очередь остаётся на месте и
+                    # поедет на следующем такте интерфейса.
+                    self._resolver = None
+                    self.pump_error = 'resolver: %r' % (e,)
+                    return False
+            nox_debug.event('resolve-worker-start',
+                            queue=self.resolve_queue_length())
+            return True
+        except Exception as e:
+            self.pump_error = 'resolver: %r' % (e,)
+            return False
+
+    def _next_resolve(self):
+        """Следующее задание очереди разбора. Только под _lock."""
+        while self._resolve_queue:
+            job_id, generation = self._resolve_queue.pop(0)
+            self._resolve_waiting.discard(job_id)
+            return job_id, generation
+        return None, None
+
+    def _resolve_worker(self):
+        """
+        ЕДИНСТВЕННЫЙ поток разбора. Ни ui, ни console, ни файлов журнала:
+        только yt-dlp, поля DownloadJob и структуры менеджера под _lock.
+
+        Работает строго последовательно: одновременных extract_info не
+        бывает никогда, сколько бы заданий ни ждало. HTTP-потоки на это
+        время продолжают качать свои файлы.
+        """
+        try:
+            while True:
+                with self._lock:
+                    job_id, generation = self._next_resolve()
+                    if job_id is None:
+                        self._resolver = None
+                        break
+                    self._resolve_active = job_id
+                try:
+                    job = self.find(job_id)
+                    if job is None or self._stale_resolve(job, generation):
+                        nox_debug.event('resolve-stale-result', job_id=job_id,
+                                        generation=generation, reason='before')
+                        continue
+                    self.resolve(job, generation)
+                except Exception as e:
+                    self.pump_error = 'resolve_worker: %r' % (e,)
+                finally:
+                    with self._lock:
+                        self._resolve_active = None
+        finally:
+            with self._lock:
+                self._resolver = None
+                more = bool(self._resolve_queue)
+            nox_debug.event('resolve-worker-idle', queue=int(more))
+            if more:
+                # Пока мы выходили, интерфейс успел положить ещё одну
+                # ссылку: поднимаем поток заново, чтобы она не зависла.
+                self._start_resolver()
+
+    def _stale_resolve(self, job, generation):
+        """
+        Можно ли ещё применять результат разбора. Пока VK думал минуту,
+        задание могли удалить, приостановить или переспросить заново.
+        """
+        if generation is None:
+            return False
+        try:
+            if self.find(job.id) is None:
+                return True
+            if job.delete_requested or job.cancel_requested:
+                return True
+            if job.resolve_generation != generation:
+                return True
+            if job.status not in (ST_QUEUED, ST_PREPARING, ST_NEEDS_RESOLVE):
+                return True
+        except Exception:
+            return True
+        return False
+
+    def _resolve_wait(self, job, generation):
+        """Пауза между попытками разбора, прерываемая действием человека."""
+        slept = 0.0
+        while slept < RESOLVE_RETRY_PAUSE:
+            if self._stale_resolve(job, generation):
+                return False
+            time.sleep(0.2)
+            slept += 0.2
+        return not self._stale_resolve(job, generation)
+
     def resolve_opts(self):
         """Минимальный набор: разбор ничего не качает и не пишет."""
         return {
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
-            'socket_timeout': 60,
-            'retries': 5,
-            'fragment_retries': 5,
+            # Свой таймаут и всего два внутренних повтора: видимый
+            # слой повторов — наш, RESOLVE_RETRIES, и он прерывается
+            # паузой или удалением между попытками.
+            'socket_timeout': RESOLVE_SOCKET_TIMEOUT,
+            'retries': 2,
+            'fragment_retries': 2,
             'ffmpeg_location': NO_FFMPEG_PATH,
             'fixup': 'never',
         }
 
-    def resolve(self, job):
+    def _extract(self, job, generation):
+        """
+        extract_info с собственными повторами. None — результат больше не
+        нужен: задание сняли, приостановили или переспросили заново.
+
+        Повтор здесь свой, отдельный от повторов HTTP-передачи: metadata
+        и уже открытая передача файла отказывают по разным причинам.
+        """
+        last = None
+        for attempt in range(1, RESOLVE_RETRIES + 1):
+            if self._stale_resolve(job, generation):
+                return None
+            job.resolve_attempt = attempt
+            began = time.monotonic()
+            try:
+                mod = _load_yt_dlp()
+                if mod is None:
+                    raise RuntimeError(YTDLP_ERROR or 'Модуль yt-dlp не найден')
+                with mod.YoutubeDL(self.resolve_opts()) as ydl:
+                    return ydl.extract_info(job.url, download=False)
+            except Exception as e:
+                last = e
+                elapsed = round(time.monotonic() - began, 3)
+                if self._stale_resolve(job, generation):
+                    return None
+                if attempt >= RESOLVE_RETRIES or not is_network_error(e):
+                    raise
+                nox_debug.job_event('resolve-retry', job, attempt=attempt,
+                                    generation=generation, elapsed=elapsed,
+                                    exc=repr(e))
+                if not self._resolve_wait(job, generation):
+                    return None
+        if last is not None:
+            raise last
+        return None
+
+    def resolve(self, job, generation=None):
         """
         Единственный вызов yt-dlp во всём приложении, и всегда с
-        download=False. Может подморозить интерфейс на несколько секунд —
-        это осознанный размен на надёжность.
+        download=False.
+
+        Выполняется в потоке nox-resolver, а НЕ на главном. Раньше он шёл
+        синхронно из такта интерфейса, и один SSL handshake VK на
+        60 секунд замораживал всё приложение, пока соседняя загрузка
+        спокойно качалась своим потоком.
         """
         refreshing = job.needs_refresh
         if not (job.needs_resolve or refreshing):
@@ -1383,20 +1634,25 @@ class DownloadManager(object):
                                 part_size=self.part_size(job))
         job.status = ST_PREPARING
         job.set_stage('refresh-enter' if refreshing else 'resolve-enter')
+        job.resolve_attempt = 0
         self.tick += 1
+        # Запись только в память: файлы журнала пишет главный поток на
+        # своём такте, и теперь он для этого свободен.
         nox_debug.job_event('resolve-start', job, url=job.url,
                             quality=job.quality, refreshing=refreshing,
+                            generation=generation,
                             part_size=self.part_size(job))
-        # extract_info идёт на ГЛАВНОМ потоке и может замереть на десятки
-        # секунд. Одна короткая запись перед ним — единственный способ
-        # узнать потом, что приложение остановилось именно здесь.
-        nox_debug.flush(force=True)
         try:
-            mod = _load_yt_dlp()
-            if mod is None:
-                raise RuntimeError(YTDLP_ERROR or 'Модуль yt-dlp не найден')
-            with mod.YoutubeDL(self.resolve_opts()) as ydl:
-                info = ydl.extract_info(job.url, download=False)
+            info = self._extract(job, generation)
+            if info is None:
+                # Задание сняли, приостановили или переспросили заново,
+                # пока мы ждали ответа.
+                return False
+            # Проверка ДО первого присваивания: пока VK думал, задание
+            # могли удалить или переспросить заново, и записывать в него
+            # чужой адрес нельзя даже временно.
+            if self._stale_resolve(job, generation):
+                raise _StaleResolve()
             job.set_stage('resolve-returned')
             fmt = pick_direct_format(info, job.quality)
             if not fmt:
@@ -1433,6 +1689,8 @@ class DownloadManager(object):
                 job.filename = target_path_for(
                     job.title or entry.get('id') or 'video',
                     entry.get('id'), job.resolved_ext)
+            if self._stale_resolve(job, generation):
+                raise _StaleResolve()
             job.set_stage('format-selected')
             job.status = ST_QUEUED_DOWNLOAD
             job.set_stage('http-queued')
@@ -1444,6 +1702,10 @@ class DownloadManager(object):
                                     job.resolved_url))
             nox_debug.job_event('queued-download', job,
                                 filename=os.path.basename(job.filename or ''))
+        except _StaleResolve:
+            nox_debug.event('resolve-stale-result', job_id=job.id,
+                            generation=generation, reason='after')
+            return False
         except Exception as e:
             job.error_stage = job.debug_stage
             job.set_stage('exception')
@@ -1653,9 +1915,9 @@ class DownloadManager(object):
                 try:
                     done = self._transfer(job, part, state)
                 except DirectUrlExpired as e:
-                    # Ссылка протухла. Лечит это только новый resolve, а он
-                    # живёт на главном потоке: yt-dlp здесь по-прежнему
-                    # не импортируется и не вызывается.
+                    # Ссылка протухла. Лечит это только новый resolve, а
+                    # им занимается поток nox-resolver: yt-dlp здесь
+                    # по-прежнему не импортируется и не вызывается.
                     refresh = 'expired'
                     last_error = None
                     self._note_refresh(job, 'expired: %r' % (e,))

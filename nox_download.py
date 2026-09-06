@@ -729,6 +729,21 @@ MERGE_CHUNK = 1024 * 1024
 # успела бы открыть сессию раньше, чем разобралась вторая.
 NATIVE_BATCH_GRACE = 1.2
 
+# Сколько секунд задаче даётся на ПЕРВЫЙ байт после удавшегося resume().
+#
+# На устройстве случилось ровно это: сессия создана, задача создана,
+# resume() прошёл, ошибок нет — и байтов тоже нет, минутами. Так висеть
+# загрузка не имеет права. По истечении срока задача с НУЛЁМ принятых
+# байт снимается и то же самое задание уходит на прежний HTTP-путь, с тем
+# же прямым адресом и тем же .part.
+NATIVE_ZERO_START_TIMEOUT = 25.0
+
+# Как часто писать в журнал о задаче, у которой ничего не изменилось.
+# Раньше строчка native-task-progress шла каждые SPEED_WINDOW, и журнал
+# заполнялся повторами received=0. Теперь строчка пишется, когда байты
+# реально сдвинулись, и не чаще этого срока — когда нет.
+NATIVE_PROGRESS_HEARTBEAT = 20.0
+
 # Параметры прямой HTTP-загрузки.
 HTTP_CHUNK = 256 * 1024
 HTTP_TIMEOUT = 60
@@ -1884,6 +1899,11 @@ class DownloadManager(object):
             if ctx is None:
                 continue
             if ctx.state == native.ST_RUNNING:
+                # Сначала спрашиваем систему, потом считаем прогресс.
+                # Колбэк может задержаться, а счётчики задачи — нет.
+                snap = self._native_snapshot(job)
+                if self._native_stalled(job, ctx, snap):
+                    continue
                 self._native_progress(job, ctx)
             elif ctx.state == native.ST_DONE:
                 self._native_done(job, ctx)
@@ -1977,6 +1997,121 @@ class DownloadManager(object):
             self.tick += 1
         return released, lost_total
 
+    def _native_snapshot(self, job):
+        """Показания самой системы об этой задаче. Никогда не падает."""
+        try:
+            return self.native.snapshot(job.id) or {}
+        except Exception as e:
+            self.native_error = repr(e)
+            return {}
+
+    def _native_stalled(self, job, ctx, snap):
+        """
+        Задача не начала передачу. Разобрать случай и, если надо, увести
+        задание на прежний HTTP-путь.
+
+        Возвращает True, если задание с нативного пути ушло и считать ему
+        прогресс на этом такте больше не нужно.
+
+        Правило, ради которого всё и делается: у любого задания в
+        состоянии «скачивается» либо растут байты, либо приходит
+        осмысленная ошибка, либо через NATIVE_ZERO_START_TIMEOUT оно
+        оказывается на HTTP. Вечного «Скачивается · 0 B» не бывает.
+        """
+        if job.status in (ST_PAUSED, ST_DELETING, ST_ERROR):
+            return False
+        if job.cancel_requested or job.delete_requested:
+            return False
+        # Ответ с негодным адресом ждать 25 секунд незачем: для него уже
+        # есть свой путь — задание пойдёт за свежей ссылкой.
+        code = int(snap.get('http_status') or ctx.http_status or 0)
+        if code in EXPIRED_CODES:
+            try:
+                self.native.cancel(job.id)
+            except Exception as e:
+                self.native_error = repr(e)
+            ctx.http_status = code
+            self._native_failed(job, ctx)
+            return True
+        got = max(int(ctx.received or 0), int(snap.get('received') or 0))
+        if got > 0 or ctx.segment_path:
+            # Байты пошли. Сторож на этом заканчивается навсегда: снимать
+            # задачу, которая уже что-то приняла, нельзя — принятое лежит
+            # во временном файле системы и при отмене пропадёт.
+            return False
+        state = str(snap.get('task_state') or '')
+        if state == 'suspended':
+            return False                # задача на паузе, ждать нечего
+        elapsed = 0.0
+        if ctx.resumed_at:
+            elapsed = max(0.0, time.monotonic() - ctx.resumed_at)
+        # Задача уже завершилась, а файла нет и байт нет: ждать нечего,
+        # это тот же управляемый отказ, только без ожидания.
+        finished_empty = state == 'completed'
+        if not finished_empty and elapsed < NATIVE_ZERO_START_TIMEOUT:
+            if elapsed >= SPEED_WINDOW and not ctx.waiting_logged:
+                # Одно сообщение на задачу, а не строчка на каждом такте.
+                if self.native.mark_waiting_logged(job.id):
+                    nox_debug.job_event(
+                        'native-task-waiting', job,
+                        task_id=snap.get('task_id'),
+                        task_state=state or None,
+                        has_response=bool(snap.get('has_response')),
+                        elapsed=round(elapsed, 1))
+            return False
+        self._native_zero_fallback(job, ctx, snap, elapsed, finished_empty)
+        return True
+
+    def _native_zero_fallback(self, job, ctx, snap, elapsed, finished_empty):
+        """
+        Снять пустую нативную задачу и продолжить прежним транспортом.
+
+        Терять при этом нечего по построению: сюда попадают только задачи
+        с НУЛЁМ принятых байт. Ни адрес, ни заголовки, ни имя файла, ни
+        .part, ни метаданные не трогаются — HTTP-путь продолжит с того же
+        места тем же самым прямым адресом. yt-dlp не зовётся: разбирать
+        нечего, всё уже разобрано.
+
+        Остальные нативные задачи этой пачки не трогаются вовсе. Если
+        снятая была последней, пачку закроет обычный
+        _close_batch_if_possible на этом же такте.
+        """
+        nox_debug.job_event(
+            'native-zero-start-timeout', job,
+            task_id=snap.get('task_id'), elapsed=round(elapsed, 1),
+            task_state=snap.get('task_state') or None,
+            http_status=int(snap.get('http_status') or 0),
+            has_response=bool(snap.get('has_response')),
+            native_headers=','.join(
+                native.safe_headers(job.resolved_headers)),
+            resolved_host=nox_debug._host_of(job.resolved_url),
+            reason='completed-empty' if finished_empty else 'no-bytes')
+        try:
+            self.native.cancel(job.id)
+        except Exception as e:
+            self.native_error = repr(e)
+        self.native.forget(job.id)
+        self._native_speed.pop(job.id, None)
+        job.native_base = 0
+        job.native_segment = ''
+        job.speed = None
+        job.eta = None
+        job.downloaded_bytes = self.part_size(job)
+        job.transport = TRANSPORT_HTTP
+        job.status = ST_QUEUED_DOWNLOAD
+        job.set_stage('native-zero-fallback-http')
+        # Отдельная запись уже ПОСЛЕ переключения: по ней видно, что
+        # задание встало в очередь именно старого транспорта. Дальше его
+        # ведёт обычный HTTP-путь, и стадия сменится на его собственную.
+        nox_debug.job_event('native-zero-fallback-http', job,
+                            transport=job.transport,
+                            part_size=job.downloaded_bytes)
+        with self._lock:
+            self.revision += 1
+        self.tick += 1
+        self.mark_dirty()
+        self.pump()
+
     def _native_progress(self, job, ctx):
         """Байты, скорость и ETA — теми же полями, что и у HTTP-пути."""
         if job.status in (ST_PAUSED, ST_DELETING, ST_ERROR):
@@ -1985,9 +2120,10 @@ class DownloadManager(object):
         if ctx.total:
             job.total_bytes = ctx.total
             job.exact_total = ctx.total
-        state = self._native_speed.setdefault(
-            job.id, {'bytes': got, 'time': time.monotonic()})
         now = time.monotonic()
+        state = self._native_speed.setdefault(
+            job.id, {'bytes': got, 'time': now, 'logged': got,
+                     'logged_at': now})
         delta = now - state['time']
         if got != job.downloaded_bytes:
             job.downloaded_bytes = got
@@ -2007,9 +2143,17 @@ class DownloadManager(object):
                 job.eta = None
             state['bytes'] = got
             state['time'] = now
-            nox_debug.job_event('native-task-progress', job,
-                                received=ctx.received,
-                                base_offset=ctx.base_offset, total=total)
+            # В журнал строчка идёт, когда байты реально сдвинулись, и
+            # редким пульсом — когда нет. Повторов received=0 каждые
+            # полторы секунды больше не будет.
+            moved = got != state.get('logged')
+            quiet = now - float(state.get('logged_at') or 0.0)
+            if moved or quiet >= NATIVE_PROGRESS_HEARTBEAT:
+                state['logged'] = got
+                state['logged_at'] = now
+                nox_debug.job_event('native-task-progress', job,
+                                    received=ctx.received,
+                                    base_offset=ctx.base_offset, total=total)
 
     def _native_done(self, job, ctx):
         """

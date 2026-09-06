@@ -74,6 +74,46 @@ STAGING_DIRNAME = 'native_staging'
 # делать, принимает nox_download; здесь только фиксируется факт.
 OK_CODES = (200, 206)
 
+# Единственные заголовки, которые уходят в NSURLSession.
+#
+# Список не выдуман: ровно с ним фоновый эксперимент на этом же iPhone
+# реально качал файл — и с Home Screen, и с заблокированным экраном, и
+# из другого приложения. Рабочий же NOX отправлял всё, что вернул
+# yt-dlp, вместе с Sec-Fetch-Mode и прочими браузерными полями, и задача
+# вставала на нуле байт: соединение создавалось, а данные не шли.
+#
+# Транспортные заголовки (Connection, Host, Content-Length,
+# Transfer-Encoding) сюда не входят намеренно: их ставит сама
+# NSURLSession, и чужая копия ей только мешает.
+#
+# Это правило ТОЛЬКО для нативного запроса. Прежний urllib-путь
+# по-прежнему шлёт полный набор заголовков и не меняется.
+NATIVE_HEADER_WHITELIST = ('User-Agent', 'Referer', 'Origin', 'Cookie',
+                           'Accept', 'Accept-Language')
+
+# Человеческие имена состояний NSURLSessionTask.
+TASK_STATE_NAMES = {0: 'running', 1: 'suspended', 2: 'canceling',
+                    3: 'completed'}
+
+
+def safe_headers(headers):
+    """
+    Оставить из набора yt-dlp только те заголовки, что доказанно ходят.
+
+    Сравнение имён без учёта регистра, наружу идёт каноническое имя из
+    белого списка. Порядок — как в списке: так набор получается один и
+    тот же при любом порядке словаря.
+    """
+    out = {}
+    if not isinstance(headers, dict):
+        return out
+    for name in NATIVE_HEADER_WHITELIST:
+        for got, value in headers.items():
+            if str(got).lower() == name.lower() and value:
+                out[name] = str(value)
+                break
+    return out
+
 
 # =====================================================================
 #  ЛЕНИВЫЙ objc_util
@@ -215,7 +255,8 @@ class NativeContext(object):
 
     __slots__ = ('key', 'job_id', 'base_offset', 'received', 'expected',
                  'http_status', 'state', 'segment_path', 'error',
-                 'range_ignored', 'updated', 'created')
+                 'range_ignored', 'updated', 'created', 'resumed_at',
+                 'has_response', 'task_state', 'waiting_logged')
 
     def __init__(self, key, job_id, base_offset):
         self.key = key
@@ -230,6 +271,14 @@ class NativeContext(object):
         self.range_ignored = False
         self.created = time.time()
         self.updated = time.time()
+        # Момент удавшегося resume(). От него, а не от создания задачи,
+        # считается «сколько уже стоим на нуле»: пока задача не запущена,
+        # ждать от неё байт не с чего.
+        self.resumed_at = 0.0
+        # Что говорит о задаче САМА система. Заполняется snapshot().
+        self.has_response = False
+        self.task_state = ''
+        self.waiting_logged = False
 
     def copy(self):
         out = NativeContext(self.key, self.job_id, self.base_offset)
@@ -598,20 +647,30 @@ class NativeTransport(object):
             req = objc_util.ObjCClass('NSMutableURLRequest').requestWithURL_(
                 objc_util.nsurl(str(url)))
             req.setHTTPMethod_(_ns('GET'))
+            # В запрос идёт только белый список — тот самый набор, с
+            # которым фоновый эксперимент на этом устройстве качал файл.
+            allowed = safe_headers(headers)
+            dropped = sorted(str(k) for k in (headers or {})
+                             if str(k).lower() not in
+                             [n.lower() for n in allowed])
             sent = []
-            for name, value in (headers or {}).items():
+            for name, value in allowed.items():
                 try:
                     req.setValue_forHTTPHeaderField_(_ns(value), _ns(name))
                     sent.append(str(name))
                 except Exception:
                     continue
-            # Без сжатия: границы Range и размер на диске обязаны
-            # считаться в одних и тех же байтах.
-            req.setValue_forHTTPHeaderField_(_ns('identity'),
-                                             _ns('Accept-Encoding'))
             if offset > 0:
+                # Продолжение: границы Range и размер на диске обязаны
+                # считаться в одних и тех же байтах, поэтому сжатие
+                # запрещается явно.
+                req.setValue_forHTTPHeaderField_(_ns('identity'),
+                                                 _ns('Accept-Encoding'))
                 req.setValue_forHTTPHeaderField_(
                     _ns('bytes=%d-' % offset), _ns('Range'))
+            # Для загрузки с нуля Accept-Encoding не ставится вовсе:
+            # именно так выглядел проверенный на устройстве запрос, и
+            # придумывать ему отличия незачем.
         except Exception as e:
             _emit('native-task-error', job_id=job_id, stage='request',
                   exc=repr(e))
@@ -642,11 +701,13 @@ class NativeTransport(object):
             self._by_job[job_id] = key
         _emit('native-task-created', job_id=job_id, task_id=tid,
               session=session_id, base_offset=offset,
-              headers=','.join(sent), ranged=bool(offset))
+              headers=','.join(sent), dropped=','.join(dropped) or None,
+              ranged=bool(offset))
         try:
             task.resume()
             with self._lock:
                 ctx.state = ST_RUNNING
+                ctx.resumed_at = time.monotonic()
                 ctx.updated = time.time()
         except Exception as e:
             _emit('native-task-error', job_id=job_id, stage='resume',
@@ -686,6 +747,9 @@ class NativeTransport(object):
             ctx = self._ctx.get(key)
             if ctx is not None:
                 ctx.state = ST_RUNNING
+                # Отсчёт «стоим на нуле» начинается заново с каждого
+                # запуска: пауза в этот срок не входит.
+                ctx.resumed_at = time.monotonic()
                 ctx.updated = time.time()
         _emit('native-task-resume', job_id=job_id, task_id=key[1])
         return True, ''
@@ -710,6 +774,97 @@ class NativeTransport(object):
                 ctx.updated = time.time()
         _emit('native-task-cancel', job_id=job_id, task_id=key[1])
         return True, ''
+
+    def snapshot(self, job_id, absorb=True):
+        """
+        Спросить о задаче САМУ систему, а не только колбэк.
+
+        Зачем. До сих пор единственным источником прогресса был делегат:
+        пока не пришёл didWriteData, задание стояло на нуле. На устройстве
+        это и вышло наружу — задача создана, resume() прошёл, а в журнале
+        received=0 раз за разом, и понять, идут ли байты вообще, было
+        нечем. У NSURLSessionTask есть собственные счётчики, и они
+        отвечают независимо от того, доехал ли колбэк.
+
+        Наружу отдаются ТОЛЬКО обычные значения Python: ни одного объекта
+        ObjC отсюда не уходит. Зовёт метод главный поток на своём такте,
+        своих потоков он не заводит.
+
+        absorb=True — заодно подтянуть в контекст всё, что система уже
+        насчитала. Значения только растут: показание системы никогда не
+        уменьшает то, что уже принёс колбэк.
+        """
+        key, task = self._task_of(job_id)
+        if task is None:
+            return {}
+        out = {'task_id': key[1], 'task_state': '', 'received': 0,
+               'expected': 0, 'http_status': 0, 'has_response': False,
+               'error_text': ''}
+        try:
+            got = int(task.countOfBytesReceived())
+            out['received'] = got if got > 0 else 0
+        except Exception:
+            pass
+        try:
+            # -1 (NSURLSessionTransferSizeUnknown) означает «размер
+            # неизвестен», и выдавать его за число байт нельзя.
+            exp = int(task.countOfBytesExpectedToReceive())
+            out['expected'] = exp if exp > 0 else 0
+        except Exception:
+            pass
+        try:
+            out['task_state'] = TASK_STATE_NAMES.get(int(task.state()),
+                                                     str(task.state()))
+        except Exception:
+            pass
+        try:
+            resp = task.response()
+            if resp is not None:
+                out['has_response'] = True
+                try:
+                    code = int(resp.statusCode())
+                    out['http_status'] = code if code > 0 else 0
+                except Exception:
+                    pass                # не HTTP-ответ: кода просто нет
+        except Exception:
+            pass
+        try:
+            err = task.error()
+            if err is not None:
+                out['error_text'] = str(err.localizedDescription())
+        except Exception:
+            pass
+        if absorb:
+            with self._lock:
+                ctx = self._ctx.get(key)
+                if ctx is not None:
+                    if out['received'] > int(ctx.received or 0):
+                        ctx.received = out['received']
+                        ctx.updated = time.time()
+                    if out['expected'] > int(ctx.expected or 0):
+                        ctx.expected = out['expected']
+                    if out['http_status'] and not ctx.http_status:
+                        ctx.http_status = out['http_status']
+                    ctx.has_response = bool(out['has_response'])
+                    ctx.task_state = out['task_state']
+        return out
+
+    def mark_waiting_logged(self, job_id):
+        """
+        Отметить, что об ожидании первых байт уже написано.
+
+        Нужно ровно для того, чтобы не писать об этом на каждом такте:
+        одно сообщение на задачу, а дальше молча.
+        """
+        key, _task = self._task_of(job_id)
+        if key is None:
+            return False
+        with self._lock:
+            ctx = self._ctx.get(key)
+            if ctx is None or ctx.waiting_logged:
+                return False
+            ctx.waiting_logged = True
+        return True
 
     def forget(self, job_id):
         """Убрать задание из реестра. Поздние колбэки станут stale."""

@@ -1515,6 +1515,32 @@ CTRL_SIZE = 40.0
 JOB_CARD_H = 100.0
 
 
+def job_bar_state(job):
+    """
+    Что показывает полоса задания: (значение, двигать ли бегунок).
+
+    Бегунок разрешён ровно трём состояниям: подготовка, обработка и
+    загрузка с ещё неизвестным размером. Пауза, очередь, ошибка,
+    остановка и ожидание свежей ссылки полосу НЕ анимируют: бегущая
+    полоса на приостановленной карточке читается как идущая загрузка,
+    хотя ничего не качается.
+
+    Одно и то же правило используют и сборка карточки, и её обновление
+    на каждом такте — раньше обновление анимировало всё, у чего просто
+    неизвестен процент.
+    """
+    value = job.percent
+    if job.status == ST_FINISHED:
+        return 1.0, False
+    if job.status in (ST_PREPARING, ST_PROCESSING):
+        return None, True
+    if job.status == ST_DOWNLOADING:
+        return (value, False) if value is not None else (None, True)
+    # Известную долю приостановленное задание показывает как есть,
+    # неизвестную — пустой дорожкой. В обоих случаях полоса неподвижна.
+    return (value if value is not None else 0.0), False
+
+
 def job_card(screen, w, y, temp, job):
     """
     ЕДИНАЯ карточка загрузки для «Главной» и «Загрузок» — композиция с
@@ -1563,16 +1589,10 @@ def job_card(screen, w, y, temp, job):
         indeterminate = False
     else:
         sub, detail = job.sub_line(), job.detail_line()
-        bar_value = job.percent
         sub_col = DANGER if err else (ACCENT_LIGHT
                                       if job.status == ST_DOWNLOADING
                                       else TEXT_SECONDARY)
-        indeterminate = (job.status in (ST_PREPARING, ST_PROCESSING) or
-                         (job.status == ST_DOWNLOADING and bar_value is None))
-        if job.status == ST_FINISHED:
-            bar_value = 1.0
-        elif job.status in (ST_ERROR, ST_CANCELLED) and bar_value is None:
-            bar_value = 0.0
+        bar_value, indeterminate = job_bar_state(job)
 
     sl = make_label(sub, (F_REG, 12), sub_col, frame=(left, 33, text_w, 16))
     card.add_subview(sl)
@@ -2346,11 +2366,9 @@ class Screen(ui.View):
                     toggle_icon.set_icon(name)
         bar = row.get('bar')
         if bar is not None:
-            value = job.percent
-            if value is None and job.status in (ST_ERROR, ST_CANCELLED):
-                value = 0.0
+            value, moving = job_bar_state(job)
             bar.set_value(value)
-            if value is None:
+            if moving:
                 # Бегунок двигает общий такт приложения, а не свой таймер.
                 bar.set_phase(phase)
 

@@ -503,6 +503,16 @@ class DirectUrlExpired(Exception):
     """Прямая ссылка перестала работать. Обычное исключение, не yt-dlp."""
     pass
 
+
+class RangeNotSupported(Exception):
+    """
+    На запрос с Range сервер ответил не 206: продолжить по этому адресу
+    нельзя. Файл при этом целый, и обрезать его нельзя тем более —
+    задание уходит за свежим прямым адресом.
+    """
+    pass
+
+
 # Сколько видео реально качается ОДНОВРЕМЕННО. Очередь при этом не
 # ограничена: остальные задания ждут свободного слота.
 MAX_CONCURRENT_DOWNLOADS = 3
@@ -513,6 +523,12 @@ HTTP_TIMEOUT = 60
 HTTP_RETRIES = 6
 HTTP_RETRY_PAUSE = 3.0
 SPEED_WINDOW = 1.2          # окно усреднения скорости, секунды
+
+# Сколько попыток ПОДРЯД должны не дать ни одного байта, чтобы прямой
+# адрес был признан негодным и задание пошло за свежим. Обрыв, после
+# которого файл всё-таки вырос, адрес негодным не делает: такое лечится
+# обычной докачкой через Range, а не новым разбором ссылки.
+URL_DEAD_STRIKES = 2
 
 # Протоколы, которые наш простой загрузчик тянуть не умеет: они собираются
 # из сегментов и потребовали бы ffmpeg.
@@ -689,6 +705,15 @@ class DownloadJob(object):
         self.delete_requested = False
         # Сколько раз уже обновляли протухшую прямую ссылку.
         self.refresh_resolve_attempts = 0
+        # Почему понадобился свежий адрес: expired | network | range-ignored.
+        # От этого зависит текст ошибки, если обновления не помогли.
+        self.refresh_reason = ''
+        # Разбор ПОСЛЕДНЕЙ HTTP-попытки: только строка в памяти, никакого
+        # своего файла у рабочего потока нет. Показывается в карточке при
+        # ошибке и уходит в download_debug.txt главным потоком.
+        self.http_diag = ''
+        self.attempt_no = 0        # сколько попыток сделал текущий worker
+        self.last_read = 0         # байт, полученных последней попыткой
         self.restored = False
 
     def set_stage(self, stage):
@@ -825,7 +850,8 @@ class DownloadJob(object):
         """
         if self.status != ST_ERROR:
             return ''
-        parts = [p for p in (self.error_stage, self.debug_error) if p]
+        parts = [p for p in (self.error_stage, self.http_diag,
+                             self.debug_error) if p]
         return ' · '.join(parts)
 
     def detail_line(self):
@@ -1091,6 +1117,8 @@ class DownloadManager(object):
         job.eta = None
         job.finished_at = None
         job.refresh_resolve_attempts = 0
+        job.refresh_reason = ''
+        job.http_diag = ''
         # Ссылку получаем заново; имя файла и .part сохраняем как есть.
         job.resolved_url = ''
         job.exact_total = None
@@ -1307,10 +1335,19 @@ class DownloadManager(object):
             job.refresh_resolve_attempts += 1
             if job.refresh_resolve_attempts > MAX_URL_REFRESH:
                 job.status = ST_ERROR
-                job.error = 'Не удалось обновить ссылку'
-                job.error_stage = 'refresh-give-up'
-                job.debug_error = ('refresh: %d попыток подряд не дали рабочую '
-                                   'ссылку' % (job.refresh_resolve_attempts - 1))
+                if job.refresh_reason == 'range-ignored':
+                    # Честный диагноз вместо «оборвалось»: свежие адреса
+                    # один за другим отказываются продолжать с середины.
+                    job.error = 'Сервер не поддерживает продолжение этой загрузки'
+                    job.error_stage = 'range-give-up'
+                else:
+                    job.error = 'Не удалось обновить ссылку'
+                    job.error_stage = 'refresh-give-up'
+                job.debug_error = ' | '.join([p for p in (
+                    job.http_diag,
+                    'refresh(%s): %d попыток подряд не дали рабочую ссылку'
+                    % (job.refresh_reason or '-',
+                       job.refresh_resolve_attempts - 1)) if p])
                 job.finished_at = time.time()
                 with self._lock:
                     self.revision += 1
@@ -1497,6 +1534,15 @@ class DownloadManager(object):
                 continue
         return False
 
+    @staticmethod
+    def _note_refresh(job, detail):
+        """
+        Почему задание идёт за свежим адресом. Строка в памяти: рабочий
+        поток к файлам журнала не ходит, в download_debug.txt её позже
+        перенесёт главный. Не накапливается — интересна последняя попытка.
+        """
+        job.debug_error = ' | '.join([p for p in (job.http_diag, detail) if p])
+
     def _note_progress(self, job, state, chunk_len):
         """Скорость по окну ~1.2 c, а не по одному блоку."""
         job.downloaded_bytes += chunk_len
@@ -1528,12 +1574,14 @@ class DownloadManager(object):
         part = job.part_path
         state = {'bytes': 0, 'time': time.monotonic()}
         last_error = None
-        expired = False
+        refresh = ''          # почему нужен свежий прямой адрес
+        strikes = 0           # попыток подряд, не давших ни одного байта
+        left = HTTP_RETRIES   # бюджет попыток по ТЕКУЩЕМУ адресу
         try:
-            for attempt in range(1, HTTP_RETRIES + 1):
+            while left > 0:
                 if job.cancel_requested or job.pause_requested:
                     break
-                if attempt > 1:
+                if job.attempt_no > 0:
                     job.set_stage('http-retry')
                     self.tick += 1
                     slept = 0.0
@@ -1543,32 +1591,63 @@ class DownloadManager(object):
                         slept += 0.2
                     if job.cancel_requested or job.pause_requested:
                         break
+                left -= 1
                 try:
                     done = self._transfer(job, part, state)
                 except DirectUrlExpired as e:
                     # Ссылка протухла. Лечит это только новый resolve, а он
                     # живёт на главном потоке: yt-dlp здесь по-прежнему
                     # не импортируется и не вызывается.
-                    expired = True
+                    refresh = 'expired'
                     last_error = None
-                    detail = 'expired: %r' % (e,)
-                    job.debug_error = ((job.debug_error + ' | ' + detail)
-                                       if job.debug_error else detail)
+                    self._note_refresh(job, 'expired: %r' % (e,))
+                    break
+                except RangeNotSupported as e:
+                    # Докачку по этому адресу не принимают. .part цел,
+                    # обрезать его нельзя — идём за свежим адресом.
+                    refresh = 'range-ignored'
+                    last_error = None
+                    self._note_refresh(job, 'range-ignored: %r' % (e,))
                     break
                 except Exception as e:
                     last_error = e
                     if job.cancel_requested or job.pause_requested:
                         break
-                    if not is_network_error(e) and attempt >= 2:
-                        raise
+                    if not is_network_error(e):
+                        if job.attempt_no >= 2:
+                            raise
+                        continue
+                    if isinstance(e, urllib.error.HTTPError):
+                        # 429 и 5xx: адрес жив, сервер занят или прилёг.
+                        # Это лечится временем, а не новым разбором ссылки.
+                        continue
+                    if job.last_read > 0:
+                        # Связь рвётся, но адрес отдаёт байты: лечится
+                        # докачкой. Бюджет попыток начинается заново —
+                        # иначе многочасовая загрузка не пережила бы шести
+                        # обрывов за всё время.
+                        strikes = 0
+                        left = HTTP_RETRIES
+                        continue
+                    strikes += 1
+                    if strikes >= URL_DEAD_STRIKES:
+                        # Адрес подряд не дал ни байта: дальше его мучить
+                        # бессмысленно, нужен свежий.
+                        refresh = 'network'
+                        last_error = None
+                        self._note_refresh(job, 'network x%d: %r' % (strikes, e))
+                        break
                     continue
+                strikes = 0
                 if done:
                     last_error = None
                     break
             if job.delete_requested:
                 job.set_stage('deleting')            # .part уберём в finally
-            elif expired:
+            elif refresh:
+                # .part НЕ трогаем: свежий адрес продолжит его через Range.
                 job.resolved_url = ''
+                job.refresh_reason = refresh
                 job.status = ST_NEEDS_RESOLVE
                 job.set_stage('needs-resolve')
             elif job.pause_requested:
@@ -1597,9 +1676,8 @@ class DownloadManager(object):
                 job.set_stage('exception')
                 job.status = ST_ERROR
                 job.error = short_error(e)
-                detail = 'http: %r' % (e,)
-                job.debug_error = ((job.debug_error + ' | ' + detail)
-                                   if job.debug_error else detail)
+                job.debug_error = ' | '.join(
+                    [p for p in (job.http_diag, 'http: %r' % (e,)) if p])
         finally:
             if job.delete_requested:
                 # Соединение закрыто, файл закрыт — только теперь удаление
@@ -1643,20 +1721,47 @@ class DownloadManager(object):
     def _transfer(self, job, part, state):
         """
         Одна попытка передачи. Возвращает True, если файл дошёл до конца.
-        Докачивает через Range; если сервер Range проигнорировал — файл
-        начинается заново, чтобы не получить битый MP4.
+
+        Докачивает через Range. Если на запрос с Range сервер ответил не
+        206 — поднимаем RangeNotSupported и НЕ трогаем файл: раньше .part
+        в этом месте обрезался до нуля, и загрузка уходила в цикл
+        «256 КБ -> обрыв -> обрезали -> 256 КБ», из которого выход был
+        только через ошибку.
+
+        Разбор попытки складывается в job.http_diag — строку в памяти.
+        Своего файла журнала у рабочего потока нет.
         """
         job.set_stage('http-opening')
+        job.attempt_no += 1
+        job.last_read = 0
         offset = self.part_size(job)
         headers = dict(job.resolved_headers or {})
+        # Заголовки формата от yt-dlp (User-Agent, Referer, Origin) идут
+        # как есть и на первой попытке, и на любой докачке.
         headers.setdefault('User-Agent', 'NOX/1.0')
+        # Без сжатия: и границы Range, и Content-Length должны считаться в
+        # тех же байтах, которые лягут на диск и будут сверены перед
+        # переименованием.
+        headers.setdefault('Accept-Encoding', 'identity')
+        rng = ''
         if offset > 0:
-            headers['Range'] = 'bytes=%d-' % offset
+            rng = 'bytes=%d-' % offset
+            headers['Range'] = rng
+        diag = {'attempt': job.attempt_no,
+                'refresh': job.refresh_resolve_attempts,
+                'offset': offset, 'range': rng or '-',
+                'host': _host_of(job.resolved_url),
+                'code': '-', 'len': '-', 'crange': '-', 'aranges': '-',
+                'read': 0, 'ignored': False, 'err': '-'}
+        job.http_diag = _diag_text(diag)
         req = urllib.request.Request(job.resolved_url, headers=headers)
         try:
             resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
         except urllib.error.HTTPError as e:
             code = _int_or_none(getattr(e, 'code', None)) or 0
+            diag['code'] = code
+            diag['err'] = repr(e)
+            job.http_diag = _diag_text(diag)
             if code == 416:
                 return self._handle_416(job, offset, e)
             if code in EXPIRED_CODES:
@@ -1664,11 +1769,26 @@ class DownloadManager(object):
                 # их лечит обычный повтор, а не новый разбор ссылки.
                 raise DirectUrlExpired('HTTP %d' % code)
             raise
+        except Exception as e:
+            diag['err'] = repr(e)
+            job.http_diag = _diag_text(diag)
+            raise
         try:
             code = resp.getcode()
+            diag['code'] = code
+            diag['len'] = resp.headers.get('Content-Length') or '-'
+            diag['crange'] = resp.headers.get('Content-Range') or '-'
+            diag['aranges'] = resp.headers.get('Accept-Ranges') or '-'
+            job.http_diag = _diag_text(diag)
+            if offset > 0 and code != 206:
+                # Докачку не приняли. Существующий .part остаётся целым:
+                # свежий прямой адрес продолжит его с того же места.
+                diag['ignored'] = True
+                job.http_diag = _diag_text(diag)
+                raise RangeNotSupported(
+                    'на Range получен ответ %s вместо 206' % code)
             mode = 'wb'
-            total = None
-            if offset > 0 and code == 206:
+            if offset > 0:
                 mode = 'ab'
                 total = _total_from_content_range(
                     resp.headers.get('Content-Range'))
@@ -1676,9 +1796,6 @@ class DownloadManager(object):
                     length = _int_or_none(resp.headers.get('Content-Length'))
                     total = (offset + length) if length else None
             else:
-                # 200 на запрос с Range означает, что сервер его не понял:
-                # дописывать к старому файлу нельзя, начинаем заново.
-                offset = 0
                 total = _int_or_none(resp.headers.get('Content-Length'))
             job.downloaded_bytes = offset
             if total:
@@ -1701,8 +1818,18 @@ class DownloadManager(object):
                     if not chunk:
                         break
                     f.write(chunk)
+                    job.last_read += len(chunk)
+                    if job.refresh_resolve_attempts:
+                        # Свежий адрес отдаёт байты — значит, обновление
+                        # ссылки сработало, и счётчик обновлений начинается
+                        # заново. Иначе многочасовая загрузка умирала бы
+                        # после третьей смены адреса CDN, хотя каждая смена
+                        # была успешной.
+                        job.refresh_resolve_attempts = 0
                     self._note_progress(job, state, len(chunk))
         finally:
+            diag['read'] = job.last_read
+            job.http_diag = _diag_text(diag)
             try:
                 resp.close()
             except Exception:
@@ -1741,6 +1868,23 @@ class DownloadManager(object):
         job.set_stage('http-416-restart')
         self.tick += 1
         raise IOError('сервер отклонил докачку (416), файл будет скачан заново')
+
+
+def _host_of(url):
+    """Только хост прямой ссылки: сама она длинная и с подписью."""
+    m = re.match(r'[a-zA-Z][\w+.-]*://([^/?#]+)', str(url or ''))
+    return m.group(1) if m else '-'
+
+
+def _diag_text(d):
+    """
+    Однострочный разбор HTTP-попытки: что попросили и что ответили.
+    Нужен, чтобы по одной строке в карточке было видно поведение CDN.
+    """
+    return ('attempt=%(attempt)s refresh=%(refresh)s offset=%(offset)s '
+            'range=%(range)s code=%(code)s len=%(len)s crange=%(crange)s '
+            'aranges=%(aranges)s read=%(read)s range_ignored=%(ignored)s '
+            'host=%(host)s err=%(err)s' % d)
 
 
 def _int_or_none(value):

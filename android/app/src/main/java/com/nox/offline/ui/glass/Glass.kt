@@ -20,6 +20,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -328,7 +329,8 @@ fun GlassSurface(
     if (clickable) {
         m = m.graphicsLayer { scaleX = scale; scaleY = scale }
     }
-    m = m.glass(shape, style, press)
+    // Стекло с ореолом рисуется вне обрезки, содержимое — строго внутри формы.
+    m = m.glass(shape, style, press).clip(shape)
     if (clickable) {
         m = m.combinedClickable(interactionSource = interaction, indication = null, enabled = enabled,
             onLongClick = onLongClick, onClick = onClick ?: {})

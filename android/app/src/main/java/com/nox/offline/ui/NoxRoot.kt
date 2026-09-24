@@ -50,6 +50,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import com.nox.offline.ui.theme.nox
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
@@ -237,6 +242,10 @@ private fun RootContent(
             val update by vm.updateState.collectAsState()
             UpdateBanner(update, vm, onOpenSettings = { route = null; tab = Tab.SETTINGS }, modifier = Modifier.align(Alignment.TopCenter))
 
+            // Мягкое затемнение под системной навигацией и плавающей панелью:
+            // прокручиваемый текст не просвечивает под кнопками системы.
+                        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(insetsBottom + 56.dp)
+                .background(Brush.verticalGradient(0f to Color.Transparent, 0.45f to nox().bgDeep.copy(alpha = 0.72f), 1f to nox().bgDeep.copy(alpha = 0.94f))))
             Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp)) {
                 FileTaskBanner(vm)
                 NoticeToast()

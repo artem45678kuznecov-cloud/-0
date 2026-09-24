@@ -74,10 +74,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     /** Реальное состояние для капсулы в шапке. */
-    val status: StateFlow<StatusInfo> = downloads.map { list ->
+    val status: StateFlow<StatusInfo> = combine(downloads, items) { list, media ->
         val running = list.count { it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.RESOLVING }
         val processing = list.count { it.status == DownloadStatus.PROCESSING }
         val queued = list.count { it.status == DownloadStatus.QUEUED }
+        val paused = list.count { it.status == DownloadStatus.PAUSED }
+        val failed = list.count { it.status == DownloadStatus.ERROR }
         when {
             running > 0 -> {
                 val total = list.filter { it.status == DownloadStatus.DOWNLOADING && it.totalBytes > 0 }
@@ -86,9 +88,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             processing > 0 -> StatusInfo("Завершение", "обработка файла", true)
             queued > 0 -> StatusInfo("В очереди: $queued", "ждёт слот", false)
-            else -> StatusInfo("Рады видеть", "Всегда офлайн", false)
+            failed > 0 -> StatusInfo("Не скачалось: $failed", "повторите в Загрузках", false)
+            paused > 0 -> StatusInfo("На паузе: $paused", "продолжите в Загрузках", false)
+            media.isNotEmpty() -> StatusInfo("Офлайн: ${media.size}", Format.bytes(media.sumOf { it.media.sizeBytes }), false)
+            else -> StatusInfo("Медиатека пуста", "вставьте ссылку", false)
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StatusInfo("Рады видеть", "Всегда офлайн", false))
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StatusInfo("NOX", "офлайн", false))
 
     val space = MutableStateFlow<Storage.Space?>(null)
     val notificationsAllowed = MutableStateFlow(true)

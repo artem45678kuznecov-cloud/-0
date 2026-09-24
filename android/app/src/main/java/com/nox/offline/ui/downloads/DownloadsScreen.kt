@@ -112,7 +112,7 @@ fun DownloadsScreen(vm: MainViewModel, actions: NoxActions, contentPadding: Padd
         item("queue-title") {
             Row(Modifier.padding(horizontal = 20.dp).heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Очередь загрузок", color = Nox.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                Muted(if (live.isEmpty()) "" else "${live.size} элем.", size = 15.sp, color = Nox.TextSecondary)
+                Muted(if (live.isEmpty()) "" else "${live.size} в списке", size = 15.sp, color = Nox.TextSecondary)
                 if (downloads.isNotEmpty()) {
                     HSpace(6)
                     GlassIconButton(Icons.Rounded.MoreHoriz, "Действия с очередью", size = 40.dp, iconSize = 22.dp, onClick = {

@@ -140,11 +140,11 @@ fun ContinueWatchingCard(item: LibraryItem, onContinue: () -> Unit, onMenu: () -
         style = GlassStyles.Card.copy(glow = 0.25f),
         onClick = onContinue,
     ) {
-        Cover(item.media.coverPath, Modifier.align(Alignment.CenterEnd).fillMaxWidth(0.68f).fillMaxHeight(),
-            shape = RoundedCornerShape(0.dp))
-        // Затемнение слева, чтобы текст читался на любой обложке.
+        // Обложка во всю карточку; слева плавное затемнение без видимой границы.
+        Cover(item.media.coverPath, Modifier.fillMaxSize(), shape = RoundedCornerShape(0.dp))
         Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(
-            0f to p.bgDeep.copy(alpha = 0.96f), 0.42f to p.bgDeep.copy(alpha = 0.82f), 0.75f to Color.Transparent)))
+            0f to p.bgDeep.copy(alpha = 0.94f), 0.30f to p.bgDeep.copy(alpha = 0.84f),
+            0.55f to p.bgDeep.copy(alpha = 0.45f), 0.85f to Color.Transparent)))
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.55f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.45f))))
         Column(Modifier.fillMaxSize().padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -191,14 +191,12 @@ fun MediaTile(item: LibraryItem, onOpen: () -> Unit, onMenu: () -> Unit, modifie
             DurationBadge(item.durationLabel, Modifier.align(Alignment.BottomEnd).padding(7.dp))
         }
         VSpace(8)
-        Text(item.media.title, color = Nox.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Muted(item.meta, size = 12.sp, color = Nox.TextSecondary, maxLines = 1)
-        VSpace(6)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            GlassPill("Офлайн", icon = Icons.Rounded.Check, height = 32.dp, textSize = 13.sp,
-                tint = p.accentLight, modifier = Modifier.weight(1f, fill = false))
-            Box(Modifier.weight(1f))
+        Row(verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f)) {
+                Text(item.media.title, color = Nox.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Muted(item.meta, size = 12.sp, color = Nox.TextSecondary, maxLines = 1)
+            }
             MenuDots(onMenu, Modifier.size(34.dp))
         }
     }

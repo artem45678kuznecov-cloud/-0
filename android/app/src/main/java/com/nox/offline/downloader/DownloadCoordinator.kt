@@ -77,6 +77,15 @@ class DownloadCoordinator(
     var lastStopReason: String = ""
         private set
 
+    /** Кому сообщать о паузе и о снятии задания (уведомления). */
+    interface Listener {
+        fun onPaused(e: DownloadEntity)
+        fun onCleared(id: Long)
+    }
+
+    @Volatile
+    var listener: Listener? = null
+
     val downloadsDao get() = db.downloads()
 
     // ------------------------------------------------------------------
@@ -131,6 +140,7 @@ class DownloadCoordinator(
             downloadsDao.setStatus(id, DownloadStatus.PAUSED, "", System.currentTimeMillis())
             pauseRequested.remove(id)
             NoxLog.event("job-paused", "id" to id, "part" to partSize(e))
+            downloadsDao.get(id)?.let { listener?.onPaused(it) }
         }
     }
 
@@ -143,6 +153,7 @@ class DownloadCoordinator(
                     downloadedBytes = partSize(e), updatedAt = System.currentTimeMillis())
             )
             NoxLog.event("job-resume", "id" to id, "part" to partSize(e))
+            listener?.onCleared(id)
         }
         pump()
     }
@@ -155,6 +166,7 @@ class DownloadCoordinator(
             deleteFilesOf(e)
             downloadsDao.delete(e)
         }
+        listener?.onCleared(id)
         NoxLog.event("job-cancelled", "id" to id)
         pump()
     }
@@ -167,6 +179,7 @@ class DownloadCoordinator(
         }
         if (e.status == DownloadStatus.ERROR || e.status == DownloadStatus.PAUSED) deleteFilesOf(e)
         downloadsDao.delete(e)
+        listener?.onCleared(id)
     }
 
     // ------------------------------------------------------------------
@@ -393,9 +406,11 @@ class DownloadCoordinator(
         when {
             cancelRequested.remove(id) -> Unit                       // запись уже удалена в cancel()
             pauseRequested.remove(id) -> {
-                downloadsDao.update(e.copy(status = DownloadStatus.PAUSED, downloadedBytes = size,
-                    speedBps = 0, etaSec = -1, updatedAt = System.currentTimeMillis()))
+                val paused = e.copy(status = DownloadStatus.PAUSED, downloadedBytes = size,
+                    speedBps = 0, etaSec = -1, updatedAt = System.currentTimeMillis())
+                downloadsDao.update(paused)
                 NoxLog.event("job-paused", "id" to id, "part" to size)
+                listener?.onPaused(paused)
             }
             else -> {
                 // Носитель остановлен системой: в очередь, продолжим с .part.

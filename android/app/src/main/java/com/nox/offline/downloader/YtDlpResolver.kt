@@ -42,8 +42,12 @@ class YtDlpResolver(private val context: Context) {
         private set
 
     private fun python(): Python {
-        if (!Python.isStarted()) {
-            Python.start(AndroidPlatform(context.applicationContext))
+        // До трёх разборов могут идти одновременно: старт интерпретатора
+        // должен случиться ровно один раз.
+        synchronized(YtDlpResolver::class.java) {
+            if (!Python.isStarted()) {
+                Python.start(AndroidPlatform(context.applicationContext))
+            }
         }
         return Python.getInstance()
     }

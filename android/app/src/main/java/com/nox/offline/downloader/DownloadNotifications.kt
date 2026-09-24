@@ -34,6 +34,7 @@ class DownloadNotifications(private val context: Context) {
         const val CHANNEL_ID = "nox_downloads"
         const val PRIMARY_ID = 41
         const val EXTRA_BASE_ID = 1000
+        const val PAUSED_BASE_ID = 5000
     }
 
     private val manager = NotificationManagerCompat.from(context)
@@ -133,6 +134,16 @@ class DownloadNotifications(private val context: Context) {
     }
 
     fun extraId(e: DownloadEntity): Int = (EXTRA_BASE_ID + e.id).toInt()
+
+    /** Уведомление о паузе живёт отдельно от носителя: его снимает продолжение или отмена. */
+    fun pausedId(id: Long): Int = (PAUSED_BASE_ID + id).toInt()
+
+    fun showPaused(e: DownloadEntity) = post(pausedId(e.id), forDownload(e))
+
+    fun clearFor(id: Long) {
+        cancel(pausedId(id))
+        cancel((EXTRA_BASE_ID + id).toInt())
+    }
 
     fun post(id: Int, n: Notification) {
         if (!canPost()) return

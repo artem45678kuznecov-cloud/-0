@@ -47,6 +47,10 @@ class NoxApp : Application() {
             client = client,
         )
         notifications = DownloadNotifications(this).also { it.ensureChannel() }
+        coordinator.listener = object : DownloadCoordinator.Listener {
+            override fun onPaused(e: com.nox.offline.data.db.DownloadEntity) = notifications.showPaused(e)
+            override fun onCleared(id: Long) = notifications.clearFor(id)
+        }
         // Восстановление после гибели процесса: всё «в работе» -> в очередь.
         appScope.launch { coordinator.recover() }
     }

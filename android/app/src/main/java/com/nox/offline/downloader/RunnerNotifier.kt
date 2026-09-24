@@ -55,10 +55,11 @@ class RunnerNotifier(
         lastExtras = keep
     }
 
-    private fun clearExtras(list: List<DownloadEntity>) {
+    private fun clearExtras(@Suppress("UNUSED_PARAMETER") list: List<DownloadEntity>) {
+        // Снимаем только то, что вешали сами: уведомления о паузе живут
+        // в своём диапазоне идентификаторов и нас не касаются.
         for (id in lastExtras) notifications.cancel(id)
         lastExtras = emptySet()
-        notifications.cancelExtrasExcept(emptySet(), list)
     }
 
     fun stop() {

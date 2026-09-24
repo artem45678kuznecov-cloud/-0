@@ -104,6 +104,12 @@ class MigrationTest {
                     assertEquals(600_000L, it.getLong(1))
                     assertEquals(0, it.getInt(2))
                 }
+                // Досмотренное в 0.1.0 (59 из 60 с) получает отметку «досмотрено».
+                st.executeQuery("SELECT positionMs, completed FROM playback WHERE mediaId=11").use {
+                    it.next()
+                    assertEquals(59_000L, it.getLong(1))
+                    assertEquals(1, it.getInt(2))
+                }
             }
 
             // 2) Итоговые таблицы = схема 2.json.

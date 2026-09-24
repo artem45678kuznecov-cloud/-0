@@ -194,10 +194,10 @@ fun MediaTile(item: LibraryItem, onOpen: () -> Unit, onMenu: () -> Unit, modifie
         Row(verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
                 Text(item.media.title, color = Nox.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 19.sp)
                 Muted(item.meta, size = 12.sp, color = Nox.TextSecondary, maxLines = 1)
             }
-            MenuDots(onMenu, Modifier.size(34.dp))
+            MenuDots(onMenu, Modifier.size(28.dp))
         }
     }
 }

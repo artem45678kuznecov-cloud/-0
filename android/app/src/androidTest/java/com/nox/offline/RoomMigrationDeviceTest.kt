@@ -27,7 +27,7 @@ class RoomMigrationDeviceTest {
                 1000,400,'PAUSED','',0,0,0,0,'',60,'user',1,2)""")
             db.execSQL("""INSERT INTO media (id,title,filePath,sizeBytes,quality,height,durationSec,coverPath,pageUrl,videoId,createdAt)
                 VALUES (10,'Море','/m/sea.mp4',5000,'720',720,1500,'','https://vk.com/video-3_4','v3',100)""")
-            db.execSQL("INSERT INTO playback (mediaId,positionMs,durationMs,updatedAt) VALUES (10,600000,1500000,230)")
+            db.execSQL("INSERT INTO playback (mediaId,positionMs,durationMs,updatedAt) VALUES (10,600000,1500000,230),(11,59000,60000,240)")
         }
         helper.runMigrationsAndValidate("migration-test", NoxDatabase.VERSION, true, *Migrations.ALL).use { db ->
             db.query("SELECT title, status, downloadedBytes, mode, customTitle, allowSplit FROM downloads WHERE id=1").use { c ->
@@ -47,6 +47,9 @@ class RoomMigrationDeviceTest {
             db.query("SELECT positionMs, completed FROM playback WHERE mediaId=10").use { c ->
                 c.moveToFirst()
                 assertEquals(600000L, c.getLong(0)); assertEquals(0, c.getInt(1))
+            }
+            db.query("SELECT completed FROM playback WHERE mediaId=11").use { c ->
+                c.moveToFirst(); assertEquals(1, c.getInt(0))
             }
         }
     }

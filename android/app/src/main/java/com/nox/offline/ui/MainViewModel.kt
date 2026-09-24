@@ -84,14 +84,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             running > 0 -> {
                 val total = list.filter { it.status == DownloadStatus.DOWNLOADING && it.totalBytes > 0 }
                 val pct = if (total.isEmpty()) null else (total.sumOf { it.downloadedBytes } * 100 / total.sumOf { it.totalBytes }).toInt()
-                StatusInfo("Скачивается: $running", pct?.let { "$it% готово" } ?: "идёт загрузка", true)
+                StatusInfo("Скачивается: $running", pct?.let { "$it%" } ?: "идёт", true)
             }
-            processing > 0 -> StatusInfo("Завершение", "обработка файла", true)
-            queued > 0 -> StatusInfo("В очереди: $queued", "ждёт слот", false)
-            failed > 0 -> StatusInfo("Не скачалось: $failed", "повторите в Загрузках", false)
-            paused > 0 -> StatusInfo("На паузе: $paused", "продолжите в Загрузках", false)
-            media.isNotEmpty() -> StatusInfo("Офлайн: ${media.size}", Format.bytes(media.sumOf { it.media.sizeBytes }), false)
-            else -> StatusInfo("Медиатека пуста", "вставьте ссылку", false)
+            processing > 0 -> StatusInfo("Завершение", "обработка", true)
+            queued > 0 -> StatusInfo("Загрузки", "в очереди: $queued", false)
+            failed > 0 -> StatusInfo("Загрузки", "ошибка: $failed", false)
+            paused > 0 -> StatusInfo("Загрузки", "на паузе: $paused", false)
+            media.isNotEmpty() -> StatusInfo("Офлайн", "${media.size} видео", false)
+            else -> StatusInfo("Медиатека", "пока пусто", false)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StatusInfo("NOX", "офлайн", false))
 

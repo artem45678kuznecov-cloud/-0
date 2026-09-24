@@ -63,10 +63,10 @@ fun NoxHeader(status: StatusInfo, modifier: Modifier = Modifier, onStatusClick: 
         Column(Modifier.weight(1f)) {
             Text("NOX", color = Nox.TextPrimary, fontSize = 40.sp, fontWeight = FontWeight.Bold, letterSpacing = 12.sp,
                 style = TextStyle(shadow = Shadow(p.accent.copy(alpha = 0.55f), blurRadius = 24f)))
-            Text("офлайн-медиатека", color = Nox.TextSecondary, fontSize = 12.sp, letterSpacing = 3.sp, maxLines = 1)
+            Text("офлайн-медиатека", color = Nox.TextSecondary, fontSize = 12.sp, letterSpacing = 2.sp, maxLines = 1, softWrap = false)
         }
         GlassSurface(
-            modifier = Modifier.height(62.dp).widthIn(max = 220.dp),
+            modifier = Modifier.padding(start = 10.dp).height(62.dp).widthIn(max = 190.dp),
             shape = RoundedCornerShape(31.dp),
             style = GlassStyles.Card.copy(glow = 0.25f),
             onClick = onStatusClick,

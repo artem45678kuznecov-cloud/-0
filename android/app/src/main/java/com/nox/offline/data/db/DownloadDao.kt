@@ -30,6 +30,12 @@ interface DownloadDao {
     @Query("SELECT COUNT(*) FROM downloads WHERE pageUrl = :pageUrl AND status != 'COMPLETED' AND status != 'ERROR'")
     suspend fun countLiveFor(pageUrl: String): Int
 
+    @Query("SELECT pageUrl FROM downloads WHERE status != 'COMPLETED' AND status != 'ERROR'")
+    suspend fun livePageUrls(): List<String>
+
+    @Query("SELECT * FROM downloads WHERE status IN ('QUEUED','RESOLVING','DOWNLOADING') ORDER BY createdAt ASC")
+    suspend fun running(): List<DownloadEntity>
+
     @Query("SELECT COALESCE(SUM(totalBytes - downloadedBytes), 0) FROM downloads WHERE status IN ('QUEUED','RESOLVING','DOWNLOADING') AND totalBytes > 0")
     suspend fun remainingKnownBytes(): Long
 

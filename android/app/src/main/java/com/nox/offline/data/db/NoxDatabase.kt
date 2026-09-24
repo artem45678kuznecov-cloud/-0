@@ -7,12 +7,16 @@ import androidx.room.RoomDatabase
 
 /**
  * Единственный источник правды о заданиях и медиатеке. Именно отсюда
- * состояние восстанавливается после гибели процесса: ни Activity, ни
- * сервис ничего важного в памяти не держат.
+ * состояние восстанавливается после гибели процесса и после обновления
+ * APK: ни Activity, ни сервис ничего важного в памяти не держат.
+ *
+ * Разрушительного fallback здесь нет намеренно. Если миграция не
+ * подходит, приложение должно упасть с понятной ошибкой, а не молча
+ * стереть медиатеку, очередь и позиции просмотра пользователя.
  */
 @Database(
     entities = [DownloadEntity::class, MediaEntity::class, PlaybackEntity::class],
-    version = 1,
+    version = NoxDatabase.VERSION,
     exportSchema = true,
 )
 abstract class NoxDatabase : RoomDatabase() {
@@ -21,9 +25,12 @@ abstract class NoxDatabase : RoomDatabase() {
     abstract fun playback(): PlaybackDao
 
     companion object {
+        const val VERSION = 2
+        const val NAME = "nox.db"
+
         fun build(context: Context): NoxDatabase =
-            Room.databaseBuilder(context.applicationContext, NoxDatabase::class.java, "nox.db")
-                .fallbackToDestructiveMigration()
+            Room.databaseBuilder(context.applicationContext, NoxDatabase::class.java, NAME)
+                .addMigrations(*Migrations.ALL)
                 .build()
     }
 }

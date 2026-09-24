@@ -147,10 +147,11 @@ fun AppearanceScreen(vm: MainViewModel, actions: NoxActions, contentPadding: Pad
         item("glass") {
             GlassCard(Modifier.padding(horizontal = 20.dp)) {
                 Title("Жидкое стекло")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Названия режимов целиком: при нехватке ширины — перенос на вторую строку.
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     for (m in GlassMode.entries) {
                         GlassPill(m.label, accent = a.glassMode == m, height = 42.dp, textSize = 14.sp,
-                            modifier = Modifier.weight(1f), onClick = { vm.updateAppearance { it.copy(glassMode = m) } })
+                            onClick = { vm.updateAppearance { it.copy(glassMode = m) } })
                     }
                 }
                 VSpace(6)
@@ -220,7 +221,7 @@ private fun Preview(modifier: Modifier) {
                 HSpace(12)
                 Column(Modifier.weight(1f)) {
                     Text("Предпросмотр", color = Nox.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Muted("Скачивается • 1.2 ГБ / 8.6 ГБ", size = 13.sp, color = p.accentLight)
+                    Muted("Так будут выглядеть карточки и кнопки", size = 13.sp, color = p.accentLight)
                     VSpace(6)
                     NoxProgress(0.42f)
                 }

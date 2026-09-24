@@ -78,7 +78,7 @@ fun DownloadsScreen(vm: MainViewModel, actions: NoxActions, contentPadding: Padd
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item("title") {
-            ScreenTitle("Загрузчик", "Сохраняйте видео для тишины", Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
+            ScreenTitle("Загрузчик", "Видео для просмотра без сети", Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
                 GlassIconButton(Icons.Rounded.Settings, "Настройки загрузок", actions.openDownloadSettings, size = 58.dp, iconSize = 28.dp)
             }
         }

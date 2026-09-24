@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NOX</string>
+    <string name="notification_channel_downloads">Загрузки</string>
+    <string name="notification_channel_downloads_desc">Ход скачивания видео</string>
+    <string name="notification_title_downloading">NOX • Скачивание</string>
+    <string name="notification_title_paused">NOX • Пауза</string>
+    <string name="notification_title_waiting">NOX • В очереди</string>
+    <string name="notification_action_pause">Пауза</string>
+    <string name="notification_action_resume">Продолжить</string>
+    <string name="notification_action_cancel">Отменить</string>
+</resources>

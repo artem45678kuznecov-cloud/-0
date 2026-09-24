@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Тема окна до того, как поднимется Compose: тот же почти чёрно-синий
+         фон, что и в NOX, чтобы запуск не мигал белым. -->
+    <style name="Theme.Nox" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/nox_bg</item>
+        <item name="android:statusBarColor">@color/nox_bg</item>
+        <item name="android:navigationBarColor">@color/nox_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorBackground">@color/nox_bg</item>
+    </style>
+
+    <style name="Theme.Nox.Player" parent="Theme.Nox">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+</resources>

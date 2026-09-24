@@ -1,0 +1,134 @@
+name: android-apk
+
+on:
+  push:
+    branches: [android-stage-01]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_VERSION: 0.1.0
+  RELEASE_TAG: android-v0.1.0
+  APK_NAME: NOX-Android-v0.1.0.apk
+
+jobs:
+  build:
+    name: Build, test, sign, release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Chaquopy собирает yt-dlp тем же Python, что и целевой (3.12).
+      - name: Python 3.12 for Chaquopy
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Python resolver tests
+        run: python3 -m unittest discover -s app/src/test/python -v
+
+      # Ключ подписи. Стабильный — только из GitHub Secrets; в репозитории
+      # его нет и не будет. Если secrets ещё не добавлены, ключ создаётся
+      # на месте: такой APK ставится, но обновление поверх него не встанет.
+      - name: Signing key
+        id: signing
+        env:
+          NOX_ANDROID_KEYSTORE_BASE64: ${{ secrets.NOX_ANDROID_KEYSTORE_BASE64 }}
+          NOX_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.NOX_ANDROID_KEYSTORE_PASSWORD }}
+          NOX_ANDROID_KEY_ALIAS: ${{ secrets.NOX_ANDROID_KEY_ALIAS }}
+          NOX_ANDROID_KEY_PASSWORD: ${{ secrets.NOX_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/nox-release.jks"
+          if [ -n "${NOX_ANDROID_KEYSTORE_BASE64:-}" ] && [ -n "${NOX_ANDROID_KEYSTORE_PASSWORD:-}" ] \
+             && [ -n "${NOX_ANDROID_KEY_ALIAS:-}" ] && [ -n "${NOX_ANDROID_KEY_PASSWORD:-}" ]; then
+            echo "$NOX_ANDROID_KEYSTORE_BASE64" | base64 -d > "$KS"
+            {
+              echo "NOX_KEYSTORE_PATH=$KS"
+              echo "NOX_KEYSTORE_PASSWORD=$NOX_ANDROID_KEYSTORE_PASSWORD"
+              echo "NOX_KEY_ALIAS=$NOX_ANDROID_KEY_ALIAS"
+              echo "NOX_KEY_PASSWORD=$NOX_ANDROID_KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Signing::Stable NOX signing key from GitHub Secrets."
+          else
+            TMP_PASS="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' )"
+            keytool -genkeypair -v -keystore "$KS" -storepass "$TMP_PASS" -keypass "$TMP_PASS" \
+              -alias nox-temp -keyalg RSA -keysize 2048 -validity 3650 \
+              -dname "CN=NOX temporary build key, O=NOX, C=RU" >/dev/null 2>&1
+            echo "::add-mask::$TMP_PASS"
+            {
+              echo "NOX_KEYSTORE_PATH=$KS"
+              echo "NOX_KEYSTORE_PASSWORD=$TMP_PASS"
+              echo "NOX_KEY_ALIAS=nox-temp"
+              echo "NOX_KEY_PASSWORD=$TMP_PASS"
+            } >> "$GITHUB_ENV"
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Temporary signing key::Secrets NOX_ANDROID_KEYSTORE_BASE64 / NOX_ANDROID_KEYSTORE_PASSWORD / NOX_ANDROID_KEY_ALIAS / NOX_ANDROID_KEY_PASSWORD are not set. This APK is signed with a one-off key: it installs, but a future build will not install over it until the secrets are added."
+          fi
+
+      - name: Unit tests
+        run: ./gradlew --no-daemon --stacktrace test
+
+      - name: Assemble release APK
+        run: ./gradlew --no-daemon --stacktrace assembleRelease
+
+      - name: Collect APK
+        run: |
+          set -euo pipefail
+          SRC="$(ls app/build/outputs/apk/release/*.apk | head -n 1)"
+          mkdir -p dist
+          cp "$SRC" "dist/$APK_NAME"
+          ls -la dist
+          sha256sum "dist/$APK_NAME" | tee dist/SHA256SUMS.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_NAME }}
+          path: android/dist/${{ env.APK_NAME }}
+          if-no-files-found: error
+
+      - name: GitHub Release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: NOX Android v${{ env.APP_VERSION }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          files: |
+            android/dist/${{ env.APK_NAME }}
+            android/dist/SHA256SUMS.txt
+          body: |
+            NOX Android — Stage 01.
+
+            Установка: скачайте `${{ env.APK_NAME }}` на Android, откройте файл и разрешите установку из этого источника.
+            Минимальный Android — 8.0 (API 26). Фоновая загрузка: Android 14+ — User-Initiated Data Transfer Job, Android 13 и ниже — foreground service.
+
+            Подпись: ${{ steps.signing.outputs.stable == 'true' && 'стабильный ключ NOX из GitHub Secrets — следующие сборки встанут поверх этой.' || 'ВРЕМЕННЫЙ ключ (secrets ещё не добавлены). Этот APK ставится, но следующую сборку поверх него установить не получится — сначала удалите приложение или добавьте secrets NOX_ANDROID_KEYSTORE_BASE64 / NOX_ANDROID_KEYSTORE_PASSWORD / NOX_ANDROID_KEY_ALIAS / NOX_ANDROID_KEY_PASSWORD.' }}
+
+            Сборка: ${{ github.sha }}

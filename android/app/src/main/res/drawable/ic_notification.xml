@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <!-- Стрелка вниз в скобке: значок загрузки для шторки. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,3a1,1 0 0,1 1,1v9.17l2.59,-2.58a1,1 0 1,1 1.41,1.41l-4.29,4.3a1,1 0 0,1 -1.42,0L7,11.99a1,1 0 1,1 1.41,-1.41L11,13.17V4a1,1 0 0,1 1,-1zM5,18a1,1 0 0,1 1,1v0a1,1 0 0,0 1,1h10a1,1 0 0,0 1,-1a1,1 0 1,1 2,0a3,3 0 0,1 -3,3H7a3,3 0 0,1 -3,-3a1,1 0 0,1 1,-1z" />
+</vector>

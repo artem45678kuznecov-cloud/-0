@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="nox_bg">#FF040611</color>
+    <color name="nox_accent">#FF7B7BF5</color>
+    <color name="nox_accent_light">#FFB3B0FF</color>
+    <color name="ic_launcher_background">#FF070A18</color>
+</resources>

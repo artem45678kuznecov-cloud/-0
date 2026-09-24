@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Плеер: не гасить экран во время просмотра. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Только для установки обновления NOX, которое пользователь сам запросил. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:name=".NoxApp"
@@ -21,7 +23,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Nox"
+        android:theme="@style/Theme.Nox.Starting"
         android:usesCleartextTraffic="false">
 
         <activity
@@ -29,12 +31,12 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.Nox">
+            android:theme="@style/Theme.Nox.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- «Поделиться» ссылкой из VK / браузера прямо в NOX. -->
+            <!-- «Поделиться» ссылкой (одной или несколькими) из VK / браузера прямо в NOX. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -42,17 +44,23 @@
             </intent-filter>
         </activity>
 
+        <!-- Один экземпляр плеера в своей задаче: корректный вход и выход из PiP. -->
         <activity
             android:name=".player.PlayerActivity"
             android:exported="false"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize"
-            android:supportsPictureInPicture="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.nox.offline.player"
+            android:excludeFromRecents="false"
+            android:resizeableActivity="true"
+            android:supportsPictureInPicture="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
             android:theme="@style/Theme.Nox.Player" />
 
         <!-- Android 14+: UIDT job. Права BIND_JOB_SERVICE есть только у системы. -->
         <service
             android:name=".downloader.TransferJobService"
             android:exported="true"
+            tools:targetApi="34"
             android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!-- Android 13 и ниже: foreground service типа dataSync. -->
@@ -64,6 +72,31 @@
         <receiver
             android:name=".downloader.NotificationActionReceiver"
             android:exported="false" />
+
+        <!-- Итог установки обновления от PackageInstaller. -->
+        <receiver
+            android:name=".updates.InstallStatusReceiver"
+            android:exported="false" />
+
+        <!-- Пакет заменён новой версией: защищённый системный broadcast. -->
+        <receiver
+            android:name=".updates.PackageReplacedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- «Поделиться файлом»: только content://, без выдачи путей. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 </manifest>

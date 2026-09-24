@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+: системный экран запуска с лисьей иконкой NOX. -->
+    <style name="Theme.Nox.Starting" parent="Theme.Nox">
+        <item name="android:windowSplashScreenBackground">@color/nox_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/ic_launcher_background</item>
+        <item name="android:windowBackground">@color/nox_bg</item>
+    </style>
+</resources>

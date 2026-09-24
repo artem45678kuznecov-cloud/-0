@@ -4,10 +4,16 @@
          фон, что и в NOX, чтобы запуск не мигал белым. -->
     <style name="Theme.Nox" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/nox_bg</item>
-        <item name="android:statusBarColor">@color/nox_bg</item>
-        <item name="android:navigationBarColor">@color/nox_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:colorBackground">@color/nox_bg</item>
+        <item name="android:colorAccent">@color/nox_accent</item>
+    </style>
+
+    <!-- Запуск на Android 8–11: лиса по центру ночного фона. -->
+    <style name="Theme.Nox.Starting" parent="Theme.Nox">
+        <item name="android:windowBackground">@drawable/splash_background</item>
     </style>
 
     <style name="Theme.Nox.Player" parent="Theme.Nox">

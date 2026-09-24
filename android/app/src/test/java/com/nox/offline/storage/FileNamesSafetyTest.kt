@@ -23,6 +23,19 @@ class FileNamesSafetyTest {
         assertFalse(BackupManager.isSafeName("x".repeat(151)))
     }
 
+    @Test fun backupRecognisesExistingVideos() {
+        fun m(id: Long, title: String, size: Long, videoId: String = "", page: String = "") =
+            com.nox.offline.data.db.MediaEntity(id = id, title = title, filePath = "/m/$id.mp4", sizeBytes = size,
+                quality = "360", createdAt = 0, videoId = videoId, pageUrl = page)
+        val lib = listOf(m(1, "Горы", 100, "v1", "https://vk.com/video1"), m(2, "Импорт тест", 2104518))
+        assertEquals(1L, BackupManager.findSame(lib, "v1", "https://vk.com/video1", "Горы", 100)?.id)
+        assertEquals(2L, BackupManager.findSame(lib, "", "", "Импорт тест", 2104518)?.id)
+        // Другой размер или другое название — это другое видео.
+        assertEquals(null, BackupManager.findSame(lib, "", "", "Импорт тест", 999))
+        assertEquals(null, BackupManager.findSame(lib, "", "", "Другое", 2104518))
+        assertEquals(null, BackupManager.findSame(lib, "v9", "https://vk.com/video9", "Горы", 100))
+    }
+
     @Test fun spaceCheckKeepsMargin() {
         FileOps.requireSpace(100, 100L + 16 * 1024 * 1024)
         try {

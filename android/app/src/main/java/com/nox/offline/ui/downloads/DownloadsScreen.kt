@@ -86,8 +86,13 @@ fun DownloadsScreen(vm: MainViewModel, actions: NoxActions, contentPadding: Padd
         item("quality") {
             Column(Modifier.padding(horizontal = 20.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Качество", color = Nox.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    Muted("Выше качество — больше файл", size = 13.sp, color = Nox.TextSecondary)
+                    // Заголовок никогда не рвётся посреди слова; при крупном шрифте
+                    // переносится подсказка справа.
+                    Text("Качество", color = Nox.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, softWrap = false)
+                    HSpace(12)
+                    Muted("Выше качество — больше файл", Modifier.weight(1f), size = 13.sp, color = Nox.TextSecondary,
+                        maxLines = 2, align = androidx.compose.ui.text.style.TextAlign.End)
                 }
                 VSpace(12)
                 val q by vm.quality.collectAsState()

@@ -47,6 +47,15 @@ class BackupManager(
         const val FORMAT_VERSION = 1
 
         /** Имя из копии допустимо, только если это простое имя файла. */
+        /**
+         * То же видео в медиатеке. Скачанные узнаются по videoId и ссылке;
+         * импортированные (без videoId) — по названию и точному размеру,
+         * чтобы повторное восстановление не создавало вторую запись.
+         */
+        fun findSame(existing: List<MediaEntity>, videoId: String, pageUrl: String, title: String, sizeBytes: Long): MediaEntity? =
+            if (videoId.isNotBlank()) existing.firstOrNull { it.videoId == videoId && it.pageUrl == pageUrl }
+            else existing.firstOrNull { it.videoId.isBlank() && sizeBytes > 0 && it.sizeBytes == sizeBytes && it.title == title }
+
         fun isSafeName(name: String): Boolean =
             name.isNotBlank() && name == FileOps.safeName(name, "") && !name.contains('/') && !name.contains('\\') &&
                 name != "." && name != ".." && name.length <= 150
@@ -159,7 +168,7 @@ class BackupManager(
             val videoId = o.optString("videoId")
             val pageUrl = o.optString("pageUrl")
             // Уже есть в медиатеке — не дублируем, только сопоставляем позицию.
-            val same = existing.firstOrNull { (videoId.isNotBlank() && it.videoId == videoId && it.pageUrl == pageUrl) }
+            val same = findSame(existing, videoId, pageUrl, o.optString("title"), o.optLong("sizeBytes"))
             if (same != null) { idMap[oldId] = same.id; skipped++; continue }
             val mediaFileName = o.optString("mediaFile")
             val fileName = o.optString("fileName")

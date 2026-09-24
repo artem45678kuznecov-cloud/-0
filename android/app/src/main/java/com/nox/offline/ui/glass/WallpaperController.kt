@@ -96,8 +96,11 @@ class WallpaperController(private val context: Context, private val settings: Ap
         try {
             val resolver = context.contentResolver
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            // Проход «только размеры» всегда возвращает null — это не ошибка;
+            // ошибкой считается лишь невозможность открыть сам поток.
+            val boundsStream = resolver.openInputStream(uri)
                 ?: return@withContext Result.failure(IllegalStateException("Не удалось открыть изображение"))
+            boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
                 return@withContext Result.failure(IllegalStateException("Это не изображение"))
             }
@@ -138,7 +141,8 @@ class WallpaperController(private val context: Context, private val settings: Ap
             NoxLog.event("wallpaper-import", "w" to customFile.length())
             Result.success(Unit)
         } catch (t: Throwable) {
-            NoxLog.event("wallpaper-import-error", "error" to t.javaClass.simpleName)
+            NoxLog.event("wallpaper-import-error", "error" to t.javaClass.simpleName, "msg" to t.message?.take(160), "uri" to "${uri.authority}${uri.path}",
+                "at" to t.stackTrace.take(4).joinToString(" < ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" })
             Result.failure(t)
         }
     }

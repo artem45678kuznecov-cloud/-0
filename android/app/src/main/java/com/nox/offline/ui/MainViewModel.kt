@@ -237,7 +237,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteMedia(m: MediaEntity) = viewModelScope.launch(Dispatchers.IO) {
         if (PlaybackRegistry.playingMediaId == m.id) {
-            message.value = "Закройте плеер, чтобы удалить это видео"; return@launch
+            com.nox.offline.core.AppEvents.notice("Закройте плеер, чтобы удалить это видео"); return@launch
         }
         MediaLocator.delete(nox.saf, m)
         if (m.coverPath.isNotBlank()) runCatching { File(m.coverPath).delete() }
@@ -258,16 +258,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         var updated = m.copy(title = clean)
         if (renameFile) {
             if (PlaybackRegistry.playingMediaId == m.id) {
-                message.value = "Видео открыто в плеере — изменено только название"
+                com.nox.offline.core.AppEvents.notice("Видео открыто в плеере — изменено только название")
             } else if (m.isExternal) {
                 val newName = FileNames.targetName(clean, m.videoId, MediaLocator.fileName(m).substringAfterLast('.', "mp4"))
                 nox.saf.rename(m.contentUri, newName)?.let { updated = updated.copy(contentUri = it) }
-                    ?: run { message.value = "Папка не разрешила переименовать файл — изменено только название" }
+                    ?: run { com.nox.offline.core.AppEvents.notice("Папка не разрешила переименовать файл — изменено только название") }
             } else {
                 val f = File(m.filePath)
                 val target = FileNames.unique(f.parentFile!!, FileNames.targetName(clean, m.videoId, f.extension.ifBlank { "mp4" }))
                 if (f.exists() && f.renameTo(target)) updated = updated.copy(filePath = target.absolutePath)
-                else message.value = "Не удалось переименовать файл — изменено только название"
+                else com.nox.offline.core.AppEvents.notice("Не удалось переименовать файл — изменено только название")
             }
         }
         nox.db.media().update(updated)
@@ -333,9 +333,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val label = nox.saf.persist(tree)
             if (old.isNotBlank() && old != tree.toString()) nox.saf.release(old)
             settings.updateDownloads { it.copy(destinationTree = tree.toString(), destinationLabel = label) }
-            message.value = "Новые видео будут сохраняться в «$label»"
+            com.nox.offline.core.AppEvents.notice("Новые видео будут сохраняться в «$label»")
         } catch (e: Exception) {
-            message.value = "Не удалось получить доступ к папке: ${e.message}"
+            com.nox.offline.core.AppEvents.notice("Не удалось получить доступ к папке: ${e.message}")
         }
     }
 
@@ -396,7 +396,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun importWallpaper(uri: Uri) = viewModelScope.launch {
         nox.wallpaper.importCustom(uri)
             .onSuccess { nox.wallpaper.request(settings.appearance.value) }
-            .onFailure { message.value = "Не удалось поставить фон: ${it.message}" }
+            .onFailure { com.nox.offline.core.AppEvents.notice("Не удалось поставить фон: ${it.message ?: it.javaClass.simpleName}") }
     }
 
     fun clearCustomWallpaper() {

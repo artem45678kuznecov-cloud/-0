@@ -9,9 +9,10 @@ plugins {
 }
 
 // Подпись. Ключ НИКОГДА не лежит в репозитории: путь и пароли приходят
-// из окружения (в CI — из GitHub Secrets). Если их нет, релизная сборка
-// подписывается временным ключом, который CI создаёт на месте; такой APK
-// ставится, но следующий такой же APK поверх него уже не встанет.
+// из окружения (в CI — из GitHub Secrets NOX_ANDROID_*). Временных ключей
+// больше нет: без постоянного ключа релизный APK остаётся неподписанным,
+// а с -Pnox.requireReleaseKey=true (так запускает CI) сборка падает.
+// Только постоянный ключ даёт обновление поверх установленной версии.
 val noxKeystorePath: String? = System.getenv("NOX_KEYSTORE_PATH")
 val noxKeystorePassword: String? = System.getenv("NOX_KEYSTORE_PASSWORD")
 val noxKeyAlias: String? = System.getenv("NOX_KEY_ALIAS")
@@ -21,6 +22,13 @@ val hasReleaseKey = !noxKeystorePath.isNullOrBlank() &&
     !noxKeystorePassword.isNullOrBlank() &&
     !noxKeyAlias.isNullOrBlank() &&
     !noxKeyPassword.isNullOrBlank()
+if (project.findProperty("nox.requireReleaseKey") == "true" && !hasReleaseKey) {
+    throw GradleException("Нет постоянного ключа подписи NOX (NOX_KEYSTORE_PATH и пароли). Релиз не собирается.")
+}
+
+// Только для локальной проверки «новая сборка встаёт поверх старой»:
+// вторая, независимая сборка с тем же ключом и большим versionCode.
+val noxVersionCodeOverride: Int? = (project.findProperty("nox.versionCodeOverride") as String?)?.toIntOrNull()
 
 android {
     namespace = "com.nox.offline"
@@ -30,8 +38,8 @@ android {
         applicationId = "com.nox.offline"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = noxVersionCodeOverride ?: 2
+        versionName = "0.2.0"
 
         // Chaquopy требует явного списка ABI: под каждый кладётся свой
         // рантайм Python. Для Python 3.12 у Chaquopy есть только 64-битные
@@ -55,8 +63,8 @@ android {
 
     buildTypes {
         release {
-            // Stage 01: без минификации. ProGuard поверх Chaquopy и
-            // Media3 — отдельная работа, а не условие первого APK.
+            // Без минификации: ProGuard поверх Chaquopy и Media3 —
+            // отдельная работа со своим набором проверок.
             isMinifyEnabled = false
             isShrinkResources = false
             if (hasReleaseKey) {
@@ -116,6 +124,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-process:2.8.7")
+    implementation("androidx.documentfile:documentfile:1.0.1")
 
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)

@@ -10,3 +10,6 @@ captures/
 *.jks
 keystore.properties
 .cxx/
+*.p12
+*.pfx
+dist/

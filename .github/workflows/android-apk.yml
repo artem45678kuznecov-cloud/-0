@@ -1,134 +1,258 @@
 name: android-apk
 
+# NOX Android: проверки на каждый push ветки и выпуск релиза.
+#
+# Выпуск строго с постоянным ключом из GitHub Secrets. Временных ключей
+# больше нет: без секретов задача release падает с понятной ошибкой и
+# ничего не публикует. Уже существующий тег (например android-v0.1.0)
+# не перезаписывается никогда.
+
 on:
   push:
-    branches: [android-stage-01]
+    branches: [android-stage-02-complete]
     paths:
       - "android/**"
       - ".github/workflows/android-apk.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: android-apk-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  APP_VERSION: 0.1.0
-  RELEASE_TAG: android-v0.1.0
-  APK_NAME: NOX-Android-v0.1.0.apk
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build, test, sign, release
+  check:
+    name: Tests and build
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: android
-
+    outputs:
+      version_name: ${{ steps.version.outputs.version_name }}
+      version_code: ${{ steps.version.outputs.version_code }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
       # Chaquopy собирает yt-dlp тем же Python, что и целевой (3.12).
-      - name: Python 3.12 for Chaquopy
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Version from Gradle
+        id: version
+        run: |
+          set -euo pipefail
+          VN=$(grep -E '^\s*versionName = "' app/build.gradle.kts | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          VC=$(grep -E '^\s*versionCode = ' app/build.gradle.kts | head -1 | grep -oE '[0-9]+' | tail -1)
+          [ -n "$VN" ] && [ -n "$VC" ]
+          echo "version_name=$VN" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VC" >> "$GITHUB_OUTPUT"
+          echo "NOX $VN (versionCode $VC)"
 
       - name: Python resolver tests
         run: python3 -m unittest discover -s app/src/test/python -v
 
-      # Ключ подписи. Стабильный — только из GitHub Secrets; в репозитории
-      # его нет и не будет. Если secrets ещё не добавлены, ключ создаётся
-      # на месте: такой APK ставится, но обновление поверх него не встанет.
-      - name: Signing key
-        id: signing
-        env:
-          NOX_ANDROID_KEYSTORE_BASE64: ${{ secrets.NOX_ANDROID_KEYSTORE_BASE64 }}
-          NOX_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.NOX_ANDROID_KEYSTORE_PASSWORD }}
-          NOX_ANDROID_KEY_ALIAS: ${{ secrets.NOX_ANDROID_KEY_ALIAS }}
-          NOX_ANDROID_KEY_PASSWORD: ${{ secrets.NOX_ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          KS="$RUNNER_TEMP/nox-release.jks"
-          if [ -n "${NOX_ANDROID_KEYSTORE_BASE64:-}" ] && [ -n "${NOX_ANDROID_KEYSTORE_PASSWORD:-}" ] \
-             && [ -n "${NOX_ANDROID_KEY_ALIAS:-}" ] && [ -n "${NOX_ANDROID_KEY_PASSWORD:-}" ]; then
-            echo "$NOX_ANDROID_KEYSTORE_BASE64" | base64 -d > "$KS"
-            {
-              echo "NOX_KEYSTORE_PATH=$KS"
-              echo "NOX_KEYSTORE_PASSWORD=$NOX_ANDROID_KEYSTORE_PASSWORD"
-              echo "NOX_KEY_ALIAS=$NOX_ANDROID_KEY_ALIAS"
-              echo "NOX_KEY_PASSWORD=$NOX_ANDROID_KEY_PASSWORD"
-            } >> "$GITHUB_ENV"
-            echo "stable=true" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Signing::Stable NOX signing key from GitHub Secrets."
-          else
-            TMP_PASS="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' )"
-            keytool -genkeypair -v -keystore "$KS" -storepass "$TMP_PASS" -keypass "$TMP_PASS" \
-              -alias nox-temp -keyalg RSA -keysize 2048 -validity 3650 \
-              -dname "CN=NOX temporary build key, O=NOX, C=RU" >/dev/null 2>&1
-            echo "::add-mask::$TMP_PASS"
-            {
-              echo "NOX_KEYSTORE_PATH=$KS"
-              echo "NOX_KEYSTORE_PASSWORD=$TMP_PASS"
-              echo "NOX_KEY_ALIAS=nox-temp"
-              echo "NOX_KEY_PASSWORD=$TMP_PASS"
-            } >> "$GITHUB_ENV"
-            echo "stable=false" >> "$GITHUB_OUTPUT"
-            echo "::warning title=Temporary signing key::Secrets NOX_ANDROID_KEYSTORE_BASE64 / NOX_ANDROID_KEYSTORE_PASSWORD / NOX_ANDROID_KEY_ALIAS / NOX_ANDROID_KEY_PASSWORD are not set. This APK is signed with a one-off key: it installs, but a future build will not install over it until the secrets are added."
-          fi
+      - name: Unit tests (JVM, incl. Room migration 1→2)
+        run: ./gradlew --no-daemon --stacktrace testDebugUnitTest
 
-      - name: Unit tests
-        run: ./gradlew --no-daemon --stacktrace test
+      - name: Lint
+        run: ./gradlew --no-daemon --stacktrace lintDebug
 
-      - name: Assemble release APK
-        run: ./gradlew --no-daemon --stacktrace assembleRelease
+      - name: Debug build
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
 
-      - name: Collect APK
-        run: |
-          set -euo pipefail
-          SRC="$(ls app/build/outputs/apk/release/*.apk | head -n 1)"
-          mkdir -p dist
-          cp "$SRC" "dist/$APK_NAME"
-          ls -la dist
-          sha256sum "dist/$APK_NAME" | tee dist/SHA256SUMS.txt
-
-      - name: Upload artifact
+      - name: Test reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APK_NAME }}
-          path: android/dist/${{ env.APK_NAME }}
-          if-no-files-found: error
+          name: nox-test-reports
+          path: |
+            android/app/build/reports/tests/
+            android/app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
 
-      - name: GitHub Release
-        if: github.event_name != 'pull_request'
+  release:
+    name: Signed release
+    needs: check
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: android
+    env:
+      VERSION_NAME: ${{ needs.check.outputs.version_name }}
+      VERSION_CODE: ${{ needs.check.outputs.version_code }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="android-v${VERSION_NAME}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "apk=NOX-Android-v${VERSION_NAME}.apk" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Release exists::$TAG уже опубликован и не перезаписывается. Для нового выпуска поднимите versionCode и versionName."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Постоянный ключ — только из Secrets. Нет секретов — нет релиза.
+      - name: Permanent signing key
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          KS_B64: ${{ secrets.NOX_ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.NOX_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.NOX_ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.NOX_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${KS_B64:-}" ] || missing="$missing NOX_ANDROID_KEYSTORE_BASE64"
+          [ -n "${KS_PASS:-}" ] || missing="$missing NOX_ANDROID_KEYSTORE_PASSWORD"
+          [ -n "${KEY_ALIAS:-}" ] || missing="$missing NOX_ANDROID_KEY_ALIAS"
+          [ -n "${KEY_PASS:-}" ] || missing="$missing NOX_ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error title=No permanent signing key::Не заданы GitHub Secrets:$missing. Релиз не публикуется: APK с одноразовым ключом не сможет обновиться. Добавьте секреты (Settings → Secrets and variables → Actions) и перезапустите этот workflow."
+            exit 1
+          fi
+          KS="$RUNNER_TEMP/nox-release.p12"
+          printf '%s' "$KS_B64" | base64 -d > "$KS"
+          chmod 600 "$KS"
+          {
+            echo "NOX_KEYSTORE_PATH=$KS"
+            echo "NOX_KEYSTORE_PASSWORD=$KS_PASS"
+            echo "NOX_KEY_ALIAS=$KEY_ALIAS"
+            echo "NOX_KEY_PASSWORD=$KEY_PASS"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        if: steps.tag.outputs.exists == 'false'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        if: steps.tag.outputs.exists == 'false'
+        with:
+          python-version: "3.12"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.tag.outputs.exists == 'false'
+
+      - name: Assemble signed release
+        if: steps.tag.outputs.exists == 'false'
+        run: ./gradlew --no-daemon --stacktrace -Pnox.requireReleaseKey=true assembleRelease
+
+      - name: Verify APK identity and signature
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          APK=app/build/outputs/apk/release/app-release.apk
+          test -f "$APK"
+          "$BT/apksigner" verify --verbose "$APK"
+          CERT=$("$BT/apksigner" verify --print-certs "$APK" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')
+          EXPECTED=$(tr -d ' \n' < signing/expected-cert-sha256.txt)
+          if [ "$CERT" != "$EXPECTED" ]; then
+            echo "::error title=Wrong signing certificate::APK подписан сертификатом $CERT, ожидался $EXPECTED. Установленный NOX такое обновление не примет."
+            exit 1
+          fi
+          BADGING=$("$BT/aapt2" dump badging "$APK")
+          echo "$BADGING" | head -1
+          echo "$BADGING" | grep -q "package: name='com.nox.offline' versionCode='$VERSION_CODE' versionName='$VERSION_NAME'"
+          echo "$BADGING" | grep -q "minSdkVersion:'26'"
+          ABIS=$(echo "$BADGING" | grep '^native-code:' | sed -E "s/native-code: //; s/'//g")
+          echo "CERT_SHA256=$CERT" >> "$GITHUB_ENV"
+          echo "APK_ABIS=$ABIS" >> "$GITHUB_ENV"
+
+      - name: Release files
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          APK_NAME: ${{ steps.tag.outputs.apk }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/$APK_NAME"
+          NOTES="release-notes/${VERSION_NAME}.md"
+          test -f "$NOTES"
+          cp "$NOTES" dist/RELEASE-NOTES.md
+          export SIZE=$(stat -c %s "dist/$APK_NAME")
+          export SHA=$(sha256sum "dist/$APK_NAME" | awk '{print $1}')
+          python3 - "$NOTES" <<'PY'
+          import json, os, sys, datetime
+          notes = open(sys.argv[1], encoding="utf-8").read()
+          # В приложении показывается короткая выжимка: раздел до первой линии «---».
+          short = notes.split("\n---", 1)[0].strip()
+          m = {
+              "format": "nox-update",
+              "formatVersion": 1,
+              "applicationId": "com.nox.offline",
+              "versionName": os.environ["VERSION_NAME"],
+              "versionCode": int(os.environ["VERSION_CODE"]),
+              "minSdk": 26,
+              "abis": os.environ["APK_ABIS"].split(),
+              "channel": "stable",
+              "apk": {
+                  "name": os.environ["APK_NAME"],
+                  "url": f"https://github.com/{os.environ['REPO']}/releases/download/{os.environ['TAG']}/{os.environ['APK_NAME']}",
+                  "size": int(os.environ["SIZE"]),
+                  "sha256": os.environ["SHA"],
+              },
+              "signingCertSha256": os.environ["CERT_SHA256"],
+              "releaseNotes": short,
+              "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          }
+          json.dump(m, open("dist/nox-update.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+          PY
+          # Настоящие снимки экрана, если они есть в репозитории.
+          SHOTS=""
+          if ls docs/screenshots/*.png >/dev/null 2>&1; then
+            cp docs/screenshots/*.png dist/
+            SHOTS=$(cd dist && ls *.png | tr '\n' ' ')
+          fi
+          (cd dist && sha256sum "$APK_NAME" nox-update.json $SHOTS > SHA256SUMS)
+          {
+            echo "RELEASE_FILES<<EOF"
+            echo "android/dist/$APK_NAME"
+            echo "android/dist/nox-update.json"
+            echo "android/dist/SHA256SUMS"
+            for f in $SHOTS; do echo "android/dist/$f"; done
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+          cat dist/SHA256SUMS
+          ls -la dist
+        shell: bash
+
+      - name: Publish GitHub Release
+        if: steps.tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: NOX Android v${{ env.APP_VERSION }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: NOX Android v${{ env.VERSION_NAME }}
           target_commitish: ${{ github.sha }}
-          prerelease: true
-          files: |
-            android/dist/${{ env.APK_NAME }}
-            android/dist/SHA256SUMS.txt
-          body: |
-            NOX Android — Stage 01.
+          # Не prerelease: приложение ищет манифест по /releases/latest/.
+          prerelease: false
+          make_latest: "true"
+          body_path: android/dist/RELEASE-NOTES.md
+          fail_on_unmatched_files: true
+          files: ${{ env.RELEASE_FILES }}
 
-            Установка: скачайте `${{ env.APK_NAME }}` на Android, откройте файл и разрешите установку из этого источника.
-            Минимальный Android — 8.0 (API 26). Фоновая загрузка: Android 14+ — User-Initiated Data Transfer Job, Android 13 и ниже — foreground service.
-
-            Подпись: ${{ steps.signing.outputs.stable == 'true' && 'стабильный ключ NOX из GitHub Secrets — следующие сборки встанут поверх этой.' || 'ВРЕМЕННЫЙ ключ (secrets ещё не добавлены). Этот APK ставится, но следующую сборку поверх него установить не получится — сначала удалите приложение или добавьте secrets NOX_ANDROID_KEYSTORE_BASE64 / NOX_ANDROID_KEYSTORE_PASSWORD / NOX_ANDROID_KEY_ALIAS / NOX_ANDROID_KEY_PASSWORD.' }}
-
-            Сборка: ${{ github.sha }}
+      - name: Remove key from runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/nox-release.p12"

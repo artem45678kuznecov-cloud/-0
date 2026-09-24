@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Готовые видео NOX: Android/data/com.nox.offline/files/NOX/ -->
+    <external-files-path name="nox" path="NOX/" />
+    <!-- Если внешнего хранилища нет, NOX живёт во внутреннем. -->
+    <files-path name="nox_internal" path="NOX/" />
+</paths>

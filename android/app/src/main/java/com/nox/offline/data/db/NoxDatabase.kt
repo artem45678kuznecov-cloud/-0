@@ -13,7 +13,7 @@ import androidx.room.RoomDatabase
 @Database(
     entities = [DownloadEntity::class, MediaEntity::class, PlaybackEntity::class],
     version = 1,
-    exportSchema = false,
+    exportSchema = true,
 )
 abstract class NoxDatabase : RoomDatabase() {
     abstract fun downloads(): DownloadDao

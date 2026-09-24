@@ -93,6 +93,11 @@ android {
     }
 }
 
+ksp {
+    // Схемы Room хранятся в репозитории: по ним пишутся и проверяются миграции.
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 chaquopy {
     defaultConfig {
         version = "3.12"

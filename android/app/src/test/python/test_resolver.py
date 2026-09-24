@@ -118,5 +118,76 @@ class Describe(unittest.TestCase):
         self.assertIn('error', out)
 
 
+def yt(fid, h, v='avc1.64001f', a='none', ext='mp4', proto='https', tbr=1000, size=0):
+    return {'format_id': fid, 'url': 'https://yt.example/%s' % fid, 'height': h, 'vcodec': v,
+            'acodec': a, 'ext': ext, 'protocol': proto, 'tbr': tbr, 'filesize': size,
+            'http_headers': {'User-Agent': 'yt', 'Sec-Fetch-Mode': 'navigate'}}
+
+
+class SplitTracks(unittest.TestCase):
+    def formats(self):
+        return [
+            yt('18', 360, a='mp4a.40.2', tbr=500),                     # единственный progressive
+            yt('137', 1080, tbr=4000, size=900), yt('136', 720, tbr=2500, size=500),
+            yt('135', 480, tbr=1200), yt('248', 1080, v='vp9', ext='webm'),
+            yt('140', None, v='none', a='mp4a.40.2', ext='m4a', tbr=128, size=50),
+            yt('251', None, v='none', a='opus', ext='webm', tbr=160),
+            yt('hls-720', 720, a='mp4a', proto='m3u8_native'),
+        ]
+
+    def info(self):
+        return {'title': 'Split', 'id': 's1', 'formats': self.formats(), 'uploader': 'Автор'}
+
+    def test_disabled_setting_keeps_v010_choice(self):
+        mode, fmt, audio = resolver.choose(self.info(), '720', allow_split=False)
+        self.assertEqual((mode, fmt['format_id'], audio), ('progressive', '18', None))
+
+    def test_enabled_picks_muxable_pair_within_height(self):
+        mode, v, a = resolver.choose(self.info(), '720', allow_split=True)
+        self.assertEqual(mode, 'split')
+        self.assertEqual(v['format_id'], '136')     # 720 avc1, не 1080 и не vp9
+        self.assertEqual(a['format_id'], '140')     # m4a, не opus
+
+    def test_max_takes_best_avc(self):
+        mode, v, a = resolver.choose(self.info(), 'MAX', allow_split=True)
+        self.assertEqual((mode, v['format_id'], a['format_id']), ('split', '137', '140'))
+
+    def test_split_not_used_when_progressive_is_as_good(self):
+        info = {'title': 't', 'id': 'i', 'formats': [
+            yt('22', 720, a='mp4a.40.2', tbr=900), yt('136', 720), yt('140', None, v='none', a='mp4a', ext='m4a')]}
+        mode, fmt, _ = resolver.choose(info, '720', allow_split=True)
+        self.assertEqual((mode, fmt['format_id']), ('progressive', '22'))
+
+    def test_no_audio_means_progressive(self):
+        info = {'title': 't', 'id': 'i', 'formats': [yt('18', 360, a='mp4a'), yt('137', 1080)]}
+        self.assertEqual(resolver.choose(info, 'MAX', allow_split=True)[0], 'progressive')
+
+    def test_vk_behaviour_unchanged_with_split_enabled(self):
+        info = {'title': 'vk', 'id': 'v', 'formats': [vk('url480'), vk('url720')]}
+        mode, fmt, _ = resolver.choose(info, '480', allow_split=True)
+        self.assertEqual((mode, fmt['format_id']), ('progressive', 'url480'))
+
+    def test_prefer_keeps_partial_download_format(self):
+        mode, v, a = resolver.choose(self.info(), 'MAX', allow_split=True, prefer_format='136', prefer_audio='140')
+        self.assertEqual((v['format_id'], a['format_id']), ('136', '140'))
+        mode, f, _ = resolver.choose({'title': 't', 'id': 'i', 'formats': [vk('url360'), vk('url480')]},
+                                     '480', prefer_format='url360')
+        self.assertEqual(f['format_id'], 'url360')
+        # Формата больше нет — обычный выбор.
+        mode, f, _ = resolver.choose({'title': 't', 'id': 'i', 'formats': [vk('url480')]}, '480', prefer_format='url360')
+        self.assertEqual(f['format_id'], 'url480')
+
+    def test_describe_split_shape(self):
+        mode, v, a = resolver.choose(self.info(), '720', allow_split=True)
+        d = resolver.describe_split(self.info(), v, a, '720')
+        self.assertEqual(d['mode'], 'split')
+        self.assertEqual(d['audio_format_id'], '140')
+        self.assertEqual(d['audio_filesize'], 50)
+        self.assertEqual(d['audio_headers'], {'User-Agent': 'yt'})
+        self.assertEqual(d['uploader'], 'Автор')
+        self.assertEqual(d['height'], 720)
+        json.dumps(d)
+
+
 if __name__ == '__main__':
     unittest.main()

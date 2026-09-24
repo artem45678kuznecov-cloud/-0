@@ -178,7 +178,118 @@ def describe(info, fmt, quality):
         'thumbnail': str(entry.get('thumbnail') or ''),
         'headers': safe_headers(fmt.get('http_headers')),
         'extractor': str(entry.get('extractor') or ''),
+        'uploader': str(entry.get('uploader') or entry.get('channel') or entry.get('uploader_id') or ''),
+        'mode': 'progressive',
     }
+
+
+# ---------------------------------------------------------------------
+#  Раздельные дорожки (v0.2.0, только по настройке пользователя)
+# ---------------------------------------------------------------------
+# Склейка на телефоне идёт через MediaMuxer без перекодирования, а он
+# принимает в MP4 только H.264/H.265 и AAC. Поэтому выбираются лишь такие
+# пары; всё остальное (VP9, Opus, сегментные потоки) не берётся вовсе.
+
+MUX_VIDEO_CODECS = ('avc1', 'avc3', 'h264', 'hev1', 'hvc1', 'h265')
+MUX_AUDIO_CODECS = ('mp4a', 'aac')
+
+
+def _plain_http(fmt):
+    url = fmt.get('url')
+    if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+        return False
+    blob = (str(fmt.get('protocol') or '') + ' ' + str(fmt.get('format_id') or '')).lower()
+    return not any(h in blob for h in SEGMENTED_HINTS)
+
+
+def is_muxable_video(fmt):
+    if not isinstance(fmt, dict) or not _plain_http(fmt):
+        return False
+    v = str(fmt.get('vcodec') or 'none').lower()
+    a = str(fmt.get('acodec') or 'none').lower()
+    ext = str(fmt.get('ext') or '').lower()
+    return a == 'none' and v.startswith(MUX_VIDEO_CODECS) and ext in ('mp4', 'm4v')
+
+
+def is_muxable_audio(fmt):
+    if not isinstance(fmt, dict) or not _plain_http(fmt):
+        return False
+    v = str(fmt.get('vcodec') or 'none').lower()
+    a = str(fmt.get('acodec') or 'none').lower()
+    ext = str(fmt.get('ext') or '').lower()
+    return v == 'none' and a.startswith(MUX_AUDIO_CODECS) and ext in ('m4a', 'mp4')
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) else 0
+
+
+def pick_split_formats(info, quality):
+    """Лучшая пара видео+звук в пределах высоты или None."""
+    quality = str(quality or '480').upper()
+    entry = entry_of(info)
+    formats = entry.get('formats')
+    if not isinstance(formats, list):
+        return None
+    cap = HEIGHTS.get(quality)
+    videos = [f for f in formats if is_muxable_video(f) and fmt_height(f) > 0
+              and (cap is None or fmt_height(f) <= cap)]
+    audios = [f for f in formats if is_muxable_audio(f)]
+    if not videos or not audios:
+        return None
+    v = max(videos, key=lambda f: (fmt_height(f), _num(f.get('tbr')), _num(f.get('filesize') or f.get('filesize_approx'))))
+    a = max(audios, key=lambda f: (_num(f.get('abr')) or _num(f.get('tbr')), _num(f.get('filesize') or f.get('filesize_approx'))))
+    return v, a
+
+
+def _by_id(info, fid):
+    if not fid:
+        return None
+    for f in entry_of(info).get('formats') or []:
+        if isinstance(f, dict) and str(f.get('format_id')) == str(fid):
+            return f
+    return None
+
+
+def choose(info, quality, allow_split=False, prefer_format='', prefer_audio=''):
+    """
+    Итоговый выбор: ('progressive', fmt, None) | ('split', video, audio) | None.
+
+    prefer_* — форматы, из которых уже скачана часть файла. Если они есть в
+    свежем ответе, выбираются именно они: иначе .part продолжился бы байтами
+    другого файла. Если их больше нет — обычный выбор, а вызывающий сам
+    сбросит несовпавшую часть.
+    """
+    if prefer_format and prefer_audio:
+        v, a = _by_id(info, prefer_format), _by_id(info, prefer_audio)
+        if v is not None and a is not None:
+            return 'split', v, a
+    elif prefer_format:
+        f = _by_id(info, prefer_format)
+        if f is not None and (is_vk_direct(f) or is_combined(f)):
+            return 'progressive', f, None
+    progressive = pick_direct_format(info, quality)
+    if allow_split:
+        pair = pick_split_formats(info, quality)
+        if pair is not None and (progressive is None or fmt_height(pair[0]) > fmt_height(progressive)):
+            return 'split', pair[0], pair[1]
+    if progressive is None:
+        return None
+    return 'progressive', progressive, None
+
+
+def describe_split(info, video, audio, quality):
+    d = describe(info, video, quality)
+    asize = audio.get('filesize') or audio.get('filesize_approx')
+    d.update({
+        'mode': 'split',
+        'audio_url': str(audio.get('url') or ''),
+        'audio_format_id': str(audio.get('format_id') or ''),
+        'audio_headers': safe_headers(audio.get('http_headers')),
+        'audio_filesize': int(asize) if isinstance(asize, (int, float)) and asize > 0 else 0,
+        'ext': 'mp4',
+    })
+    return d
 
 
 # ---------------------------------------------------------------------
@@ -218,23 +329,28 @@ def ytdlp_version():
         return 'unavailable: %r' % (e,)
 
 
-def resolve(url, quality='480'):
+def resolve(url, quality='480', allow_split=False, prefer_format='', prefer_audio=''):
     """
     Точка входа из Kotlin. Всегда возвращает строку JSON и никогда не
     бросает исключение наружу: ошибка — это {'ok': False, 'error': ...}.
+
+    allow_split=False — ровно поведение v0.1.0: только прямой файл со звуком.
     """
     try:
         _prepare_ssl()
         import yt_dlp
         with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
             info = ydl.extract_info(str(url), download=False)
-        fmt = pick_direct_format(info, quality)
-        if fmt is None:
+        picked = choose(info, quality, bool(allow_split), str(prefer_format or ''), str(prefer_audio or ''))
+        if picked is None:
             return json.dumps({
                 'ok': False,
                 'error': 'Нет прямого формата со звуком (нужен был бы ffmpeg)',
                 'kind': 'no-direct-format',
             }, ensure_ascii=False)
+        mode, fmt, audio = picked
+        if mode == 'split':
+            return json.dumps(describe_split(info, fmt, audio, quality), ensure_ascii=False)
         return json.dumps(describe(info, fmt, quality), ensure_ascii=False)
     except Exception as e:
         text = str(e) or e.__class__.__name__

@@ -35,6 +35,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         applicationId = "com.nox.offline"
         minSdk = 26
         targetSdk = 35
@@ -99,6 +100,11 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+
+    // Схемы Room нужны инструментальному тесту миграции на устройстве.
+    sourceSets {
+        getByName("androidTest").assets.srcDir("$projectDir/schemas")
+    }
 }
 
 ksp {
@@ -147,6 +153,11 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
 
     testImplementation("junit:junit:4.13.2")
+
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.room:room-testing:2.6.1")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     // Настоящие org.json и SQLite для JVM-тестов (в android.jar это заглушки).
     testImplementation("org.json:json:20240303")
     testImplementation("org.xerial:sqlite-jdbc:3.46.1.3")

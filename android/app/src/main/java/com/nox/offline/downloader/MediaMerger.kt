@@ -49,6 +49,10 @@ object MediaMerger {
             val outA = try { m.addTrack(aFormat) } catch (e: Exception) {
                 throw MergeException("аудио-кодек ${aFormat.getString(MediaFormat.KEY_MIME)} не подходит для MP4")
             }
+            // Поворот кадра (вертикальные ролики) переносится как есть.
+            if (vFormat.containsKey(MediaFormat.KEY_ROTATION)) {
+                runCatching { m.setOrientationHint(vFormat.getInteger(MediaFormat.KEY_ROTATION)) }
+            }
             m.start()
             started = true
             val duration = maxOf(durationOf(vFormat), durationOf(aFormat)).coerceAtLeast(1)
@@ -84,6 +88,9 @@ object MediaMerger {
                     onProgress((info.presentationTimeUs.toFloat() / duration).coerceIn(0f, 1f))
                 }
             }
+            // stop() дописывает индекс MP4: его ошибка — это ошибка склейки.
+            started = false
+            m.stop()
             onProgress(1f)
         } catch (t: Throwable) {
             output.delete()

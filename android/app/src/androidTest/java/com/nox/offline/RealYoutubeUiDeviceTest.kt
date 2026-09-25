@@ -62,7 +62,9 @@ class RealYoutubeUiDeviceTest {
         runCatching {
             val bmp = compose.onRoot().captureToImage().asAndroidBitmap()
             val bytes = ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
-            val fds = instr.uiAutomation.executeShellCommandRw("sh -c 'mkdir -p /data/local/tmp/nox-shots && cat > /data/local/tmp/nox-shots/$name.png'")
+            // Без оболочки: каталог создаёт mkdir, файл пишет dd из stdin.
+            instr.uiAutomation.executeShellCommand("mkdir -p /data/local/tmp/nox-shots").close()
+            val fds = instr.uiAutomation.executeShellCommandRw("dd of=/data/local/tmp/nox-shots/$name.png")
             ParcelFileDescriptor.AutoCloseOutputStream(fds[1]).use { it.write(bytes) }
             ParcelFileDescriptor.AutoCloseInputStream(fds[0]).use { it.readBytes() }
         }

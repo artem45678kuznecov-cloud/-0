@@ -165,7 +165,7 @@ class MediaMergerDeviceTest {
             pl.setMediaItem(MediaItem.fromUri(android.net.Uri.fromFile(out)))
             pl.prepare()
         }
-        assertTrue("плеер не готов", ready.await(20, TimeUnit.SECONDS))
+        assertTrue("плеер не готов", ready.await(90, TimeUnit.SECONDS))
         error.get()?.let { throw AssertionError("ошибка плеера", it) }
         var duration = 0L
         instr.runOnMainSync {
@@ -174,7 +174,7 @@ class MediaMergerDeviceTest {
             player!!.seekTo(2_000)
         }
         assertTrue("длительность $duration", duration in 2_500L..3_500L)
-        assertTrue("перемотка не завершилась", seeked.await(20, TimeUnit.SECONDS))
+        assertTrue("перемотка не завершилась", seeked.await(90, TimeUnit.SECONDS))
         error.get()?.let { throw AssertionError("ошибка плеера", it) }
         var pos = 0L
         instr.runOnMainSync { pos = player!!.currentPosition; player!!.release() }

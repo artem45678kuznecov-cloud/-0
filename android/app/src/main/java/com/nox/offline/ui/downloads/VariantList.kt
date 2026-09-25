@@ -175,7 +175,8 @@ fun VariantRow(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(v.title, color = if (enabled) Nox.TextPrimary else Nox.TextMuted,
                         fontSize = if (compact) 16.sp else 19.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                    if (v.fps > 0) {
+                    // «60» уже в заголовке (1440p60); отдельно показываем обычную частоту: 24, 25, 30 к/с.
+                    if (v.fps in 1..30) {
                         HSpace(8)
                         Muted("${v.fps} к/с", size = 12.sp, color = Nox.TextSecondary, maxLines = 1)
                     }

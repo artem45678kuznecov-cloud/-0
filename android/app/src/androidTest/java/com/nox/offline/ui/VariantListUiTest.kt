@@ -2,6 +2,7 @@ package com.nox.offline.ui
 
 import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -11,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasText
@@ -59,7 +61,7 @@ class VariantListUiTest {
     private fun show(c: FormatCatalog) {
         selected = c.preselect(1080)?.key
         rule.setContent {
-            Column(Modifier.width(400.dp).verticalScroll(rememberScrollState()).padding(12.dp)) {
+            Column(Modifier.width(400.dp).background(Color(0xFF1A1320)).verticalScroll(rememberScrollState()).padding(12.dp)) {
                 VideoDetailsCard(c.details)
                 LanguageChips(c, {})
                 VariantList(c, selected, expanded, { selected = it }, { expanded = if (expanded == it) null else it })
@@ -71,7 +73,9 @@ class VariantListUiTest {
         runCatching {
             val bmp = rule.onRoot().captureToImage().asAndroidBitmap()
             val bytes = ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
-            val fds = instr.uiAutomation.executeShellCommandRw("sh -c 'mkdir -p /data/local/tmp/nox-shots && cat > /data/local/tmp/nox-shots/$name.png'")
+            // Без оболочки: каталог создаёт mkdir, файл пишет dd из stdin.
+            instr.uiAutomation.executeShellCommand("mkdir -p /data/local/tmp/nox-shots").close()
+            val fds = instr.uiAutomation.executeShellCommandRw("dd of=/data/local/tmp/nox-shots/$name.png")
             ParcelFileDescriptor.AutoCloseOutputStream(fds[1]).use { it.write(bytes) }
             ParcelFileDescriptor.AutoCloseInputStream(fds[0]).use { it.readBytes() }
         }

@@ -55,6 +55,9 @@ class NoxApp : Application() {
     lateinit var updates: UpdateRepository
         private set
 
+    /** Версия Android и декодеры телефона — для каталога вариантов качества. */
+    val deviceCaps: com.nox.offline.downloader.catalog.DeviceCaps by lazy { com.nox.offline.downloader.catalog.AndroidDeviceCaps() }
+
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {

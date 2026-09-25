@@ -136,10 +136,13 @@ private fun Section(title: String) {
 fun DownloadSettingsContent(vm: MainViewModel, actions: NoxActions) {
     val dl by vm.downloadPrefs.collectAsState()
     val sheets = LocalSheets.current
-    SettingSwitch("Раздельные дорожки для высокого качества",
-        "Если сайт отдаёт видео и звук отдельно (например, 1080p на YouTube), NOX скачает обе дорожки и склеит их без перекодирования. " +
-            "Выключено — выбор как в v0.1.0: только готовый файл со звуком.",
-        dl.splitTracks, vm::setSplitTracks)
+    PreferredQuality(dl.preferredHeight, vm::setPreferredHeight)
+    VSpace(6)
+    SettingSwitch("Сначала предлагать готовый файл со звуком",
+        "Если у ступени качества есть и готовый файл, и отдельные видео и звук, заранее выделять готовый файл. " +
+            "Это только предварительный выбор: любой вариант, включая 1440p и выше, можно выбрать в списке — " +
+            "видео и звук NOX объединит сам, без перекодирования.",
+        dl.preferSingleFile, vm::setPreferSingleFile)
     VSpace(4)
     SettingRow("Папка готовых видео", vm.destinationStatus(), Icons.Rounded.Folder, actions.pickDestination,
         trailing = if (dl.destinationTree.isBlank()) "Выбрать" else "Изменить")
@@ -159,5 +162,28 @@ fun DownloadSettingsContent(vm: MainViewModel, actions: NoxActions) {
     Muted("Незавершённые загрузки (.part) всегда хранятся во временной папке NOX — это надёжнее для докачки. " +
         "Готовые видео в выбранной вами папке не удаляются вместе с приложением.", size = 12.sp)
     VSpace(4)
-    Muted("Раздельные дорожки поддерживаются только в H.264/H.265 + AAC; DRM и закрытый контент не обходятся.", size = 12.sp)
+    Muted("Объединение без перекодирования: H.264/H.265 + AAC → MP4, VP9 + Opus → WebM (Android 10+), AV1 + AAC → MP4 (Android 14+). " +
+        "DRM и закрытый контент не обходятся.", size = 12.sp)
+}
+
+/**
+ * Какое качество выделять заранее в списке вариантов. Не фиксированная
+ * панель: список всегда строится из настоящих форматов видео.
+ */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun PreferredQuality(current: Int, onChange: (Int) -> Unit) {
+    Text("Качество по умолчанию", color = Nox.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+    VSpace(2)
+    Muted("Какой вариант выделять заранее, если он есть у видео. Выбор всё равно за вами.", size = 12.sp, color = Nox.TextSecondary)
+    VSpace(8)
+    androidx.compose.foundation.layout.FlowRow(
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+    ) {
+        for ((h, label) in listOf(480 to "до 480p", 720 to "до 720p", 1080 to "до 1080p", 1440 to "до 1440p",
+            2160 to "до 2160p", 0 to "Наилучшее")) {
+            com.nox.offline.ui.components.GlassPill(label, accent = current == h, height = 38.dp, textSize = 14.sp, onClick = { onChange(h) })
+        }
+    }
 }

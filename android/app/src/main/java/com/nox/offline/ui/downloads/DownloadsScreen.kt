@@ -25,6 +25,9 @@ import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,6 +45,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nox.offline.core.SafeUrl
 import com.nox.offline.data.db.DownloadStatus
 import com.nox.offline.ui.MainViewModel
 import com.nox.offline.ui.NoxActions
@@ -52,8 +56,9 @@ import com.nox.offline.ui.components.GlassIconButton
 import com.nox.offline.ui.components.GlassPill
 import com.nox.offline.ui.components.HSpace
 import com.nox.offline.ui.components.LocalSheets
+import com.nox.offline.ui.components.NoxProgress
+import com.nox.offline.ui.components.ProgressKind
 import com.nox.offline.ui.components.Muted
-import com.nox.offline.ui.components.QualitySelector
 import com.nox.offline.ui.components.ScreenTitle
 import com.nox.offline.ui.components.SheetAction
 import com.nox.offline.ui.components.StorageCard
@@ -83,37 +88,7 @@ fun DownloadsScreen(vm: MainViewModel, actions: NoxActions, contentPadding: Padd
             }
         }
         item("input") { UrlGroup(vm, actions, Modifier.padding(horizontal = 20.dp)) }
-        item("quality") {
-            Column(Modifier.padding(horizontal = 20.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Заголовок никогда не рвётся посреди слова; при крупном шрифте
-                    // переносится подсказка справа.
-                    Text("Качество", color = Nox.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, softWrap = false)
-                    HSpace(12)
-                    Muted("Выше качество — больше файл", Modifier.weight(1f), size = 13.sp, color = Nox.TextSecondary,
-                        maxLines = 2, align = androidx.compose.ui.text.style.TextAlign.End)
-                }
-                VSpace(12)
-                val q by vm.quality.collectAsState()
-                QualitySelector(q, vm::setQuality)
-            }
-        }
-        item("go") {
-            val url by vm.urlInput.collectAsState()
-            Column(Modifier.padding(horizontal = 20.dp)) {
-                GlassButton("Скачать", onClick = vm::startDownload, icon = Icons.Rounded.Download,
-                    enabled = url.isNotBlank(), modifier = Modifier.fillMaxWidth(), height = 66.dp, textSize = 23.sp)
-                VSpace(10)
-                Muted("Загрузка продолжается в фоне. Можно свернуть NOX или заблокировать экран.",
-                    size = 14.sp, color = Nox.TextSecondary, align = TextAlign.Center, modifier = Modifier.fillMaxWidth())
-                if (message.isNotBlank()) {
-                    VSpace(6)
-                    Muted(message, size = 14.sp, color = nox().accentLight, align = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth().clickable { vm.clearMessage() })
-                }
-            }
-        }
+        item("finder") { FinderPanel(vm, Modifier.padding(horizontal = 20.dp)) }
         item("queue-title") {
             Row(Modifier.padding(horizontal = 20.dp).heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Очередь загрузок", color = Nox.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
@@ -139,7 +114,7 @@ fun DownloadsScreen(vm: MainViewModel, actions: NoxActions, contentPadding: Padd
         }
         if (live.isEmpty()) {
             item("empty") {
-                EmptyDownloads("Очередь пуста", "Вставьте ссылку выше и нажмите «Скачать»", Modifier.padding(horizontal = 20.dp))
+                EmptyDownloads("Очередь пуста", "Вставьте ссылку выше и нажмите «Найти видео»", Modifier.padding(horizontal = 20.dp))
             }
         }
         items(live, key = { it.id }) { d ->
@@ -182,7 +157,7 @@ private fun UrlGroup(vm: MainViewModel, actions: NoxActions, modifier: Modifier)
                             cursorBrush = SolidColor(p.accentLight),
                             maxLines = 3,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
-                            keyboardActions = KeyboardActions(onGo = { vm.startDownload() }),
+                            keyboardActions = KeyboardActions(onGo = { vm.findVideo() }),
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
@@ -198,7 +173,7 @@ private fun UrlGroup(vm: MainViewModel, actions: NoxActions, modifier: Modifier)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Rounded.Info, null, tint = Nox.TextMuted, modifier = Modifier.size(18.dp))
                 HSpace(8)
-                Muted("VK Video и другие сайты, которые понимает yt-dlp", size = 13.sp, color = Nox.TextSecondary,
+                Muted("YouTube, VK Видео и другие сайты, которые понимает yt-dlp", size = 13.sp, color = Nox.TextSecondary,
                     modifier = Modifier.weight(1f), maxLines = 2)
                 Row(
                     Modifier.clickable(role = Role.Button) { actions.openBatch(url) }.padding(6.dp),
@@ -209,6 +184,101 @@ private fun UrlGroup(vm: MainViewModel, actions: NoxActions, modifier: Modifier)
                     Text("Несколько", color = p.accentLight, fontSize = 14.sp)
                 }
             }
+        }
+    }
+}
+
+/**
+ * «Найти видео» → «Получаем информацию…» → карточка и настоящие варианты
+ * качества → «Скачать». До нажатия «Скачать» файл не передаётся.
+ */
+@Composable
+private fun FinderPanel(vm: MainViewModel, modifier: Modifier) {
+    val state by vm.finder.state.collectAsState()
+    val url by vm.urlInput.collectAsState()
+    val message by vm.message.collectAsState()
+    val p = nox()
+    Column(modifier) {
+        when (val s = state) {
+            FinderState.Idle -> {
+                GlassButton("Найти видео", onClick = vm::findVideo, icon = Icons.Rounded.Search,
+                    enabled = url.isNotBlank(), modifier = Modifier.fillMaxWidth(), height = 66.dp, textSize = 23.sp)
+                VSpace(10)
+                Muted("NOX покажет варианты качества именно этого видео. Скачивание начнётся только после вашего выбора.",
+                    size = 14.sp, color = Nox.TextSecondary, align = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            }
+            is FinderState.Searching -> GlassSurface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(26.dp),
+                style = GlassStyles.Card, contentPadding = PaddingValues(16.dp)) {
+                Column {
+                    Text("Получаем информацию…", color = Nox.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    VSpace(4)
+                    Muted(SafeUrl.host(s.url), size = 13.sp, color = Nox.TextSecondary, maxLines = 1)
+                    VSpace(12)
+                    NoxProgress(0f, kind = ProgressKind.INDETERMINATE)
+                    VSpace(12)
+                    GlassPill("Отмена", icon = Icons.Rounded.Close, height = 40.dp, textSize = 14.sp, onClick = { vm.finder.cancel() })
+                }
+            }
+            is FinderState.Failed -> GlassSurface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(26.dp),
+                style = GlassStyles.Card, contentPadding = PaddingValues(16.dp)) {
+                Column {
+                    Text("Не удалось получить видео", color = Nox.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    VSpace(6)
+                    Muted(s.error.message, size = 14.sp, color = Nox.Danger.copy(alpha = 0.9f))
+                    VSpace(12)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        GlassPill("Повторить", icon = Icons.Rounded.Refresh, accent = true, height = 42.dp, textSize = 14.sp,
+                            onClick = { vm.finder.retry() })
+                        GlassPill("Отмена", icon = Icons.Rounded.Close, height = 42.dp, textSize = 14.sp, onClick = { vm.finder.cancel() })
+                    }
+                }
+            }
+            is FinderState.Ready -> GlassSurface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(26.dp),
+                style = GlassStyles.Card.copy(glow = 0.2f), contentPadding = PaddingValues(14.dp)) {
+                Column {
+                    VideoDetailsCard(s.catalog.details)
+                    if (vm.finder.replanId != null) {
+                        VSpace(10)
+                        Muted("Прежний вариант больше недоступен. Выберите качество — старые части будут удалены.",
+                            size = 13.sp, color = p.accentLight)
+                    }
+                    VSpace(14)
+                    LanguageChips(s.catalog, { vm.finder.setLanguage(it) })
+                    if (s.catalog.languages.size > 1) VSpace(12)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Качество", color = Nox.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, softWrap = false)
+                        HSpace(10)
+                        Muted("варианты этого видео", Modifier.weight(1f), size = 13.sp, color = Nox.TextSecondary,
+                            maxLines = 1, align = TextAlign.End)
+                    }
+                    VSpace(10)
+                    VariantList(s.catalog, s.selectedKey, s.expanded, { vm.finder.select(it) }, { vm.finder.toggleDetails(it) })
+                    if (!s.catalog.hasSupported) {
+                        VSpace(8)
+                        Muted("Ни один вариант этого видео NOX не может скачать на этом телефоне — причины указаны выше.",
+                            size = 13.sp, color = Nox.TextSecondary)
+                    }
+                    VSpace(14)
+                    val sel = s.selected
+                    GlassButton(if (sel != null) "Скачать ${sel.title} · ${sizeText(sel)}" else "Выберите качество",
+                        onClick = vm::downloadSelected, icon = Icons.Rounded.Download, enabled = sel != null,
+                        modifier = Modifier.fillMaxWidth(), height = 62.dp, textSize = 19.sp)
+                    VSpace(8)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Muted(sel?.let { techLine(it) } ?: "", Modifier.weight(1f), size = 12.sp, color = Nox.TextSecondary, maxLines = 2)
+                        GlassPill("Отмена", height = 38.dp, textSize = 13.sp, onClick = { vm.finder.cancel() })
+                    }
+                }
+            }
+        }
+        VSpace(10)
+        Muted("Загрузка продолжается в фоне. Можно свернуть NOX или заблокировать экран.",
+            size = 13.sp, color = Nox.TextSecondary, align = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+        if (message.isNotBlank()) {
+            VSpace(6)
+            Muted(message, size = 14.sp, color = p.accentLight, align = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().clickable { vm.clearMessage() })
         }
     }
 }

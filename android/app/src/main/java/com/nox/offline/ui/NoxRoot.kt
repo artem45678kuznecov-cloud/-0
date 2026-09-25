@@ -209,7 +209,8 @@ private fun RootContent(
         val t = requests.sharedText ?: return@LaunchedEffect
         requests.sharedText = null
         route = null; tab = Tab.DOWNLOADS
-        if (com.nox.offline.core.LinkParser.links(t).size > 1) actions.openBatch(t) else vm.setUrl(com.nox.offline.core.SafeUrl.extract(t) ?: t)
+        // Одна ссылка — сразу та же карточка, что и после «Найти видео».
+        if (com.nox.offline.core.LinkParser.links(t).size > 1) actions.openBatch(t) else vm.openShared(com.nox.offline.core.SafeUrl.extract(t) ?: t)
     }
     val pendingBatch by vm.pendingBatch.collectAsState()
     LaunchedEffect(pendingBatch) {
@@ -338,7 +339,11 @@ private fun mediaMenu(item: LibraryItem, vm: MainViewModel, sheets: SheetControl
 }
 
 private fun downloadMenu(d: DownloadEntity, vm: MainViewModel, sheets: SheetController, start: (Intent) -> Unit) {
+    val rechoose = d.status == com.nox.offline.data.db.DownloadStatus.ERROR &&
+        d.errorKind in setOf("format-gone", "format-changed", "size-mismatch")
     sheets.actions(d.displayTitle.ifBlank { "Загрузка" }, com.nox.offline.ui.components.statusLabel(d), listOfNotNull(
+        if (rechoose) SheetAction("Выбрать качество заново", Icons.Rounded.Edit,
+            hint = "Прежний вариант недоступен; части будут удалены после нового выбора") { vm.rechoose(d) } else null,
         SheetAction("Переименовать", Icons.Rounded.Edit, hint = "Файл получит имя при завершении") {
             sheets.show("Название загрузки") { close ->
                 RenameSheet(d.displayTitle, allowFile = false) { title, _ -> vm.renameDownload(d.id, title); close() }

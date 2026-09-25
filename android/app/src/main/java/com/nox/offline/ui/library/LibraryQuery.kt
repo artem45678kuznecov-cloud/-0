@@ -47,7 +47,8 @@ object LibraryQuery {
                 WatchFilter.IN_PROGRESS -> p?.inProgress == true
                 WatchFilter.WATCHED -> p?.completed == true
             }
-            val h = m.height
+            // Вертикальное 1080×1920 — это 1080p: считаем по короткой стороне, если она известна.
+            val h = if (m.width > 0 && m.height > 0) minOf(m.width, m.height) else m.height
             val quality = when (f.quality) {
                 QualityFilter.ANY -> true
                 QualityFilter.SD -> h in 1..480

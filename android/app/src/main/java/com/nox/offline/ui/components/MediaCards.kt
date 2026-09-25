@@ -50,11 +50,20 @@ import com.nox.offline.ui.theme.Nox
 import com.nox.offline.ui.theme.nox
 import java.io.File
 
+private val NEW_LABEL = Regex("\\d{3,4}p\\d{0,3}")
+
 /** Видео медиатеки вместе с его позицией просмотра. */
 @Immutable
 data class LibraryItem(val media: MediaEntity, val playback: PlaybackEntity?) {
     val id: Long get() = media.id
-    val qualityLabel: String get() = if (media.height > 0) "${media.height}p" else media.quality
+    /** Подпись качества: сохранённая при загрузке («1440p60») или по кадру для старых записей. */
+    val qualityLabel: String
+        get() = when {
+            NEW_LABEL.matches(media.quality) -> media.quality
+            media.width > 0 && media.height > 0 -> "${minOf(media.width, media.height)}p"
+            media.height > 0 -> "${media.height}p"
+            else -> media.quality
+        }
     val durationLabel: String get() = Format.clock(media.durationSec)
 
     /** «12 мин • 480p • 67 МБ» — только то, что действительно известно. */

@@ -27,13 +27,16 @@ data class FormatCatalog(
      * [preferredHeight] (0 — без ограничения), который телефон, скорее всего,
      * воспроизведёт. Пользователь видит выбор и подтверждает его сам.
      */
-    fun preselect(preferredHeight: Int): Variant? {
+    fun preselect(preferredHeight: Int, preferSingleFile: Boolean = false): Variant? {
         val ok = main.filter { it.support.ok }
         if (ok.isEmpty()) return null
         val playable = ok.filter { it.playback != Playback.UNLIKELY }.ifEmpty { ok }
-        if (preferredHeight <= 0) return playable.first()
-        return playable.firstOrNull { it.tierHeight in 1..preferredHeight }
-            ?: playable.lastOrNull()
+        val pick = if (preferredHeight <= 0) playable.first()
+        else playable.firstOrNull { it.tierHeight in 1..preferredHeight } ?: playable.lastOrNull()
+        if (preferSingleFile && pick != null && pick.needsMerge) {
+            variants.firstOrNull { it.groupKey == pick.groupKey && !it.needsMerge && it.support.ok }?.let { return it }
+        }
+        return pick
     }
 }
 

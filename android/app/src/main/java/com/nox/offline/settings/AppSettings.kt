@@ -75,11 +75,21 @@ data class Appearance(
 }
 
 data class DownloadPrefs(
+    /** 0.2.x: разрешение раздельных дорожек. С 0.3.0 объединение идёт само, когда его требует выбранный вариант. */
     val splitTracks: Boolean = false,
     /** content:// дерева SAF для готовых видео или '' — внутри NOX. */
     val destinationTree: String = "",
     val destinationLabel: String = "",
+    /** 0.2.x: 360 / 480 / 720 / MAX. Читается только для переноса в [preferredHeight]. */
     val defaultQuality: String = "480",
+    /**
+     * Какое качество выделять заранее в списке вариантов: высота кадра
+     * (480, 720, 1080, 1440, 2160) или 0 — наилучшее. Это только
+     * предварительный выбор: пользователь видит все варианты и выбирает сам.
+     */
+    val preferredHeight: Int = 1080,
+    /** Выделять заранее готовый файл со звуком, если он есть той же ступени. */
+    val preferSingleFile: Boolean = false,
 )
 
 data class PlayerPrefs(
@@ -162,7 +172,17 @@ class AppSettings(context: Context) {
         destinationTree = prefs.getString("destinationTree", "") ?: "",
         destinationLabel = prefs.getString("destinationLabel", "") ?: "",
         defaultQuality = prefs.getString("defaultQuality", "480") ?: "480",
+        preferredHeight = if (prefs.contains("preferredHeight")) prefs.getInt("preferredHeight", 1080)
+        else legacyHeight(prefs.getString("defaultQuality", null)),
+        preferSingleFile = prefs.getBoolean("preferSingleFile", false),
     )
+
+    /** Перенос выбора 0.2.x: прежняя кнопка качества становится предпочтением. */
+    private fun legacyHeight(q: String?): Int = when (q) {
+        null -> 1080
+        "MAX" -> 0
+        else -> q.toIntOrNull() ?: 1080
+    }
 
     fun updateDownloads(transform: (DownloadPrefs) -> DownloadPrefs) {
         val next = transform(_downloads.value)
@@ -171,6 +191,8 @@ class AppSettings(context: Context) {
             .putString("destinationTree", next.destinationTree)
             .putString("destinationLabel", next.destinationLabel)
             .putString("defaultQuality", next.defaultQuality)
+            .putInt("preferredHeight", next.preferredHeight)
+            .putBoolean("preferSingleFile", next.preferSingleFile)
             .apply()
         _downloads.value = next
     }
@@ -226,6 +248,7 @@ class AppSettings(context: Context) {
                 v is Number && current is Long -> e.putLong(k, v.toLong())
                 v is Number && current is Int -> e.putInt(k, v.toInt())
                 v is Number && current == null && k in FLOAT_KEYS -> e.putFloat(k, v.toFloat())
+                v is Number && current == null && k in INT_KEYS -> e.putInt(k, v.toInt())
                 v is String && (current == null || current is String) -> e.putString(k, v)
             }
         }
@@ -238,5 +261,6 @@ class AppSettings(context: Context) {
     companion object {
         private val FLOAT_KEYS = setOf("customHue", "glassOpacity", "glowStrength", "effectIntensity",
             "focusX", "focusY", "zoom", "dim", "wpBlur")
+        private val INT_KEYS = setOf("preferredHeight")
     }
 }

@@ -66,6 +66,7 @@ class VideoImporter(
                 coverPath = cover,
                 createdAt = System.currentTimeMillis(),
                 imported = true,
+                container = ext,
             )
             val id = db.media().insert(entity)
             NoxLog.event("import-done", "media" to id, "size" to target.length())

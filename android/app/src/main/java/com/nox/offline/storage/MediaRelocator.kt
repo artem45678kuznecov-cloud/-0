@@ -1,5 +1,6 @@
 package com.nox.offline.storage
 
+import com.nox.offline.core.MediaTypes
 import com.nox.offline.core.AppEvents
 import com.nox.offline.core.NoxLog
 import com.nox.offline.data.db.MediaEntity
@@ -52,7 +53,7 @@ class MediaRelocator(
         val file = File(m.filePath)
         if (!file.exists()) return@withContext clear(m, Outcome.Failed("файл не найден"))
         try {
-            val uri = saf.copyInto(tree, file, file.name, "video/mp4", onProgress)
+            val uri = saf.copyInto(tree, file, file.name, MediaTypes.mimeForName(file.name), onProgress)
             db.media().update(m.copy(contentUri = uri.toString(), filePath = "", moveState = ""))
             if (!file.delete()) NoxLog.event("move-delete-source-failed", "media" to mediaId)
             NoxLog.event("move-done", "media" to mediaId, "size" to file.length())

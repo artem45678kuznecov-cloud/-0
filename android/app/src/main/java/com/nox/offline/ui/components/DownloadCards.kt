@@ -38,6 +38,7 @@ import com.nox.offline.core.Format
 import com.nox.offline.core.Storage
 import com.nox.offline.data.db.DownloadEntity
 import com.nox.offline.data.db.DownloadStatus
+import com.nox.offline.downloader.catalog.CodecNames
 import com.nox.offline.ui.glass.GlassStyles
 import com.nox.offline.ui.glass.GlassSurface
 import com.nox.offline.ui.theme.Nox
@@ -50,12 +51,12 @@ fun statusLabel(d: DownloadEntity): String = when (d.status) {
         d.retries > 0 || d.resolveRetries > 0 -> "Повтор после сбоя"
         else -> "В очереди"
     }
-    DownloadStatus.RESOLVING -> "Разбор ссылки"
+    DownloadStatus.RESOLVING -> if (d.isPlanned) "Получение ссылки" else "Разбор ссылки"
     DownloadStatus.DOWNLOADING -> if (d.isSplit) {
         if (!d.videoDone) "Скачивается видео" else "Скачивается звук"
     } else "Скачивается"
     DownloadStatus.PAUSED -> "Приостановлено"
-    DownloadStatus.PROCESSING -> if (d.isSplit) "Склейка дорожек" else "Завершение"
+    DownloadStatus.PROCESSING -> if (d.isSplit) "Объединение дорожек…" else "Завершение"
     DownloadStatus.COMPLETED -> "Готово"
     DownloadStatus.ERROR -> "Ошибка"
 }
@@ -116,15 +117,19 @@ fun DownloadCard(
                 val frac = if (d.totalBytes > 0) d.downloadedBytes.toFloat() / d.totalBytes else 0f
                 NoxProgress(frac, kind = kind, dim = d.status == DownloadStatus.PAUSED)
                 VSpace(6)
+                // Настоящее качество задания («1440p60 · WebM»), а не «MAX».
+                val quality = listOfNotNull(d.qualityLabel.takeIf { it.isNotBlank() },
+                    d.container.takeIf { it.isNotBlank() }?.let { CodecNames.container(it) }).joinToString(" · ")
                 val line = when {
                     d.status == DownloadStatus.ERROR -> d.error.ifBlank { "Не удалось скачать" }
                     d.status == DownloadStatus.DOWNLOADING && d.totalBytes > 0 ->
-                        listOfNotNull("${d.progressPercent}%",
+                        listOfNotNull(quality.ifBlank { null }, "${d.progressPercent}%",
                             if (d.speedBps > 0) Format.speed(d.speedBps) else null,
                             if (d.etaSec >= 0 && d.speedBps > 0) "осталось ${Format.etaClock(d.etaSec)}" else null).joinToString("  •  ")
-                    d.status == DownloadStatus.DOWNLOADING -> if (d.speedBps > 0) Format.speed(d.speedBps) else "Соединение…"
-                    d.totalBytes > 0 -> "${d.progressPercent}%"
-                    else -> "${d.quality}${if (d.quality == "MAX") "" else "p"}"
+                    d.status == DownloadStatus.DOWNLOADING ->
+                        listOfNotNull(quality.ifBlank { null }, if (d.speedBps > 0) Format.speed(d.speedBps) else "Соединение…").joinToString("  •  ")
+                    d.totalBytes > 0 -> listOfNotNull(quality.ifBlank { null }, "${d.progressPercent}%").joinToString("  •  ")
+                    else -> quality
                 }
                 Muted(line, size = 12.sp, color = if (d.status == DownloadStatus.ERROR) Nox.Danger.copy(alpha = 0.85f) else Nox.TextMuted, maxLines = 2)
             }

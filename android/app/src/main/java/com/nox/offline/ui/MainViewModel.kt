@@ -11,14 +11,20 @@ import com.nox.offline.NoxApp
 import com.nox.offline.core.FileNames
 import com.nox.offline.core.Format
 import com.nox.offline.core.LinkParser
+import com.nox.offline.core.MediaTypes
 import com.nox.offline.core.NoxLog
 import com.nox.offline.core.SafeUrl
 import com.nox.offline.core.Storage
 import com.nox.offline.data.db.DownloadEntity
 import com.nox.offline.data.db.DownloadStatus
 import com.nox.offline.data.db.MediaEntity
-import com.nox.offline.downloader.Quality
+import com.nox.offline.downloader.DownloadCoordinator
 import com.nox.offline.downloader.TransferScheduler
+import com.nox.offline.downloader.catalog.AnalyzeResult
+import com.nox.offline.ui.downloads.BatchFinder
+import com.nox.offline.ui.downloads.FinderState
+import com.nox.offline.ui.downloads.PickPrefs
+import com.nox.offline.ui.downloads.VideoFinder
 import com.nox.offline.settings.Appearance
 import com.nox.offline.storage.FileOps
 import com.nox.offline.storage.MediaLocator
@@ -37,6 +43,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -108,8 +115,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---------------- ввод ссылки ----------------
 
     val urlInput = MutableStateFlow("")
-    val quality = MutableStateFlow(Quality.fromKey(settings.downloads.value.defaultQuality))
     val message = MutableStateFlow("")
+
+    private val pickPrefs = { settings.downloads.value.let { PickPrefs(it.preferredHeight, it.preferSingleFile) } }
+    private val analyzeGate = Semaphore(VideoFinder.PARALLEL_ANALYSES)
+    private val analyze: (String) -> AnalyzeResult = { url -> nox.resolver.analyze(url) }
+
+    /** «Найти видео»: карточка и реальные варианты качества конкретного видео. */
+    val finder = VideoFinder(viewModelScope, analyze, nox.deviceCaps, pickPrefs, gate = analyzeGate)
+
+    /** Пакет ссылок: у каждой свой каталог и свой выбор. */
+    val batch = BatchFinder(viewModelScope, analyze, nox.deviceCaps, pickPrefs, gate = analyzeGate)
     /** Текст для листа массового добавления (например, пришёл через «Поделиться»). */
     val pendingBatch = MutableStateFlow<String?>(null)
 
@@ -128,28 +144,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         urlInput.value = text
+        // Другая ссылка — прежние варианты недействительны.
+        finder.onUrlChanged(SafeUrl.extract(text) ?: text.trim())
     }
 
-    fun setQuality(q: Quality) {
-        quality.value = q
-        settings.updateDownloads { it.copy(defaultQuality = q.key) }
-    }
-
-    /** «Скачать»: задание в очередь и запуск носителя. Только из видимого окна. */
-    fun startDownload() {
+    /** «Найти видео»: один разбор страницы, без передачи файла. */
+    fun findVideo() {
         val url = SafeUrl.extract(urlInput.value) ?: urlInput.value.trim()
         if (!SafeUrl.looksLikeUrl(url)) {
             message.value = "Вставьте ссылку на видео"
             return
         }
+        message.value = ""
+        finder.search(url)
+    }
+
+    /** «Поделиться в NOX»: та же карточка, что и после «Найти видео». */
+    fun openShared(text: String) {
+        setUrl(text)
+        if (LinkParser.links(text).size <= 1) findVideo()
+    }
+
+    /** Выбрать качество заново для остановленного задания (вариант пропал или изменился). */
+    fun rechoose(d: DownloadEntity) {
+        urlInput.value = d.pageUrl
+        finder.search(d.pageUrl)
+        finder.replanId = d.id
+    }
+
+    /** «Скачать» выбранный вариант: задание в очередь и запуск носителя. Только из видимого окна. */
+    fun downloadSelected() {
+        val s = finder.state.value as? FinderState.Ready ?: return
+        val v = s.selected ?: run { message.value = "Выберите качество"; return }
+        val replan = finder.replanId
         viewModelScope.launch(Dispatchers.IO) {
-            val r = coordinator.enqueue(url, quality.value)
+            val request = DownloadCoordinator.DownloadRequest(s.catalog.details, v)
+            val r = if (replan != null) coordinator.replan(replan, request) else coordinator.enqueue(request)
             r.onFailure { message.value = it.message ?: "Не удалось добавить" }
             r.onSuccess {
-                urlInput.value = ""
-                message.value = when (val s = TransferScheduler.ensureRunning(getApplication())) {
-                    is TransferScheduler.Result.Failed -> "Добавлено, но фоновая загрузка не запустилась: ${s.reason}"
-                    else -> "Добавлено в очередь"
+                withContext(Dispatchers.Main) {
+                    // Карточку сбрасываем, только если пользователь не начал новый поиск.
+                    if (finder.state.value === s) finder.cancel()
+                    if (urlInput.value.trim() == s.url || SafeUrl.extract(urlInput.value) == s.url) urlInput.value = ""
+                }
+                message.value = when (val st = TransferScheduler.ensureRunning(getApplication())) {
+                    is TransferScheduler.Result.Failed -> "Добавлено, но фоновая загрузка не запустилась: ${st.reason}"
+                    else -> "Добавлено в очередь: ${v.title}"
                 }
             }
         }
@@ -168,24 +208,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** «Добавить все»: каждая ссылка отдельно; ошибочная не отменяет остальные. */
-    fun addBatch(lines: List<BatchLine>, q: Quality, onDone: (String) -> Unit) {
+    /** Пакет: у каждой ссылки свой анализ и свой каталог. */
+    fun findBatch(lines: List<BatchLine>) = batch.start(lines.filter { it.addable }.map { it.url })
+
+    /** «Добавить выбранные»: каждая ссылка со своим вариантом; ошибочная не отменяет остальные. */
+    fun addBatchSelected(onDone: (String) -> Unit) {
+        val entries = batch.entries.value
         viewModelScope.launch(Dispatchers.IO) {
             var added = 0
             var failed = 0
-            for (l in lines.filter { it.addable }) {
-                coordinator.enqueue(l.url, q).onSuccess { added++ }.onFailure { failed++ }
+            var skipped = 0
+            val errors = ArrayList<String>()
+            for (e in entries) {
+                val s = e.state as? FinderState.Ready
+                val v = s?.selected
+                if (s == null || v == null) { skipped++; continue }
+                coordinator.enqueue(DownloadCoordinator.DownloadRequest(s.catalog.details, v))
+                    .onSuccess { added++ }
+                    .onFailure { failed++; errors.add(it.message.orEmpty()) }
             }
             if (added > 0) TransferScheduler.ensureRunning(getApplication())
-            val skipped = lines.size - added - failed
             val text = buildString {
                 append("Добавлено: $added")
                 if (skipped > 0) append(", пропущено: $skipped")
-                if (failed > 0) append(", не удалось: $failed")
+                if (failed > 0) append(", не удалось: $failed (${errors.distinct().joinToString("; ").take(120)})")
             }
             NoxLog.event("batch-add", "added" to added, "skipped" to skipped, "failed" to failed)
             message.value = text
-            withContext(Dispatchers.Main) { onDone(text) }
+            withContext(Dispatchers.Main) {
+                batch.cancel()
+                onDone(text)
+            }
         }
     }
 
@@ -294,11 +347,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val name = MediaLocator.fileName(m)
                 val base = done
                 if (m.isExternal) {
-                    nox.saf.copyFrom(treeStr, m.sizeBytes, name, "video/mp4", { d, _ -> update(m.title, base + d, total) }) {
+                    nox.saf.copyFrom(treeStr, m.sizeBytes, name, MediaTypes.mimeForName(name), { d, _ -> update(m.title, base + d, total) }) {
                         ctx.contentResolver.openInputStream(Uri.parse(m.contentUri)) ?: throw java.io.IOException("Нет доступа к исходнику")
                     }
                 } else {
-                    nox.saf.copyInto(treeStr, File(m.filePath), name, "video/mp4") { d, _ -> update(m.title, base + d, total) }
+                    nox.saf.copyInto(treeStr, File(m.filePath), name, MediaTypes.mimeForName(name)) { d, _ -> update(m.title, base + d, total) }
                 }
                 done += m.sizeBytes
                 ok++
@@ -406,7 +459,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onWindowSize(w: Int, h: Int) = nox.wallpaper.onWindowSize(w, h)
 
-    fun setSplitTracks(on: Boolean) = settings.updateDownloads { it.copy(splitTracks = on) }
+    fun setPreferSingleFile(on: Boolean) = settings.updateDownloads { it.copy(preferSingleFile = on) }
+    fun setPreferredHeight(h: Int) = settings.updateDownloads { it.copy(preferredHeight = h) }
     fun setPipOnLeave(on: Boolean) = settings.updatePlayer { it.copy(pipOnLeave = on) }
 
     // ---------------- обновления ----------------
@@ -433,6 +487,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         sb.appendLine("Активных передач: ${coordinator.activeCount.value}")
         sb.appendLine("Последняя остановка носителя: ${coordinator.lastStopReason.ifBlank { "-" }}")
         sb.appendLine("yt-dlp: ${nox.resolver.version()}")
+        sb.appendLine("JS-движок YouTube: ${nox.resolver.jsStatus()}")
         sb.appendLine("Последняя ошибка резолвера: ${nox.resolver.lastError.ifBlank { "-" }}")
         val a = settings.appearance.value
         sb.appendLine("Оформление: тема=${a.preset} стекло=${a.glassMode.key} фон=${a.wallpaper.key}")
@@ -444,9 +499,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         sb.appendLine()
         sb.appendLine("Задания:")
         for (d in nox.db.downloads().getAll()) {
-            sb.appendLine("  #${d.id} ${d.status} ${d.quality} ${d.mode} ${Format.bytes(d.downloadedBytes)}/${Format.bytes(d.totalBytes)} " +
+            sb.appendLine("  #${d.id} ${d.status} ${d.qualityLabel} ${d.mode} ${Format.bytes(d.downloadedBytes)}/${Format.bytes(d.totalBytes)} " +
+                "source=${d.extractorKey.ifBlank { "-" }} plan=${d.planVersion} format=${d.formatId.ifBlank { "-" }}+${d.audioFormatId.ifBlank { "-" }} " +
+                "container=${d.container.ifBlank { d.ext }} stage=${d.stage.ifBlank { "-" }} " +
                 "host=${SafeUrl.host(d.resolvedUrl)} retries=${d.retries}/${d.resolveRetries} " +
-                "stop=${d.lastStopReason.ifBlank { "-" }} err=${d.error.take(80).ifBlank { "-" }}")
+                "stop=${d.lastStopReason.ifBlank { "-" }} kind=${d.errorKind.ifBlank { "-" }} err=${d.error.take(80).ifBlank { "-" }}")
         }
         sb.appendLine()
         sb.appendLine("Журнал:")

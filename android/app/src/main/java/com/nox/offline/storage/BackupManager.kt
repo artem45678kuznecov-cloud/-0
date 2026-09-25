@@ -1,5 +1,6 @@
 package com.nox.offline.storage
 
+import com.nox.offline.core.MediaTypes
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
@@ -88,6 +89,8 @@ class BackupManager(
                 .put("height", m.height).put("durationSec", m.durationSec).put("pageUrl", m.pageUrl)
                 .put("videoId", m.videoId).put("createdAt", m.createdAt).put("uploader", m.uploader)
                 .put("imported", m.imported).put("fileName", MediaLocator.fileName(m))
+                .put("container", m.container).put("width", m.width).put("fps", m.fps)
+                .put("codecs", m.codecs).put("variantKey", m.variantKey)
             if (m.coverPath.isNotBlank() && File(m.coverPath).exists()) {
                 val cf = File(m.coverPath)
                 copyFile(cf, covers, cf.name, "image/*") { _, _ -> }
@@ -98,7 +101,7 @@ class BackupManager(
                 if (f.exists()) {
                     progress("Видео: ${m.title}", copied, need)
                     val base = copied
-                    copyFile(f, mediaDir, f.name, "video/mp4") { d, _ -> progress("Видео: ${m.title}", base + d, need) }
+                    copyFile(f, mediaDir, f.name, MediaTypes.mimeForName(f.name)) { d, _ -> progress("Видео: ${m.title}", base + d, need) }
                     copied += f.length()
                     o.put("mediaFile", f.name)
                 }
@@ -117,6 +120,12 @@ class BackupManager(
                 .put("uploader", d.uploader).put("thumbnailUrl", d.thumbnailUrl).put("durationSec", d.durationSec)
                 .put("videoDone", d.videoDone).put("audioDone", d.audioDone)
                 .put("videoTotalBytes", d.videoTotalBytes).put("audioTotalBytes", d.audioTotalBytes)
+                // 0.3.0: точный план (без прямых адресов — они всё равно протухнут).
+                .put("planVersion", d.planVersion).put("extractorKey", d.extractorKey).put("variantKey", d.variantKey)
+                .put("width", d.width).put("fps", d.fps).put("vcodec", d.vcodec).put("acodec", d.acodec)
+                .put("container", d.container).put("dynamicRange", d.dynamicRange).put("audioLang", d.audioLang)
+                .put("videoExact", d.videoExact).put("audioExact", d.audioExact)
+                .put("videoChunk", d.videoChunk).put("audioChunk", d.audioChunk)
             if (partsDir != null) {
                 val names = JSONArray()
                 for (f in partOf(d)) if (f.exists()) {
@@ -201,6 +210,9 @@ class BackupManager(
                 durationSec = o.optLong("durationSec"), coverPath = cover, pageUrl = pageUrl, videoId = videoId,
                 createdAt = o.optLong("createdAt", System.currentTimeMillis()), uploader = o.optString("uploader"),
                 imported = o.optBoolean("imported"),
+                container = o.optString("container").ifBlank { target.extension.lowercase() },
+                width = o.optInt("width"), fps = o.optInt("fps"), codecs = o.optString("codecs"),
+                variantKey = o.optString("variantKey"),
             ))
             idMap[oldId] = newId
             imported++
@@ -234,6 +246,12 @@ class BackupManager(
                 thumbnailUrl = o.optString("thumbnailUrl"), durationSec = o.optLong("durationSec"),
                 videoDone = o.optBoolean("videoDone"), audioDone = o.optBoolean("audioDone"),
                 videoTotalBytes = o.optLong("videoTotalBytes"), audioTotalBytes = o.optLong("audioTotalBytes"),
+                planVersion = o.optInt("planVersion"), extractorKey = o.optString("extractorKey"),
+                variantKey = o.optString("variantKey"), width = o.optInt("width"), fps = o.optInt("fps"),
+                vcodec = o.optString("vcodec"), acodec = o.optString("acodec"), container = o.optString("container"),
+                dynamicRange = o.optString("dynamicRange"), audioLang = o.optString("audioLang"),
+                videoExact = o.optBoolean("videoExact"), audioExact = o.optBoolean("audioExact"),
+                videoChunk = o.optLong("videoChunk"), audioChunk = o.optLong("audioChunk"),
                 // Прямые адреса протухают: восстановленное задание стоит на паузе и разберёт ссылку заново.
                 status = DownloadStatus.PAUSED, createdAt = now, updatedAt = now,
             )

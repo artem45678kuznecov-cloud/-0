@@ -55,7 +55,6 @@ import com.nox.offline.ui.components.HSpace
 import com.nox.offline.ui.components.LocalSheets
 import com.nox.offline.ui.components.Muted
 import com.nox.offline.ui.components.NoxProgress
-import com.nox.offline.ui.components.QualitySelector
 import com.nox.offline.ui.components.SettingSlider
 import com.nox.offline.ui.components.SettingSwitch
 import com.nox.offline.ui.components.VSpace
@@ -64,7 +63,6 @@ import com.nox.offline.ui.glass.GlassSurface
 import com.nox.offline.ui.theme.Nox
 import com.nox.offline.ui.theme.NoxPalettes
 import com.nox.offline.ui.theme.nox
-import com.nox.offline.downloader.Quality
 import kotlin.math.roundToInt
 
 /**
@@ -227,7 +225,8 @@ private fun Preview(modifier: Modifier) {
                 }
             }
             VSpace(14)
-            QualitySelector(Quality.Q480, {})
+            // Пример строки варианта качества — так выглядит выбор на экране загрузок.
+            com.nox.offline.ui.downloads.VariantRow(com.nox.offline.ui.downloads.PreviewSamples.variant, selected = true, onClick = {})
             VSpace(12)
             GlassButton("Скачать", {}, icon = Icons.Rounded.Download, modifier = Modifier.fillMaxWidth(), height = 52.dp, textSize = 18.sp)
         }

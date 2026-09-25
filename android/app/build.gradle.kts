@@ -39,8 +39,8 @@ android {
         applicationId = "com.nox.offline"
         minSdk = 26
         targetSdk = 35
-        versionCode = noxVersionCodeOverride ?: 2
-        versionName = "0.2.0"
+        versionCode = noxVersionCodeOverride ?: 3
+        versionName = "0.2.1"
 
         // Chaquopy требует явного списка ABI: под каждый кладётся свой
         // рантайм Python. Для Python 3.12 у Chaquopy есть только 64-битные

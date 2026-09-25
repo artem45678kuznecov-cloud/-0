@@ -132,6 +132,9 @@ fun GlassBottomBar(
                     .pointerInput(Unit) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
+                            // Все события этого пальца панель забирает себе: так отмену
+                            // системой можно надёжно отличить от настоящего отпускания.
+                            down.consume()
                             val m = currentMath
                             val reduce = currentCfg.reduceMotion
                             val pointerId = down.id
@@ -155,9 +158,10 @@ fun GlassBottomBar(
                                 if (!c.pressed) {
                                     if (isSystemCancel(c)) cancelled = true
                                     upX = c.position.x
-                                    if (dragging) c.consume()
+                                    c.consume()
                                     break
                                 }
+                                c.consume()
                                 if (!dragging && !abandoned) {
                                     val dx = c.position.x - down.position.x
                                     val dy = c.position.y - down.position.y
@@ -174,7 +178,6 @@ fun GlassBottomBar(
                                     }
                                 }
                                 if (!dragging) continue
-                                c.consume()
                                 if (exited) continue
                                 if (m.isVerticalExit(c.position.y, currentHeight)) {
                                     // Палец ушёл далеко вверх или вниз: выбор отменяется предсказуемо.
@@ -269,11 +272,14 @@ fun GlassBottomBar(
 
 /**
  * Отмена касания системой (ACTION_CANCEL). Compose передаёт её как
- * синтетическое «отпускание» с тем же временем и той же точкой, что у
- * предыдущего события; настоящее отпускание всегда несёт новое время.
+ * синтетическое «отпускание»: та же точка и то же время, что у предыдущего
+ * события, и изменение уже помечено поглощённым — панель поглощает все
+ * события своего пальца. Настоящее отпускание приходит свежим, не
+ * поглощённым, даже если совпало по времени с предыдущим событием.
  */
 internal fun isSystemCancel(c: PointerInputChange): Boolean =
-    !c.pressed && c.previousPressed && c.uptimeMillis == c.previousUptimeMillis && c.position == c.previousPosition
+    !c.pressed && c.previousPressed && c.isConsumed &&
+        c.uptimeMillis == c.previousUptimeMillis && c.position == c.previousPosition
 
 private fun settleSpring(reduce: Boolean) =
     if (reduce) spring<Float>(dampingRatio = 1f, stiffness = 900f)

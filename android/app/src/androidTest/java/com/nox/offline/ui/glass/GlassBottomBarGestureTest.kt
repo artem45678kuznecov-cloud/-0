@@ -171,8 +171,10 @@ class GlassBottomBarGestureTest {
             val tx = centerX(0) + (centerX(3) - centerX(0)) * k / 30f
             bar.performTouchInput { moveTo(Offset(tx, centerY)); advanceEventTime(16) }
             rule.waitForIdle()
-            // Линза под пальцем, без отставания; реальные экраны не переключаются.
-            assertEquals(tx - padPx, lensInner(), 1.5f)
+            // До системного порога касание ещё не ведение; после — линза под пальцем,
+            // без отставания и без скачка. Реальные экраны не переключаются.
+            if (k >= 3) assertTrue("drag did not start", state.dragging)
+            if (state.dragging) assertEquals(tx - padPx, lensInner(), 1.5f)
             assertTrue("onSelect during drag: $calls", calls.isEmpty())
             if (state.preview >= 0) seen += state.preview
         }

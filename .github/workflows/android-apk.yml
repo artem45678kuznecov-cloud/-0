@@ -49,7 +49,13 @@ jobs:
 
       # Встроенный JS-движок (QuickJS-NG, app/src/main/cpp) собирается NDK закреплённой версии.
       - name: Android NDK and CMake
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
+        # Архив NDK иногда приходит битым: до трёх попыток, не больше.
+        run: |
+          for i in 1 2 3; do
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null && exit 0
+            echo "::warning::NDK/CMake: попытка $i не удалась"; sleep 10
+          done
+          exit 1
 
       - name: Version from Gradle
         id: version
@@ -113,7 +119,13 @@ jobs:
 
       # Встроенный JS-движок (QuickJS-NG, app/src/main/cpp) собирается NDK закреплённой версии.
       - name: Android NDK and CMake
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
+        # Архив NDK иногда приходит битым: до трёх попыток, не больше.
+        run: |
+          for i in 1 2 3; do
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null && exit 0
+            echo "::warning::NDK/CMake: попытка $i не удалась"; sleep 10
+          done
+          exit 1
 
       - name: Enable KVM
         run: |
@@ -237,7 +249,13 @@ jobs:
 
       - name: Android NDK and CMake
         if: steps.tag.outputs.exists == 'false'
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
+        # Архив NDK иногда приходит битым: до трёх попыток, не больше.
+        run: |
+          for i in 1 2 3; do
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null && exit 0
+            echo "::warning::NDK/CMake: попытка $i не удалась"; sleep 10
+          done
+          exit 1
 
       - name: Assemble signed release
         if: steps.tag.outputs.exists == 'false'

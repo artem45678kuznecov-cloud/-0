@@ -502,6 +502,9 @@ def _extract(url):
     opts['logger'] = collector
     opts['nox_js_stats'] = stats
     with yt_dlp.YoutubeDL(opts) as ydl:
+        if _js_ready:
+            import nox_jsc
+            nox_jsc.install_cache(ydl)
         info = ydl.extract_info(str(url), download=False)
     return info, collector.warnings, stats
 

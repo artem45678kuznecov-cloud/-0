@@ -13,3 +13,6 @@ keystore.properties
 *.p12
 *.pfx
 dist/
+build-ejs/
+build-live/
+build-shots/

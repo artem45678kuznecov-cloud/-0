@@ -9,7 +9,7 @@ name: android-apk
 
 on:
   push:
-    branches: [android-stage-02-complete, android-0.2.1-liquid-bottom-bar]
+    branches: [android-stage-02-complete, android-0.2.1-liquid-bottom-bar, android-youtube-dynamic-quality]
     paths:
       - "android/**"
       - ".github/workflows/android-apk.yml"
@@ -47,6 +47,10 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # Встроенный JS-движок (QuickJS-NG, app/src/main/cpp) собирается NDK закреплённой версии.
+      - name: Android NDK and CMake
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
+
       - name: Version from Gradle
         id: version
         run: |
@@ -61,7 +65,13 @@ jobs:
       - name: Python resolver tests
         run: python3 -m unittest discover -s app/src/test/python -v
 
-      - name: Unit tests (JVM, incl. Room migration 1→2)
+      # Тот же C-код движка, что в APK, + провайдер NOX решают настоящие
+      # задачи YouTube из набора тестов yt-dlp (плееры скачиваются с youtube.com).
+      - name: Embedded JS engine vs yt-dlp EJS (host)
+        timeout-minutes: 10
+        run: tools/ejs-host-check/run.sh
+
+      - name: Unit tests (JVM, incl. Room migrations 1→2→3)
         run: ./gradlew --no-daemon --stacktrace testDebugUnitTest
 
       - name: Lint
@@ -83,7 +93,7 @@ jobs:
   device-tests:
     name: Instrumented tests (emulator API 34)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: android
@@ -101,6 +111,10 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # Встроенный JS-движок (QuickJS-NG, app/src/main/cpp) собирается NDK закреплённой версии.
+      - name: Android NDK and CMake
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
+
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -110,7 +124,21 @@ jobs:
       - name: Build app and test APKs
         run: ./gradlew --no-daemon --stacktrace assembleDebug assembleDebugAndroidTest
 
-      # Склейка дорожек MediaMuxer и миграция Room 1→2 на настоящем Android.
+      # Плеер YouTube для проверки EJS внутри установленного APK.
+      - name: YouTube player for the on-device EJS test
+        timeout-minutes: 10
+        run: tools/ejs-host-check/run.sh build-ejs
+
+      # Живая проверка: настоящий YouTube → 1440p VP9 + Opus тем же резолвером.
+      # YouTube может отказать сети раннера — тогда шаг помечается, а тест склейки
+      # на эмуляторе пропускается (в отчёте это «не подтверждено», не «пройдено»).
+      - name: Real YouTube 1440p (live)
+        id: live
+        continue-on-error: true
+        timeout-minutes: 15
+        run: tools/ejs-host-check/build/venv/bin/python tools/youtube-live-check.py build-live
+
+      # Склейка MediaMuxer (MP4 и WebM), миграции Room, JS-движок и EJS на настоящем Android.
       - name: Run on emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -118,22 +146,26 @@ jobs:
           arch: x86_64
           target: default
           disable-animations: true
+          disk-size: 6000M
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
           working-directory: android
-          script: ./gradlew --no-daemon --stacktrace connectedDebugAndroidTest
+          script: bash tools/ci-emulator-tests.sh
 
       - name: Device test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nox-device-test-reports
-          path: android/app/build/reports/androidTests/
+          path: |
+            android/app/build/reports/androidTests/
+            android/build-shots/
           if-no-files-found: ignore
 
   release:
     name: Signed release
     needs: [check, device-tests]
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # Промежуточные push с «[skip release]» в сообщении проходят проверки, но не публикуют выпуск.
+    if: (github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip release]')) || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -203,6 +235,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         if: steps.tag.outputs.exists == 'false'
 
+      - name: Android NDK and CMake
+        if: steps.tag.outputs.exists == 'false'
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
+
       - name: Assemble signed release
         if: steps.tag.outputs.exists == 'false'
         run: ./gradlew --no-daemon --stacktrace -Pnox.requireReleaseKey=true assembleRelease
@@ -226,6 +262,10 @@ jobs:
           echo "$BADGING" | grep -q "package: name='com.nox.offline' versionCode='$VERSION_CODE' versionName='$VERSION_NAME'"
           echo "$BADGING" | grep -q "minSdkVersion:'26'"
           ABIS=$(echo "$BADGING" | grep '^native-code:' | sed -E "s/native-code: //; s/'//g")
+          # Встроенный JS-движок должен быть в APK для обоих ABI.
+          for abi in arm64-v8a x86_64; do
+            unzip -l "$APK" "lib/$abi/libnoxjs.so" | grep -q "lib/$abi/libnoxjs.so" || { echo "::error::нет lib/$abi/libnoxjs.so"; exit 1; }
+          done
           echo "CERT_SHA256=$CERT" >> "$GITHUB_ENV"
           echo "APK_ABIS=$ABIS" >> "$GITHUB_ENV"
 

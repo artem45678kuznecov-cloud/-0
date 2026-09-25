@@ -29,7 +29,8 @@ object JsEngine {
     const val MEMORY_LIMIT = 384L shl 20
     const val JS_STACK_LIMIT = 4L shl 20
     private const val THREAD_STACK = 16L shl 20
-    const val TIMEOUT_MS = 90_000L
+    /** Первый разбор плеера YouTube на слабом телефоне — до минуты; дальше он берётся из кэша. */
+    const val TIMEOUT_MS = 150_000L
     const val OUTPUT_LIMIT = 32L shl 20
     private const val QUEUE_WAIT_MS = 180_000L
 
@@ -52,8 +53,17 @@ object JsEngine {
         return nativeVersion()
     }
 
+    /** Пределы одного выполнения (по умолчанию — рабочие; тесты задают свои). */
+    data class Limits(
+        val memory: Long = MEMORY_LIMIT,
+        val stack: Long = JS_STACK_LIMIT,
+        val timeoutMs: Long = TIMEOUT_MS,
+        val output: Long = OUTPUT_LIMIT,
+    )
+
     /** Выполняет скрипт и возвращает всё, что он вывел через console.log. */
-    fun run(script: String): String {
+    @JvmOverloads
+    fun run(script: String, limits: Limits = Limits()): String {
         loadError?.let { throw IllegalStateException("libnoxjs unavailable: ${it.javaClass.simpleName}") }
         if (!gate.tryAcquire(QUEUE_WAIT_MS, TimeUnit.MILLISECONDS)) {
             throw JsEngineException(5, "JS engine busy")
@@ -66,13 +76,13 @@ object JsEngine {
             // Отдельный поток с большим стеком: разбор плеера YouTube рекурсивен.
             val worker = Thread(null, {
                 try {
-                    out.set(nativeRun(code, MEMORY_LIMIT, JS_STACK_LIMIT, TIMEOUT_MS, OUTPUT_LIMIT))
+                    out.set(nativeRun(code, limits.memory, limits.stack, limits.timeoutMs, limits.output))
                 } catch (t: Throwable) {
                     err.set(t)
                 }
             }, "nox-js", THREAD_STACK)
             worker.start()
-            worker.join(TIMEOUT_MS + 15_000L)
+            worker.join(limits.timeoutMs + 15_000L)
             val ms = System.currentTimeMillis() - started
             if (worker.isAlive) {
                 NoxLog.event("js-run", "result" to "hung", "ms" to ms)

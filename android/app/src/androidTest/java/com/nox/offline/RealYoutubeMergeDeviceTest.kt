@@ -50,7 +50,7 @@ class RealYoutubeMergeDeviceTest {
         throw AssertionError("нет дорожки $prefix")
     }
 
-    @Test fun realYoutube1440pTracksMergeIntoPlayableWebm() = runBlocking {
+    @Test fun realYoutube1440pTracksMergeIntoPlayableWebm(): Unit = runBlocking {
         assumeTrue(Build.VERSION.SDK_INT >= 29)
         val metaFile = fromShell("meta.json")
         assumeTrue("живая проверка YouTube не дала файлов (YouTube мог отказать сети CI)", metaFile != null)

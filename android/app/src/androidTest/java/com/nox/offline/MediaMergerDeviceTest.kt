@@ -42,7 +42,7 @@ class MediaMergerDeviceTest {
         return out
     }
 
-    @Test fun mergesVideoAndAudioWithoutReencoding() = runBlocking {
+    @Test fun mergesVideoAndAudioWithoutReencoding(): Unit = runBlocking {
         val video = asset("video_only.mp4")
         val audio = asset("audio_only.m4a")
         val pv = MediaMerger.probe(video)
@@ -65,7 +65,7 @@ class MediaMergerDeviceTest {
         assertTrue("size ${out.length()} vs $sum", out.length() in (sum * 8 / 10)..(sum * 12 / 10))
     }
 
-    @Test fun refusesWhenAudioTrackIsMissing() = runBlocking {
+    @Test fun refusesWhenAudioTrackIsMissing(): Unit = runBlocking {
         val video = asset("video_only.mp4")
         val out = File(ctx.cacheDir, "merge-test/bad.mp4").apply { delete() }
         try {
@@ -92,7 +92,7 @@ class MediaMergerDeviceTest {
     private fun head(file: File, n: Int): ByteArray = file.inputStream().use { i -> ByteArray(n).also { i.read(it) } }
 
     /** 1440p: VP9 + Opus собираются в настоящий WebM без перекодирования, кадр 2560×1440 сохраняется. */
-    @Test fun mergesVp9AndOpus1440pIntoWebm() = runBlocking {
+    @Test fun mergesVp9AndOpus1440pIntoWebm(): Unit = runBlocking {
         assumeTrue("Opus в WebM — Android 10+", Build.VERSION.SDK_INT >= 29)
         val video = asset("vp9_1440_video.webm")
         val audio = asset("opus_audio.webm")
@@ -112,7 +112,7 @@ class MediaMergerDeviceTest {
     }
 
     /** AV1 + AAC → MP4 доступно с Android 14. */
-    @Test fun mergesAv1AndAacIntoMp4() = runBlocking {
+    @Test fun mergesAv1AndAacIntoMp4(): Unit = runBlocking {
         assumeTrue("AV1 в MP4 — Android 14+", Build.VERSION.SDK_INT >= 34)
         val video = asset("av1_video.mp4")
         val audio = asset("audio_only.m4a")
@@ -124,7 +124,7 @@ class MediaMergerDeviceTest {
     }
 
     /** Проверка перед «Готово» ловит оборванный файл. */
-    @Test fun verifyRejectsTruncatedResult() = runBlocking {
+    @Test fun verifyRejectsTruncatedResult(): Unit = runBlocking {
         val video = asset("video_only.mp4")
         val audio = asset("audio_only.m4a")
         val out = File(ctx.cacheDir, "merge-test/ok.mp4").apply { delete() }

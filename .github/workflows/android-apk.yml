@@ -9,7 +9,7 @@ name: android-apk
 
 on:
   push:
-    branches: [android-stage-02-complete]
+    branches: [android-stage-02-complete, android-0.2.1-liquid-bottom-bar]
     paths:
       - "android/**"
       - ".github/workflows/android-apk.yml"

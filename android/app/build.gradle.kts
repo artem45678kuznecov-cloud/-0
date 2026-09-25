@@ -155,6 +155,10 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 
     androidTestImplementation("androidx.test:runner:1.6.2")
+    // UI-тесты Compose: версии из того же BOM, что и приложение.
+    androidTestImplementation(composeBom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.room:room-testing:2.6.1")
     androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")

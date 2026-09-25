@@ -123,7 +123,10 @@ fun NoxRoot(
         val frame by vm.wallpaperFrame.collectAsState()
         val cfg = LocalGlassConfig.current
         CompositionLocalProvider(LocalWallpaperFrame provides frame, LocalSheets provides sheets) {
-            val layer: GraphicsLayer? = if (cfg.live && Build.VERSION.SDK_INT >= 31) rememberGraphicsLayer() else null
+            // Слой с содержимым экрана. «Живое» стекло карточек и листов берёт его
+            // только в полном режиме; линза нижней панели — всегда (API 29+),
+            // чтобы и в экономичном режиме показывать настоящее содержимое под собой.
+            val layer: GraphicsLayer? = if (Build.VERSION.SDK_INT >= 29) rememberGraphicsLayer() else null
             RootContent(vm, requests, sheets, layer, onRequestNotifications)
         }
     }

@@ -11,8 +11,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Миграция 1→2 на настоящем SQLite Android с проверкой Room: итоговая
- * схема сверяется с app/schemas/…/2.json, данные 0.1.0 сохраняются.
+ * Миграции на настоящем SQLite Android с проверкой Room: итоговая схема
+ * сверяется с app/schemas/…/<VERSION>.json, данные 0.1.0 и 0.2.1 сохраняются.
  */
 @RunWith(AndroidJUnit4::class)
 class RoomMigrationDeviceTest {
@@ -50,6 +50,40 @@ class RoomMigrationDeviceTest {
             }
             db.query("SELECT completed FROM playback WHERE mediaId=11").use { c ->
                 c.moveToFirst(); assertEquals(1, c.getInt(0))
+            }
+        }
+    }
+
+    /** База 0.2.1 с паузой раздельных дорожек обновляется до 0.3.0 без потерь. */
+    @Test fun filledV2DatabaseMigratesTo3AndValidates() {
+        helper.createDatabase("migration-test-2", 2).use { db ->
+            db.execSQL("""INSERT INTO downloads (id,pageUrl,quality,title,videoId,formatId,resolvedUrl,headersJson,fileName,ext,height,
+                totalBytes,downloadedBytes,status,error,speedBps,etaSec,retries,resolveRetries,thumbnailUrl,durationSec,lastStopReason,
+                createdAt,updatedAt,customTitle,mode,audioUrl,audioHeadersJson,audioFormatId,videoTotalBytes,audioTotalBytes,videoDone,
+                audioDone,uploader,allowSplit)
+                VALUES (2,'https://www.youtube.com/watch?v=abc','720','Раздельно','abc','136','https://rr/v','{}','Раздельно [abc].mp4',
+                'mp4',720,30000000,12000000,'PAUSED','',0,-1,0,0,'',600,'user',3,4,'Моё','split','https://rr/a','{}','140',
+                25000000,5000000,0,1,'Автор',1)""")
+            db.execSQL("""INSERT INTO media (id,title,filePath,sizeBytes,quality,height,durationSec,coverPath,pageUrl,videoId,createdAt,
+                contentUri,uploader,imported,moveState) VALUES (10,'Море','/m/sea.mp4',5000,'720',720,1500,'','','v3',100,'','',0,'')""")
+            db.execSQL("INSERT INTO playback (mediaId,positionMs,durationMs,updatedAt,completed) VALUES (10,600000,1500000,230,0)")
+        }
+        helper.runMigrationsAndValidate("migration-test-2", 3, true, *Migrations.ALL).use { db ->
+            db.query("SELECT status, formatId, audioFormatId, audioDone, fileName, planVersion, variantKey FROM downloads WHERE id=2").use { c ->
+                c.moveToFirst()
+                assertEquals("PAUSED", c.getString(0))
+                assertEquals("136", c.getString(1))
+                assertEquals("140", c.getString(2))
+                assertEquals(1, c.getInt(3))
+                assertEquals("Раздельно [abc].mp4", c.getString(4))
+                assertEquals(0, c.getInt(5))
+                assertEquals("", c.getString(6))
+            }
+            db.query("SELECT title, container FROM media WHERE id=10").use { c ->
+                c.moveToFirst(); assertEquals("Море", c.getString(0)); assertEquals("", c.getString(1))
+            }
+            db.query("SELECT positionMs FROM playback WHERE mediaId=10").use { c ->
+                c.moveToFirst(); assertEquals(600000L, c.getLong(0))
             }
         }
     }

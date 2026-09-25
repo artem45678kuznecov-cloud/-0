@@ -35,7 +35,8 @@ object DownloadMode {
 data class DownloadEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val pageUrl: String,
-    val quality: String,                 // 360 / 480 / 720 / MAX
+    /** 0.2.x: 360 / 480 / 720 / MAX (лестница). С 0.3.0 — подпись выбранного варианта («1440p60»). */
+    val quality: String,
     val title: String = "",
     val videoId: String = "",
     val formatId: String = "",
@@ -73,6 +74,31 @@ data class DownloadEntity(
     @ColumnInfo(defaultValue = "''") val uploader: String = "",
     /** Разрешил ли пользователь раздельные дорожки для этого задания. */
     @ColumnInfo(defaultValue = "0") val allowSplit: Boolean = false,
+
+    // ---- v3 (0.3.0): точный выбор из каталога ----
+    /** 0 — задание 0.2.x (лестница качества); 1 — точный план из каталога. */
+    @ColumnInfo(defaultValue = "0") val planVersion: Int = 0,
+    @ColumnInfo(defaultValue = "''") val extractorKey: String = "",
+    /** Ключ варианта: «v:308+a:251» или «f:url1440». */
+    @ColumnInfo(defaultValue = "''") val variantKey: String = "",
+    @ColumnInfo(defaultValue = "0") val width: Int = 0,
+    @ColumnInfo(defaultValue = "0") val fps: Int = 0,
+    @ColumnInfo(defaultValue = "''") val vcodec: String = "",
+    @ColumnInfo(defaultValue = "''") val acodec: String = "",
+    /** Контейнер итогового файла: mp4 / webm. */
+    @ColumnInfo(defaultValue = "''") val container: String = "",
+    @ColumnInfo(defaultValue = "''") val dynamicRange: String = "",
+    @ColumnInfo(defaultValue = "''") val audioLang: String = "",
+    /** Размеры дорожек — точные (от источника), а не оценка: по ним сверяется докачка. */
+    @ColumnInfo(defaultValue = "0") val videoExact: Boolean = false,
+    @ColumnInfo(defaultValue = "0") val audioExact: Boolean = false,
+    /** Размер одного Range-запроса (YouTube режет длинные ответы). 0 — одним запросом. */
+    @ColumnInfo(defaultValue = "0") val videoChunk: Long = 0,
+    @ColumnInfo(defaultValue = "0") val audioChunk: Long = 0,
+    /** Машинная причина ошибки: format-gone, forbidden, no-space ... */
+    @ColumnInfo(defaultValue = "''") val errorKind: String = "",
+    /** Этап для диагностики: plan, video, audio, merge, verify. */
+    @ColumnInfo(defaultValue = "''") val stage: String = "",
 ) {
     val displayTitle: String get() = customTitle.ifBlank { title }
 
@@ -80,4 +106,17 @@ data class DownloadEntity(
         get() = if (totalBytes > 0) ((downloadedBytes.coerceIn(0, totalBytes) * 100) / totalBytes).toInt() else 0
 
     val isSplit: Boolean get() = mode == DownloadMode.SPLIT
+
+    /** Задание с точным выбором формата (0.3.0+). */
+    val isPlanned: Boolean get() = planVersion >= 1
+
+    /** Подпись качества для очереди и медиатеки: настоящая, а не «MAX». */
+    val qualityLabel: String
+        get() = when {
+            isPlanned -> quality
+            height > 0 -> "${height}p"
+            quality == "MAX" -> "наилучшее"
+            quality.all { it.isDigit() } -> "до ${quality}p"
+            else -> quality
+        }
 }

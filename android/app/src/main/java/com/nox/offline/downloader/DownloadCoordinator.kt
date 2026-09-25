@@ -1,6 +1,7 @@
 package com.nox.offline.downloader
 
 import com.nox.offline.core.FileNames
+import com.nox.offline.core.Format
 import com.nox.offline.core.NoxLog
 import com.nox.offline.core.SafeUrl
 import com.nox.offline.core.Storage
@@ -9,6 +10,11 @@ import com.nox.offline.data.db.DownloadMode
 import com.nox.offline.data.db.DownloadStatus
 import com.nox.offline.data.db.MediaEntity
 import com.nox.offline.data.db.NoxDatabase
+import com.nox.offline.downloader.catalog.CodecNames
+import com.nox.offline.downloader.catalog.PlanResult
+import com.nox.offline.downloader.catalog.Support
+import com.nox.offline.downloader.catalog.Variant
+import com.nox.offline.downloader.catalog.VideoDetails
 import com.nox.offline.storage.MediaRelocator
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -48,6 +54,12 @@ import java.util.concurrent.ConcurrentHashMap
  *    слоте, склейка идёт в отдельном однопоточном бюджете);
  *  - «Приостановить все» / «Продолжить все», переименование задания;
  *  - контрольную точку перед установкой обновления APK.
+ *
+ * v0.3.0: задания с точным планом из каталога (planVersion = 1). Для них
+ * адреса берутся только для сохранённых format ID; если источник больше
+ * не отдаёт выбранный вариант или отдаёт файл другого размера, задание
+ * останавливается с понятной причиной, а скачанные части сохраняются —
+ * к ним никогда не дописываются байты другого файла.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class DownloadCoordinator(
@@ -67,6 +79,10 @@ class DownloadCoordinator(
         const val SPEED_WINDOW_MS = 1500L
         const val COVER_LIMIT = 8L * 1024 * 1024
         const val STOP_UPDATE = "update"
+        const val SPACE_MARGIN = 64L * 1024 * 1024
+        /** Ошибки, после которых повтор разбора бессмыслен. */
+        val FINAL_KINDS = setOf("private", "age-restricted", "members-only", "unavailable", "unsupported",
+            "live", "drm", "geo-blocked", "unsupported-transport", "no-formats")
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -158,6 +174,92 @@ class DownloadCoordinator(
         return Result.success(id)
     }
 
+    /** Точный выбор пользователя из каталога. */
+    data class DownloadRequest(
+        val details: VideoDetails,
+        val variant: Variant,
+        val customTitle: String = "",
+    )
+
+    /** Сколько места нужно варианту: дорожки + собранный файл, с запасом. */
+    fun requiredSpace(v: Variant): Long {
+        if (v.sizeBytes <= 0) return SPACE_MARGIN
+        return (if (v.needsMerge) v.sizeBytes * 2 else v.sizeBytes) + SPACE_MARGIN
+    }
+
+    suspend fun enqueue(request: DownloadRequest): Result<Long> {
+        val d = request.details
+        val v = request.variant
+        val url = d.pageUrl.trim()
+        if (!SafeUrl.looksLikeUrl(url)) return Result.failure(IllegalArgumentException("Это не похоже на ссылку"))
+        (v.support as? Support.No)?.let { return Result.failure(IllegalStateException(it.reason)) }
+        if (d.videoId.isNotBlank() && downloadsDao.countLiveVariant(d.extractor, d.videoId, v.key) > 0) {
+            return Result.failure(IllegalStateException("Этот вариант уже в очереди"))
+        }
+        val need = requiredSpace(v)
+        val free = storage.space().freeBytes
+        if (free in 1 until need) {
+            return Result.failure(IllegalStateException(
+                "Недостаточно места: нужно ≈ ${Format.bytes(need)}, свободно ${Format.bytes(free)}"))
+        }
+        val a = v.audio
+        val now = System.currentTimeMillis()
+        val name = uniqueJobFileName(FileNames.targetName(request.customTitle.ifBlank { d.title }, d.videoId, v.outputExt))
+        val entity = DownloadEntity(
+            pageUrl = url, quality = v.title, title = d.title, videoId = d.videoId,
+            formatId = v.video.id, fileName = name, ext = v.outputExt, height = v.height,
+            totalBytes = v.sizeBytes, thumbnailUrl = d.thumbnail, durationSec = d.durationSec,
+            createdAt = now, updatedAt = now, customTitle = request.customTitle.trim(),
+            mode = if (a != null) DownloadMode.SPLIT else DownloadMode.PROGRESSIVE,
+            audioFormatId = a?.id.orEmpty(),
+            videoTotalBytes = v.video.knownSize, audioTotalBytes = a?.knownSize ?: 0L,
+            uploader = d.uploader, allowSplit = a != null,
+            planVersion = 1, extractorKey = d.extractor, variantKey = v.key,
+            width = v.width, fps = v.fps, vcodec = v.video.vcodec,
+            acodec = a?.acodec ?: v.video.acodec, container = v.outputContainer,
+            dynamicRange = v.dynamicRange, audioLang = a?.language.orEmpty(),
+            videoExact = v.video.filesizeExact && v.video.filesize > 0,
+            audioExact = a != null && a.filesizeExact && a.filesize > 0,
+            videoChunk = v.video.chunkSize, audioChunk = a?.chunkSize ?: 0L,
+        )
+        val id = downloadsDao.insert(entity)
+        NoxLog.event("job-added", "id" to id, "host" to SafeUrl.host(url), "source" to d.extractor,
+            "variant" to v.key, "quality" to v.title, "container" to v.outputContainer, "size" to v.sizeBytes)
+        pump()
+        return Result.success(id)
+    }
+
+    /**
+     * Новый выбор качества для остановленного задания (вариант пропал или
+     * изменился). Старые части удаляются только здесь — по явному выбору
+     * пользователя.
+     */
+    suspend fun replan(id: Long, request: DownloadRequest): Result<Long> {
+        val old = downloadsDao.get(id) ?: return Result.failure(IllegalStateException("Задание не найдено"))
+        if (old.status.isActive) return Result.failure(IllegalStateException("Задание ещё выполняется"))
+        (request.variant.support as? Support.No)?.let { return Result.failure(IllegalStateException(it.reason)) }
+        deleteFilesOf(old)
+        downloadsDao.delete(old)
+        listener?.onCleared(id)
+        NoxLog.event("job-replanned", "id" to id, "variant" to request.variant.key)
+        return enqueue(request.copy(customTitle = request.customTitle.ifBlank { old.customTitle }))
+    }
+
+    /** Имя итогового файла, не занятое ни файлом медиатеки, ни другим заданием. */
+    private suspend fun uniqueJobFileName(name: String): String {
+        val dot = name.lastIndexOf('.')
+        val stem = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        var candidate = name
+        var n = 2
+        while (File(storage.media, candidate).exists() || downloadsDao.countByFileName(candidate) > 0) {
+            candidate = "$stem ($n)$ext"
+            n++
+            if (n > 999) { candidate = "$stem (${System.currentTimeMillis()})$ext"; break }
+        }
+        return candidate
+    }
+
     /** Для списка массового добавления: почему ссылку не стоит добавлять ещё раз. */
     suspend fun duplicateReason(url: String): String? = when {
         downloadsDao.countLiveFor(url.trim()) > 0 -> "уже в очереди"
@@ -186,7 +288,7 @@ class DownloadCoordinator(
         if (e.status == DownloadStatus.PAUSED || e.status == DownloadStatus.ERROR) {
             pauseRequested.remove(id)
             downloadsDao.update(
-                e.copy(status = DownloadStatus.QUEUED, error = "", retries = 0, resolveRetries = 0,
+                e.copy(status = DownloadStatus.QUEUED, error = "", errorKind = "", retries = 0, resolveRetries = 0,
                     downloadedBytes = partSize(e), lastStopReason = "", updatedAt = System.currentTimeMillis())
             )
             NoxLog.event("job-resume", "id" to id, "part" to partSize(e))
@@ -443,27 +545,8 @@ class DownloadCoordinator(
                 val needResolve = e.resolvedUrl.isBlank() || (e.isSplit && !e.audioDone && e.audioUrl.isBlank())
                 if (needResolve) {
                     downloadsDao.setStatus(id, DownloadStatus.RESOLVING, "", System.currentTimeMillis())
-                    // Если часть файла уже скачана, просим тот же формат —
-                    // иначе .part продолжился бы байтами другого файла.
-                    val hasVideoData = partFileOf(e).exists() || videoPartOf(e).exists() || e.videoDone
-                    val hasAudioData = audioPartOf(e).exists() || e.audioDone
-                    val r = resolver.resolve(
-                        e.pageUrl, Quality.fromKey(e.quality), allowSplit = e.allowSplit,
-                        preferFormat = if (hasVideoData) e.formatId else "",
-                        preferAudio = if (hasAudioData && e.isSplit) e.audioFormatId else "",
-                    )
-                    if (!r.ok) {
-                        val tries = e.resolveRetries + 1
-                        if (tries >= RESOLVE_RETRIES || r.kind == "no-direct-format") {
-                            fail(id, r.error.ifBlank { "не удалось разобрать ссылку" })
-                            return
-                        }
-                        downloadsDao.update(e.copy(status = DownloadStatus.QUEUED, resolveRetries = tries,
-                            error = r.error, updatedAt = System.currentTimeMillis()))
-                        delay(3000L * tries)
-                        continue@loop
-                    }
-                    e = applyResolve(e, r)
+                    e = (if (e.isPlanned) resolvePlanned(e) else resolveLegacy(e)) ?: return
+                    if (e.status == DownloadStatus.QUEUED) continue@loop   // повтор после паузы
                     downloadsDao.update(e)
                     if (e.isSplit && e.videoDone && e.audioDone) { toMerge(e); return }
                 } else {
@@ -494,11 +577,21 @@ class DownloadCoordinator(
                     Track.VIDEO -> e.audioTotalBytes
                     Track.AUDIO -> e.videoTotalBytes
                 }
+                // Точный размер дорожки от источника: другой размер = другой файл.
+                val expected = when (track) {
+                    Track.AUDIO -> if (e.audioExact) e.audioTotalBytes else -1L
+                    else -> if (e.videoExact) e.videoTotalBytes else -1L
+                }
+                val chunk = if (track == Track.AUDIO) e.audioChunk else e.videoChunk
+                if (e.isPlanned) {
+                    val stage = when (track) { Track.AUDIO -> "audio"; else -> "video" }
+                    if (e.stage != stage) downloadsDao.update(e.copy(stage = stage, updatedAt = System.currentTimeMillis()))
+                }
                 val meter = SpeedMeter(part.length() + baseOther)
                 var lastWrite = 0L
                 NoxLog.event("transfer-start", "id" to id, "track" to track.name, "part" to part.length(),
                     "host" to SafeUrl.host(url), "headers" to headers.keys.joinToString(","))
-                val outcome = http.download(url, headers, part) { downloaded, total ->
+                val outcome = http.download(url, headers, part, expected, chunk) { downloaded, total ->
                     val now = System.currentTimeMillis()
                     if (now - lastWrite >= PROGRESS_WRITE_EVERY_MS) {
                         lastWrite = now
@@ -540,15 +633,34 @@ class DownloadCoordinator(
                         val tries = fresh.resolveRetries + 1
                         NoxLog.event("transfer-expired", "id" to id, "code" to outcome.code, "tries" to tries,
                             "part" to part.length())
+                        // Кэш разбора мог отдать уже отвергнутый адрес: следующий план — со свежего разбора.
+                        resolver.forget(fresh.pageUrl)
                         if (tries > RESOLVE_RETRIES) {
-                            fail(id, "ссылка устарела (HTTP ${outcome.code})"); return
+                            val yt = fresh.extractorKey.startsWith("Youtube", true)
+                            if (yt && outcome.code == 403) {
+                                fail(id, "YouTube отказал в выдаче файла (HTTP 403) даже по свежей ссылке. Так бывает, " +
+                                    "когда YouTube требует дополнительную проверку (PO-токен) или ограничивает сеть. " +
+                                    "Скачанные части сохранены — попробуйте позже.", "forbidden")
+                            } else {
+                                fail(id, "Источник отказал в доступе к файлу (HTTP ${outcome.code}). Скачанные части сохранены.", "forbidden")
+                            }
+                            return
                         }
+                        delay(1500L * tries)
                         // .part не трогаем: свежий адрес продолжит с того же места.
                         downloadsDao.update(fresh.copy(resolvedUrl = "", audioUrl = "", resolveRetries = tries,
                             downloadedBytes = partSize(fresh), updatedAt = System.currentTimeMillis()))
                         continue@loop
                     }
                     is HttpDownloader.Outcome.Failed -> {
+                        if (outcome.isSizeMismatch) {
+                            NoxLog.event("transfer-mismatch", "id" to id, "track" to track.name,
+                                "expected" to outcome.expected, "actual" to outcome.actual, "part" to part.length())
+                            fail(id, "Источник теперь отдаёт другой файл (${Format.bytes(outcome.actual)} вместо " +
+                                "${Format.bytes(outcome.expected)}). Скачанные части не дополняются чужими данными — " +
+                                "выберите качество заново.", "size-mismatch")
+                            return
+                        }
                         val fresh = downloadsDao.get(id) ?: return
                         val tries = fresh.retries + 1
                         NoxLog.event("transfer-failed", "id" to id, "code" to outcome.code,
@@ -577,32 +689,54 @@ class DownloadCoordinator(
     }
 
     /**
-     * Применить свежий разбор. Если формат сменился относительно уже
-     * скачанной части — эта часть не может быть продолжена и удаляется.
+     * Задание 0.2.x (лестница качества). Если часть файла уже скачана, просим
+     * тот же формат; если источник его больше не отдаёт — останавливаемся с
+     * понятной причиной и сохраняем части, а не качаем другой формат поверх.
+     * null — задание остановлено; статус QUEUED — повтор после паузы.
      */
+    private suspend fun resolveLegacy(e: DownloadEntity): DownloadEntity? {
+        val hasVideoData = partFileOf(e).exists() || videoPartOf(e).exists() || e.videoDone
+        val hasAudioData = audioPartOf(e).exists() || e.audioDone
+        val r = resolver.resolve(
+            e.pageUrl, Quality.fromKey(e.quality), allowSplit = e.allowSplit,
+            preferFormat = if (hasVideoData) e.formatId else "",
+            preferAudio = if (hasAudioData && e.isSplit) e.audioFormatId else "",
+        )
+        if (!r.ok) {
+            val tries = e.resolveRetries + 1
+            if (tries >= RESOLVE_RETRIES || r.kind == "no-direct-format") {
+                fail(e.id, r.error.ifBlank { "не удалось разобрать ссылку" }, r.kind)
+                return null
+            }
+            downloadsDao.update(e.copy(status = DownloadStatus.QUEUED, resolveRetries = tries,
+                error = r.error, updatedAt = System.currentTimeMillis()))
+            delay(3000L * tries)
+            return e.copy(status = DownloadStatus.QUEUED)
+        }
+        val newMode = if (r.isSplit) DownloadMode.SPLIT else DownloadMode.PROGRESSIVE
+        val videoChanged = hasVideoData && e.formatId.isNotBlank() && (e.formatId != r.formatId || e.mode != newMode)
+        val audioChanged = hasAudioData && e.isSplit && e.audioFormatId.isNotBlank() &&
+            (newMode != DownloadMode.SPLIT || e.audioFormatId != r.audioFormatId)
+        if (videoChanged || audioChanged) {
+            NoxLog.event("resolve-format-changed", "id" to e.id, "video" to videoChanged, "audio" to audioChanged)
+            fail(e.id, "Формат, с которого началась загрузка, больше не предлагается источником. " +
+                "Скачанные части сохранены — выберите качество заново.", "format-gone")
+            return null
+        }
+        return applyResolve(e, r)
+    }
+
+    /** Применить свежий разбор задания 0.2.x (формат уже проверен на совпадение). */
     private fun applyResolve(e: DownloadEntity, r: YtDlpResolver.Result): DownloadEntity {
         val newMode = if (r.isSplit) DownloadMode.SPLIT else DownloadMode.PROGRESSIVE
-        var videoDone = e.videoDone
-        var audioDone = e.audioDone
-        val modeChanged = e.formatId.isNotBlank() && e.mode != newMode
-        if (modeChanged) {
-            partFileOf(e).delete(); videoPartOf(e).delete(); audioPartOf(e).delete()
-            videoDone = false; audioDone = false
-            NoxLog.event("resolve-mode-changed", "id" to e.id, "from" to e.mode, "to" to newMode)
-        } else {
-            if (e.formatId.isNotBlank() && e.formatId != r.formatId) {
-                partFileOf(e).delete(); videoPartOf(e).delete(); videoDone = false
-                NoxLog.event("resolve-format-changed", "id" to e.id)
-            }
-            if (newMode == DownloadMode.SPLIT && e.audioFormatId.isNotBlank() && e.audioFormatId != r.audioFormatId) {
-                audioPartOf(e).delete(); audioDone = false
-            }
-        }
+        val keep = e.formatId.isNotBlank() && e.mode == newMode
+        val videoDone = keep && e.videoDone
+        val audioDone = keep && newMode == DownloadMode.SPLIT && e.audioDone
         val fileName = if (e.fileName.isNotBlank()) e.fileName
         else FileNames.unique(storage.media, FileNames.targetName(e.customTitle.ifBlank { r.title }, r.videoId, r.ext)).name
         val total = when {
             newMode == DownloadMode.SPLIT && r.filesize > 0 && r.audioFilesize > 0 -> r.filesize + r.audioFilesize
-            newMode == DownloadMode.PROGRESSIVE && e.totalBytes > 0 && !modeChanged -> e.totalBytes
+            newMode == DownloadMode.PROGRESSIVE && e.totalBytes > 0 && keep -> e.totalBytes
             newMode == DownloadMode.PROGRESSIVE -> r.filesize
             else -> 0L
         }
@@ -614,15 +748,88 @@ class DownloadCoordinator(
             thumbnailUrl = r.thumbnail.ifBlank { e.thumbnailUrl },
             durationSec = if (r.durationSec > 0) r.durationSec else e.durationSec,
             uploader = r.uploader.ifBlank { e.uploader },
+            extractorKey = e.extractorKey.ifBlank { r.extractor },
             mode = newMode,
             audioUrl = r.audioUrl, audioFormatId = r.audioFormatId,
             audioHeadersJson = JSONObject(r.audioHeaders).toString(),
             videoTotalBytes = if (videoDone) e.videoTotalBytes else r.filesize,
             audioTotalBytes = if (audioDone) e.audioTotalBytes else r.audioFilesize,
             videoDone = videoDone, audioDone = audioDone,
-            status = DownloadStatus.DOWNLOADING, error = "",
+            status = DownloadStatus.DOWNLOADING, error = "", errorKind = "",
             updatedAt = System.currentTimeMillis(),
         )
+    }
+
+    /**
+     * Задание 0.3.0: свежие адреса ровно для сохранённых format ID.
+     * Подмены формата нет: пропал вариант или изменился его точный размер
+     * при уже скачанных частях — остановка с понятной причиной.
+     */
+    private suspend fun resolvePlanned(e: DownloadEntity): DownloadEntity? {
+        if (e.stage != "plan") downloadsDao.update(e.copy(stage = "plan", updatedAt = System.currentTimeMillis()))
+        val r = resolver.plan(e.pageUrl, e.formatId, if (e.isSplit) e.audioFormatId else "")
+        val saved = if (partSize(e) > 0 || e.videoDone || e.audioDone) " Скачанные части сохранены." else ""
+        when (r) {
+            is PlanResult.FormatGone -> {
+                fail(e.id, "Выбранный вариант (${e.quality}) больше не предлагается источником.$saved Выберите качество заново.",
+                    "format-gone")
+                return null
+            }
+            is PlanResult.Failed -> {
+                val err = r.error
+                val tries = e.resolveRetries + 1
+                if (err.kind in FINAL_KINDS || !err.retryable || tries >= RESOLVE_RETRIES) {
+                    fail(e.id, err.message + saved, err.kind)
+                    return null
+                }
+                downloadsDao.update(e.copy(status = DownloadStatus.QUEUED, resolveRetries = tries,
+                    error = err.message, updatedAt = System.currentTimeMillis()))
+                delay(3000L * tries)
+                return e.copy(status = DownloadStatus.QUEUED)
+            }
+            is PlanResult.Ok -> {
+                val v = r.video
+                val a = r.audio
+                if (e.isSplit && a == null) {
+                    fail(e.id, "План загрузки пришёл без звуковой дорожки.", "internal"); return null
+                }
+                val vData = partFileOf(e).exists() || videoPartOf(e).exists() || e.videoDone
+                val aData = audioPartOf(e).exists() || e.audioDone
+                val vChanged = e.videoExact && e.videoTotalBytes > 0 && v.filesizeExact && v.filesize != e.videoTotalBytes
+                val aChanged = a != null && e.audioExact && e.audioTotalBytes > 0 && a.filesizeExact && a.filesize != e.audioTotalBytes
+                if ((vChanged && vData) || (aChanged && aData)) {
+                    NoxLog.event("plan-size-changed", "id" to e.id, "video" to vChanged, "audio" to aChanged)
+                    fail(e.id, "Источник изменил файл выбранного варианта (${e.quality}).$saved Выберите качество заново.",
+                        "format-changed")
+                    return null
+                }
+                val vTotal = when {
+                    e.videoDone -> e.videoTotalBytes
+                    v.filesize > 0 -> v.filesize
+                    v.filesizeApprox > 0 -> v.filesizeApprox
+                    else -> e.videoTotalBytes
+                }
+                val aTotal = when {
+                    a == null -> 0L
+                    e.audioDone -> e.audioTotalBytes
+                    a.filesize > 0 -> a.filesize
+                    a.filesizeApprox > 0 -> a.filesizeApprox
+                    else -> e.audioTotalBytes
+                }
+                return e.copy(
+                    resolvedUrl = v.url, headersJson = JSONObject(v.headers).toString(),
+                    audioUrl = a?.url.orEmpty(), audioHeadersJson = JSONObject(a?.headers ?: emptyMap<String, String>()).toString(),
+                    videoTotalBytes = vTotal, audioTotalBytes = aTotal,
+                    videoExact = if (e.videoDone) e.videoExact else v.filesizeExact && v.filesize > 0,
+                    audioExact = if (e.audioDone) e.audioExact else a != null && a.filesizeExact && a.filesize > 0,
+                    videoChunk = v.chunkSize, audioChunk = a?.chunkSize ?: 0L,
+                    totalBytes = vTotal + aTotal,
+                    title = r.details?.title?.takeIf { it.isNotBlank() } ?: e.title,
+                    status = DownloadStatus.DOWNLOADING, error = "", errorKind = "",
+                    updatedAt = System.currentTimeMillis(),
+                )
+            }
+        }
     }
 
     private suspend fun afterCancel(id: Long, part: File?) {
@@ -651,11 +858,12 @@ class DownloadCoordinator(
         if (part == null) Unit
     }
 
-    private suspend fun fail(id: Long, message: String) {
+    private suspend fun fail(id: Long, message: String, kind: String = "") {
         val e = downloadsDao.get(id) ?: return
-        downloadsDao.update(e.copy(status = DownloadStatus.ERROR, error = message.take(300),
+        downloadsDao.update(e.copy(status = DownloadStatus.ERROR, error = message.take(400), errorKind = kind,
             downloadedBytes = partSize(e), speedBps = 0, etaSec = -1, updatedAt = System.currentTimeMillis()))
-        NoxLog.event("job-error", "id" to id, "error" to message.take(160))
+        NoxLog.event("job-error", "id" to id, "kind" to kind.ifBlank { null }, "stage" to e.stage.ifBlank { null },
+            "error" to message.take(160))
     }
 
     /** Имя итогового файла: название пользователя, если он его задал. */
@@ -719,13 +927,18 @@ class DownloadCoordinator(
             return
         }
         val tmp = mergeTmpOf(e)
-        NoxLog.event("merge-start", "id" to id, "video" to v.length(), "audio" to a.length())
+        val container = e.container.ifBlank { MediaMerger.CONTAINER_MP4 }
+        NoxLog.event("merge-start", "id" to id, "video" to v.length(), "audio" to a.length(), "container" to container)
+        if (e.stage != "merge") downloadsDao.update(e.copy(stage = "merge", updatedAt = System.currentTimeMillis()))
         try {
-            MediaMerger.merge(v, a, tmp)
+            MediaMerger.merge(v, a, tmp, container)
+            val problem = MediaMerger.verify(tmp, v, a)
             val probe = MediaMerger.probe(tmp)
-            if (!probe.hasVideo || !probe.hasAudio || probe.durationUs <= 0) {
+            if (problem != null) {
                 tmp.delete()
-                fail(id, "после склейки нет изображения или звука"); return
+                NoxLog.event("merge-verify-failed", "id" to id, "problem" to problem)
+                fail(id, "Проверка собранного файла не пройдена: $problem. Дорожки сохранены — можно повторить объединение.", "verify")
+                return
             }
             withContext(NonCancellable) {
                 val fresh = downloadsDao.get(id) ?: return@withContext
@@ -742,7 +955,9 @@ class DownloadCoordinator(
         } catch (t: Throwable) {
             tmp.delete()
             NoxLog.event("merge-error", "id" to id, "error" to "${t.javaClass.simpleName}: ${t.message?.take(120)}")
-            withContext(NonCancellable) { fail(id, "склейка не удалась: ${t.message ?: t.javaClass.simpleName}") }
+            withContext(NonCancellable) {
+                fail(id, "Объединение дорожек не удалось: ${t.message ?: t.javaClass.simpleName}. Дорожки сохранены — можно повторить.", "merge")
+            }
         }
     }
 
@@ -754,15 +969,23 @@ class DownloadCoordinator(
         val cover = fetchCover(e, final)
         val mediaId = db.media().insert(
             MediaEntity(title = e.displayTitle.ifBlank { final.nameWithoutExtension }, filePath = final.absolutePath,
-                sizeBytes = final.length(), quality = e.quality, height = e.height, durationSec = e.durationSec,
+                sizeBytes = final.length(), quality = e.qualityLabel, height = e.height, durationSec = e.durationSec,
                 coverPath = cover, pageUrl = e.pageUrl, videoId = e.videoId, createdAt = System.currentTimeMillis(),
-                uploader = e.uploader)
+                uploader = e.uploader,
+                container = e.container.ifBlank { final.extension.lowercase() }, width = e.width, fps = e.fps,
+                codecs = codecsOf(e), variantKey = e.variantKey)
         )
         downloadsDao.update(e.copy(status = DownloadStatus.COMPLETED, fileName = final.name,
             downloadedBytes = final.length(), totalBytes = final.length(), error = "",
             updatedAt = System.currentTimeMillis()))
         NoxLog.event("library-added", "media" to mediaId, "download" to e.id, "cover" to cover.isNotEmpty())
         relocator?.let { r -> scope.launch { runCatching { r.afterDownload(mediaId) } } }
+    }
+
+    private fun codecsOf(e: DownloadEntity): String {
+        if (e.vcodec.isBlank() && e.acodec.isBlank()) return ""
+        return listOfNotNull(e.vcodec.takeIf { it.isNotBlank() }?.let { CodecNames.video(it) },
+            e.acodec.takeIf { it.isNotBlank() }?.let { CodecNames.audio(it) }).joinToString(" + ")
     }
 
     /** Обложка — необязательный шаг: без неё файл всё равно в медиатеке. */

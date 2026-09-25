@@ -30,6 +30,12 @@ interface DownloadDao {
     @Query("SELECT COUNT(*) FROM downloads WHERE pageUrl = :pageUrl AND status != 'COMPLETED' AND status != 'ERROR'")
     suspend fun countLiveFor(pageUrl: String): Int
 
+    @Query("SELECT COUNT(*) FROM downloads WHERE videoId != '' AND extractorKey = :extractor AND videoId = :videoId AND variantKey = :variantKey AND status != 'COMPLETED' AND status != 'ERROR'")
+    suspend fun countLiveVariant(extractor: String, videoId: String, variantKey: String): Int
+
+    @Query("SELECT COUNT(*) FROM downloads WHERE fileName = :fileName AND status != 'COMPLETED'")
+    suspend fun countByFileName(fileName: String): Int
+
     @Query("SELECT pageUrl FROM downloads WHERE status != 'COMPLETED' AND status != 'ERROR'")
     suspend fun livePageUrls(): List<String>
 

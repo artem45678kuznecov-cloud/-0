@@ -5,6 +5,11 @@ import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import com.nox.offline.core.NoxLog
 import com.nox.offline.core.SafeUrl
+import com.nox.offline.downloader.catalog.AnalyzeResult
+import com.nox.offline.downloader.catalog.CatalogBuilder
+import com.nox.offline.downloader.catalog.CatalogJson
+import com.nox.offline.downloader.catalog.PlanResult
+import com.nox.offline.downloader.catalog.ResolveError
 import org.json.JSONObject
 
 /**
@@ -152,5 +157,85 @@ class YtDlpResolver(private val context: Context) {
             NoxLog.event("resolve-error", "kind" to "json", "error" to msg)
             Result(ok = false, error = msg, kind = "json")
         }
+    }
+
+    // ------------------------------------------------------------------
+    //  0.3.0: анализ и точный план
+    // ------------------------------------------------------------------
+
+    private fun call(fn: String, vararg args: Any?): String =
+        python().getModule("resolver").callAttr(fn, *args).toString()
+
+    /**
+     * Один разбор страницы: сведения и все дорожки. Блокирующий, зовётся
+     * не из UI-потока. Никогда не бросает: ошибка приходит в результате.
+     */
+    fun analyze(pageUrl: String, fresh: Boolean = false): AnalyzeResult {
+        val host = SafeUrl.host(pageUrl)
+        NoxLog.event("analyze-start", "host" to host, "fresh" to fresh)
+        val started = System.currentTimeMillis()
+        val raw = try {
+            call("analyze", pageUrl, fresh)
+        } catch (e: Throwable) {
+            val msg = "python: ${e.javaClass.simpleName}: ${e.message?.take(200)}"
+            lastError = msg
+            NoxLog.event("analyze-error", "stage" to "bridge", "error" to msg)
+            return AnalyzeResult.Failed(ResolveError("bridge", "Внутренняя ошибка разбора ссылки.", msg))
+        }
+        val r = CatalogJson.parseAnalyze(pageUrl, raw)
+        val ms = System.currentTimeMillis() - started
+        when (r) {
+            is AnalyzeResult.Ok -> {
+                val a = r.analysis
+                NoxLog.event("analyze-ok", "host" to host, "source" to a.details.extractor, "tracks" to a.tracks.size,
+                    "maxTier" to a.tracks.maxOfOrNull { CatalogBuilder.tier(it.width, it.height) },
+                    "cached" to a.cached, "js" to "${a.jsRuns}/${a.jsFailed}/${a.jsMs}ms", "ms" to ms)
+            }
+            is AnalyzeResult.Failed -> {
+                lastError = "${r.error.kind}: ${r.error.detail.take(200)}"
+                NoxLog.event("analyze-error", "host" to host, "stage" to r.error.stage, "kind" to r.error.kind,
+                    "detail" to r.error.detail.take(160), "ms" to ms)
+            }
+        }
+        return r
+    }
+
+    /** Свежие адреса ровно для выбранных format ID. Подмены формата не бывает. */
+    fun plan(pageUrl: String, videoFormat: String, audioFormat: String, maxAgeSec: Int? = null): PlanResult {
+        val started = System.currentTimeMillis()
+        val raw = try {
+            call("plan", pageUrl, videoFormat, audioFormat, maxAgeSec)
+        } catch (e: Throwable) {
+            val msg = "python: ${e.javaClass.simpleName}: ${e.message?.take(200)}"
+            lastError = msg
+            NoxLog.event("plan-error", "stage" to "bridge", "error" to msg)
+            return PlanResult.Failed(ResolveError("bridge", "Внутренняя ошибка разбора ссылки.", msg))
+        }
+        val r = CatalogJson.parsePlan(pageUrl, raw)
+        val ms = System.currentTimeMillis() - started
+        when (r) {
+            is PlanResult.Ok -> NoxLog.event("plan-ok", "video" to r.video.formatId, "audio" to r.audio?.formatId,
+                "vsize" to r.video.filesize, "asize" to r.audio?.filesize, "host" to SafeUrl.host(r.video.url),
+                "chunk" to r.video.chunkSize, "ms" to ms)
+            is PlanResult.FormatGone -> NoxLog.event("plan-format-gone", "missing" to r.missing.joinToString(","), "ms" to ms)
+            is PlanResult.Failed -> {
+                lastError = "${r.error.kind}: ${r.error.detail.take(200)}"
+                NoxLog.event("plan-error", "stage" to r.error.stage, "kind" to r.error.kind,
+                    "detail" to r.error.detail.take(160), "ms" to ms)
+            }
+        }
+        return r
+    }
+
+    /** Забыть кэш разбора этой ссылки (после отказа по адресу из кэша). */
+    fun forget(pageUrl: String) {
+        runCatching { call("forget", pageUrl) }
+    }
+
+    /** Состояние встроенного JS-движка для диагностики. */
+    fun jsStatus(): String = try {
+        call("js_status")
+    } catch (e: Throwable) {
+        "unavailable: ${e.javaClass.simpleName}"
     }
 }

@@ -2,27 +2,36 @@
 """
 Разбор ссылки для NOX Android.
 
-Здесь живёт ровно то, ради чего в приложении есть Python: yt-dlp и выбор
-формата по лестнице качества NOX. Передача файла, база, уведомления и
-интерфейс — Kotlin. Python получает ссылку и качество, возвращает JSON
-с прямым адресом и заголовками. Больше он ничего не делает: ни сети
-сверх extract_info, ни файлов, ни потоков.
+Здесь живёт ровно то, ради чего в приложении есть Python: yt-dlp. Передача
+файла, база, уведомления и интерфейс — Kotlin. Python ничего не скачивает:
+только extract_info(download=False).
 
-Лестница качества перенесена из nox_download.py без изменений:
+С версии 0.3.0 два шага вместо одного:
+
+  analyze(url) — один extract_info: сведения о видео и полный список его
+                 дорожек (nox_catalog). Ответ кэшируется в памяти на время
+                 ANALYZE_TTL, чтобы «Скачать» не разбирал страницу заново;
+  plan(url, video, audio) — прямые адреса ровно выбранных format ID из
+                 кэша (или из свежего разбора, если кэш устарел). Другой
+                 формат вместо выбранного не подставляется никогда.
+
+Старый resolve() с лестницей 360/480/720/MAX оставлен для заданий,
+созданных версиями 0.2.x и ещё не получивших формат:
 
     360  -> url360, url240, url144
     480  -> url480, url360, url240, url144
     720  -> url720, url480, url360, url240, url144
     MAX  -> url2160 ... url144
-
-Прямые форматы VK urlXXX уже содержат и видео, и звук. Если их нет —
-лучший combined-формат в пределах нужной высоты. Video-only и audio-only
-не выбираются никогда: склеивать их нечем, ffmpeg на Stage 01 нет.
 """
 
 import json
 import os
 import re
+import threading
+import time
+from collections import OrderedDict
+
+import nox_catalog
 
 RESOLVE_SOCKET_TIMEOUT = 15
 
@@ -306,9 +315,29 @@ def _prepare_ssl():
         pass
 
 
+_js_ready = None
+
+
+def _prepare_js():
+    """Регистрирует встроенный JS-движок (QuickJS-NG) для задач YouTube."""
+    global _js_ready
+    if _js_ready is None:
+        try:
+            import nox_jsc
+            nox_jsc.register()
+            _js_ready = True
+        except Exception as e:  # без движка остальные сайты работают как раньше
+            _js_ready = False
+            _JS_STATE['register_error'] = nox_catalog.scrub(repr(e), 200)
+    return _js_ready
+
+
+_JS_STATE = {'register_error': ''}
+
+
 def ydl_opts():
     """Минимальный набор: разбор ничего не качает и не пишет."""
-    return {
+    opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
@@ -318,7 +347,15 @@ def ydl_opts():
         'fixup': 'never',
         'skip_download': True,
         'cachedir': False,
+        # Только встроенный движок: внешние программы (deno, node, qjs)
+        # NOX не ищет и не запускает, скрипты EJS из сети не скачивает.
+        'js_runtimes': {},
+        'remote_components': set(),
     }
+    if _prepare_js():
+        import nox_jsc
+        opts['js_runtimes'] = {nox_jsc.RUNTIME_KEY: {}}
+    return opts
 
 
 def ytdlp_version():
@@ -360,3 +397,282 @@ def resolve(url, quality='480', allow_split=False, prefer_format='', prefer_audi
         return json.dumps({'ok': False, 'error': text[:400],
                            'kind': e.__class__.__name__},
                           ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------
+#  0.3.0: анализ -> каталог, план -> адреса выбранных форматов
+# ---------------------------------------------------------------------
+# Кэш ответов extract_info: ограничен и по числу, и по времени. Прямые
+# адреса YouTube живут около шести часов, но держать их дольше нужного
+# незачем: через ANALYZE_TTL plan() разберёт страницу заново.
+
+ANALYZE_TTL = 20 * 60
+CACHE_MAX = 6
+WARNINGS_MAX = 12
+
+
+class _InfoCache(object):
+    def __init__(self, max_items=CACHE_MAX, ttl=ANALYZE_TTL, clock=time.time):
+        self._items = OrderedDict()
+        self._lock = threading.Lock()
+        self.max_items = max_items
+        self.ttl = ttl
+        self.clock = clock
+
+    @staticmethod
+    def key(url):
+        return str(url or '').strip()
+
+    def get(self, url, max_age=None):
+        limit = self.ttl if max_age is None else min(self.ttl, max_age)
+        with self._lock:
+            item = self._items.get(self.key(url))
+            if item is None:
+                return None
+            info, at = item
+            if self.clock() - at > limit:
+                return None
+            return info, at
+
+    def put(self, url, info):
+        with self._lock:
+            k = self.key(url)
+            self._items.pop(k, None)
+            self._items[k] = (info, self.clock())
+            while len(self._items) > self.max_items:
+                self._items.popitem(last=False)
+
+    def drop(self, url):
+        with self._lock:
+            self._items.pop(self.key(url), None)
+
+    def clear(self):
+        with self._lock:
+            self._items.clear()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._items)
+
+
+_cache = _InfoCache()
+
+
+class _Collector(object):
+    """Логгер yt-dlp: копит предупреждения (без адресов), ничего не печатает."""
+
+    def __init__(self):
+        self.warnings = []
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        if len(self.warnings) < WARNINGS_MAX:
+            self.warnings.append(nox_catalog.scrub(msg, 240))
+
+    def error(self, msg):
+        self.warning(msg)
+
+
+def _js_info(stats):
+    out = {'runs': 0, 'failed': 0, 'ms': 0, 'engine': '', 'error': ''}
+    try:
+        import nox_jsc
+        out['engine'] = nox_jsc.engine_version() if _js_ready else ''
+        out['error'] = nox_catalog.scrub(nox_jsc.last_error(), 200) if stats.get('failed') else ''
+    except Exception:
+        pass
+    out['register_error'] = _JS_STATE.get('register_error', '')
+    for k in ('runs', 'failed', 'ms'):
+        out[k] = int(stats.get(k, 0))
+    return out
+
+
+def _extract(url):
+    """Один extract_info. Возвращает (info, warnings, js_stats)."""
+    _prepare_ssl()
+    import yt_dlp
+    collector = _Collector()
+    opts = ydl_opts()
+    stats = {'runs': 0, 'failed': 0, 'ms': 0}
+    opts['logger'] = collector
+    opts['nox_js_stats'] = stats
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(str(url), download=False)
+    return info, collector.warnings, stats
+
+
+def _versions():
+    ejs = ''
+    try:
+        import yt_dlp_ejs
+        ejs = str(getattr(yt_dlp_ejs, 'version', ''))
+    except Exception:
+        pass
+    return {'yt_dlp': ytdlp_version(), 'ejs': ejs}
+
+
+def _error_json(exc_or_text, stage, warnings=None, js=None, kind=None, message=None):
+    detail = nox_catalog.scrub(exc_or_text, 400)
+    k, human = nox_catalog.classify_error(detail)
+    if (k == 'extract-failed') and js and js.get('failed'):
+        k, human = 'js-runtime', 'Не удалось выполнить проверку YouTube во встроенном JS-движке.'
+    return json.dumps({
+        'ok': False,
+        'kind': kind or k,
+        'error': message or human,
+        'detail': detail,
+        'stage': stage,
+        'warnings': warnings or [],
+        'js': js or {},
+        'versions': _versions(),
+    }, ensure_ascii=False)
+
+
+def _catalog_json(info, warnings, js, analyzed_at, cached):
+    details = nox_catalog.details_of(info)
+    tracks = nox_catalog.tracks_of(info)
+    return {
+        'ok': True,
+        'details': details,
+        'tracks': tracks,
+        'analyzed_at': int(analyzed_at),
+        'cached': bool(cached),
+        'warnings': warnings,
+        'js': js,
+        'versions': _versions(),
+    }
+
+
+def analyze(url, fresh=False):
+    """
+    Точка входа «Найти видео». Никогда не бросает исключение: всегда JSON.
+    Повторный вызов для той же ссылки в пределах ANALYZE_TTL не ходит в сеть.
+    """
+    stage = 'page'
+    try:
+        if not fresh:
+            hit = _cache.get(url)
+            if hit is not None:
+                info, at = hit
+                return json.dumps(_catalog_json(info, [], {}, at, True), ensure_ascii=False)
+        info, warnings, stats = _extract(url)
+        js = _js_info(stats)
+        stage = 'catalog'
+        details = nox_catalog.details_of(info)
+        if details['is_live'] or details['live_status'] in ('is_live', 'is_upcoming'):
+            return _error_json('live', stage, warnings, js, 'live',
+                               'Это прямая трансляция или премьера, которая ещё не закончилась. Скачать можно после её завершения.')
+        tracks = nox_catalog.tracks_of(info)
+        if not tracks:
+            text = ' '.join(warnings) or 'no formats'
+            if stats.get('failed'):
+                return _error_json(text, 'js', warnings, js, 'js-runtime',
+                                   'Не удалось выполнить проверку YouTube во встроенном JS-движке.')
+            return _error_json(text, stage, warnings, js, 'no-formats', 'Источник не отдал ни одного формата видео.')
+        now = time.time()
+        _cache.put(url, info)
+        return json.dumps(_catalog_json(info, warnings, js, now, False), ensure_ascii=False)
+    except Exception as e:
+        return _error_json(str(e) or e.__class__.__name__, stage)
+
+
+def _component(fmt):
+    t = nox_catalog.normalize_track(fmt)
+    size = t['filesize'] if t else 0
+    return {
+        'format_id': str(fmt.get('format_id') or ''),
+        'url': str(fmt.get('url') or ''),
+        'headers': safe_headers(fmt.get('http_headers')),
+        'ext': str(fmt.get('ext') or ''),
+        'container': t['container'] if t else '',
+        'vcodec': t['vcodec'] if t else '',
+        'acodec': t['acodec'] if t else '',
+        'width': t['width'] if t else 0,
+        'height': t['height'] if t else 0,
+        'fps': t['fps'] if t else 0,
+        'filesize': size,
+        'filesize_exact': bool(size),
+        'filesize_approx': t['filesize_approx'] if t else 0,
+        'chunk_size': t['chunk_size'] if t else 0,
+        'transport': t['transport'] if t else 'other',
+    }
+
+
+def plan(url, video_format, audio_format='', max_age=None):
+    """
+    Прямые адреса ровно для video_format (+ audio_format). Если кэш старше
+    max_age секунд (или ANALYZE_TTL) — один свежий extract_info. Если
+    выбранного формата больше нет, ответ kind='format-gone' с новым каталогом:
+    подменять формат молча нельзя, выбирает пользователь.
+    """
+    stage = 'plan'
+    try:
+        video_format = str(video_format or '')
+        audio_format = str(audio_format or '')
+        hit = _cache.get(url, max_age)
+        warnings, js = [], {}
+        if hit is None:
+            stage = 'page'
+            info, warnings, stats = _extract(url)
+            js = _js_info(stats)
+            _cache.put(url, info)
+            at = time.time()
+        else:
+            info, at = hit
+        stage = 'plan'
+        v = nox_catalog.find_format(info, video_format)
+        a = nox_catalog.find_format(info, audio_format) if audio_format else None
+        missing = [f for f, got in ((video_format, v), (audio_format, a)) if f and got is None]
+        if missing:
+            payload = _catalog_json(info, warnings, js, at, hit is not None)
+            payload.update({
+                'ok': False,
+                'kind': 'format-gone',
+                'error': 'Выбранный вариант больше не предлагается источником.',
+                'missing': missing,
+                'stage': stage,
+            })
+            return json.dumps(payload, ensure_ascii=False)
+        comps = [_component(v)] + ([_component(a)] if a is not None else [])
+        bad = [c['format_id'] for c in comps if c['transport'] != 'http' or not c['url']]
+        if bad:
+            return _error_json('transport ' + ','.join(bad), stage, warnings, js, 'unsupported-transport',
+                               'Этот вариант передаётся потоком по частям (HLS/DASH) — NOX пока скачивает только цельные файлы.')
+        return json.dumps({
+            'ok': True,
+            'video': comps[0],
+            'audio': comps[1] if len(comps) > 1 else None,
+            'details': nox_catalog.details_of(info),
+            'resolved_at': int(at),
+            'cached': hit is not None,
+            'warnings': warnings,
+            'js': js,
+            'versions': _versions(),
+        }, ensure_ascii=False)
+    except Exception as e:
+        return _error_json(str(e) or e.__class__.__name__, stage)
+
+
+def forget(url):
+    """Убрать ссылку из кэша (например, после 403 по адресу из кэша)."""
+    _cache.drop(url)
+    return True
+
+
+def js_status():
+    """Для диагностики: готов ли встроенный JS-движок и его версия."""
+    ready = _prepare_js()
+    out = {'ready': bool(ready), 'versions': _versions(), 'register_error': _JS_STATE.get('register_error', '')}
+    if ready:
+        try:
+            import nox_jsc
+            out['engine'] = nox_jsc.engine_version()
+            out['last_error'] = nox_catalog.scrub(nox_jsc.last_error(), 200)
+        except Exception as e:
+            out['engine_error'] = nox_catalog.scrub(repr(e), 200)
+    return json.dumps(out, ensure_ascii=False)

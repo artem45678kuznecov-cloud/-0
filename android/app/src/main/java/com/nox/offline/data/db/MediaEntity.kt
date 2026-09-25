@@ -41,6 +41,15 @@ data class MediaEntity(
     @ColumnInfo(defaultValue = "0") val imported: Boolean = false,
     /** '' — на месте; 'pending' — ждёт переноса в выбранную папку. */
     @ColumnInfo(defaultValue = "''") val moveState: String = "",
+
+    // ---- v3 (0.3.0) ----
+    /** Настоящий контейнер файла: mp4 / webm ('' — неизвестен, старые записи). */
+    @ColumnInfo(defaultValue = "''") val container: String = "",
+    @ColumnInfo(defaultValue = "0") val width: Int = 0,
+    @ColumnInfo(defaultValue = "0") val fps: Int = 0,
+    /** «VP9 + Opus» и т. п. */
+    @ColumnInfo(defaultValue = "''") val codecs: String = "",
+    @ColumnInfo(defaultValue = "''") val variantKey: String = "",
 ) {
     val isExternal: Boolean get() = contentUri.isNotBlank()
 }
@@ -81,6 +90,9 @@ interface MediaDao {
 
     @Query("SELECT COUNT(*) FROM media WHERE pageUrl = :pageUrl")
     suspend fun countByPageUrl(pageUrl: String): Int
+
+    @Query("SELECT COUNT(*) FROM media WHERE videoId != '' AND videoId = :videoId AND variantKey = :variantKey")
+    suspend fun countVariant(videoId: String, variantKey: String): Int
 
     @Insert
     suspend fun insert(entity: MediaEntity): Long

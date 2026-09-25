@@ -43,5 +43,40 @@ object Migrations {
         }
     }
 
-    val ALL = arrayOf(MIGRATION_1_2)
+    /**
+     * 2 → 3 (0.3.0): поля точного плана загрузки. Старые задания получают
+     * planVersion = 0 и продолжают работать по сохранённым format ID и .part.
+     */
+    val SQL_2_3: List<String> = listOf(
+        "ALTER TABLE `downloads` ADD COLUMN `planVersion` INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE `downloads` ADD COLUMN `extractorKey` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `downloads` ADD COLUMN `variantKey` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `downloads` ADD COLUMN `width` INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE `downloads` ADD COLUMN `fps` INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE `downloads` ADD COLUMN `vcodec` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `downloads` ADD COLUMN `acodec` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `downloads` ADD COLUMN `container` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `downloads` ADD COLUMN `dynamicRange` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `downloads` ADD COLUMN `audioLang` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `downloads` ADD COLUMN `videoExact` INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE `downloads` ADD COLUMN `audioExact` INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE `downloads` ADD COLUMN `videoChunk` INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE `downloads` ADD COLUMN `audioChunk` INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE `downloads` ADD COLUMN `errorKind` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `downloads` ADD COLUMN `stage` TEXT NOT NULL DEFAULT ''",
+        // media: настоящий контейнер и кодеки готового файла.
+        "ALTER TABLE `media` ADD COLUMN `container` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `media` ADD COLUMN `width` INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE `media` ADD COLUMN `fps` INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE `media` ADD COLUMN `codecs` TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE `media` ADD COLUMN `variantKey` TEXT NOT NULL DEFAULT ''",
+    )
+
+    val MIGRATION_2_3 = object : Migration(2, 3) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            for (sql in SQL_2_3) db.execSQL(sql)
+        }
+    }
+
+    val ALL = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
 }

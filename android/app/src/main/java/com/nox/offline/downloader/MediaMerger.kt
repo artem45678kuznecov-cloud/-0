@@ -4,18 +4,21 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.os.Build
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.File
 import java.nio.ByteBuffer
 
 /**
- * Склейка отдельных видео- и аудиодорожки в один MP4 средствами Android
+ * Склейка отдельных видео- и аудиодорожки в один файл средствами Android
  * (MediaExtractor + MediaMuxer). Без перекодирования: сэмплы копируются
- * как есть, поэтому это быстро и не теряет качество.
+ * как есть, поэтому это быстро и не теряет качество (и HDR-метаданные).
  *
- * Ограничение честное и заранее учтённое в resolver.py: MediaMuxer пишет в
- * MP4 только H.264/H.265 и AAC. Другие кодеки сюда не попадают.
+ * Контейнер выбирает каталог (MuxRoutes): MP4 для H.264/H.265/AV1 + AAC,
+ * WebM для VP9/VP8 + Opus/Vorbis. Другие сочетания сюда не попадают.
+ * Буфер сэмпла растёт по размеру самого большого кадра (ключевые кадры
+ * 1440p/2160p бывают больше нескольких мегабайт).
  *
  * Работа идёт кусками по одному сэмплу; между сэмплами проверяется отмена
  * корутины, поэтому пауза перед обновлением или отмена задания прерывают
@@ -26,7 +29,17 @@ object MediaMerger {
 
     class MergeException(message: String) : Exception(message)
 
-    suspend fun merge(video: File, audio: File, output: File, onProgress: (Float) -> Unit = {}) {
+    const val CONTAINER_MP4 = "mp4"
+    const val CONTAINER_WEBM = "webm"
+    private const val MIN_BUFFER = 2 * 1024 * 1024
+    private const val MAX_BUFFER = 128 * 1024 * 1024
+
+    fun outputFormat(container: String): Int = when (container) {
+        CONTAINER_WEBM -> MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
+        else -> MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+    }
+
+    suspend fun merge(video: File, audio: File, output: File, container: String = CONTAINER_MP4, onProgress: (Float) -> Unit = {}) {
         output.delete()
         val vEx = MediaExtractor()
         val aEx = MediaExtractor()
@@ -41,13 +54,14 @@ object MediaMerger {
             aEx.selectTrack(aTrack)
             val vFormat = vEx.getTrackFormat(vTrack)
             val aFormat = aEx.getTrackFormat(aTrack)
-            val m = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val label = if (container == CONTAINER_WEBM) "WebM" else "MP4"
+            val m = MediaMuxer(output.absolutePath, outputFormat(container))
             muxer = m
             val outV = try { m.addTrack(vFormat) } catch (e: Exception) {
-                throw MergeException("видео-кодек ${vFormat.getString(MediaFormat.KEY_MIME)} не подходит для MP4")
+                throw MergeException("видео-кодек ${vFormat.getString(MediaFormat.KEY_MIME)} не подходит для $label")
             }
             val outA = try { m.addTrack(aFormat) } catch (e: Exception) {
-                throw MergeException("аудио-кодек ${aFormat.getString(MediaFormat.KEY_MIME)} не подходит для MP4")
+                throw MergeException("аудио-кодек ${aFormat.getString(MediaFormat.KEY_MIME)} не подходит для $label")
             }
             // Поворот кадра (вертикальные ролики) переносится как есть.
             if (vFormat.containsKey(MediaFormat.KEY_ROTATION)) {
@@ -56,8 +70,7 @@ object MediaMerger {
             m.start()
             started = true
             val duration = maxOf(durationOf(vFormat), durationOf(aFormat)).coerceAtLeast(1)
-            val bufSize = maxOf(maxInput(vFormat), maxInput(aFormat), 2 * 1024 * 1024)
-            val buffer = ByteBuffer.allocateDirect(bufSize)
+            var buffer = ByteBuffer.allocateDirect(maxOf(maxInput(vFormat), maxInput(aFormat), MIN_BUFFER))
             val info = MediaCodec.BufferInfo()
             var vDone = false
             var aDone = false
@@ -71,8 +84,24 @@ object MediaMerger {
                     else -> vEx.sampleTime <= aEx.sampleTime
                 }
                 val ex = if (takeVideo) vEx else aEx
-                buffer.clear()
-                val size = ex.readSampleData(buffer, 0)
+                // Размер следующего сэмпла известен заранее (API 28+); иначе —
+                // растим буфер, если сэмпл в него не влез.
+                if (Build.VERSION.SDK_INT >= 28) {
+                    val need = ex.sampleSize
+                    if (need > buffer.capacity()) buffer = grow(need)
+                }
+                var size: Int
+                while (true) {
+                    buffer.clear()
+                    size = try {
+                        ex.readSampleData(buffer, 0)
+                    } catch (e: IllegalArgumentException) {
+                        if (buffer.capacity() >= MAX_BUFFER) throw MergeException("кадр больше ${MAX_BUFFER / (1024 * 1024)} МБ")
+                        buffer = grow(buffer.capacity() * 2L)
+                        continue
+                    }
+                    break
+                }
                 if (size < 0) {
                     if (takeVideo) vDone = true else aDone = true
                     continue
@@ -101,6 +130,33 @@ object MediaMerger {
             vEx.release()
             aEx.release()
         }
+    }
+
+    private fun grow(need: Long): ByteBuffer {
+        if (need > MAX_BUFFER) throw MergeException("кадр больше ${MAX_BUFFER / (1024 * 1024)} МБ")
+        var cap = MIN_BUFFER.toLong()
+        while (cap < need) cap *= 2
+        return ByteBuffer.allocateDirect(minOf(cap, MAX_BUFFER.toLong()).toInt())
+    }
+
+    /**
+     * Проверка собранного файла до «Готово»: есть изображение и звук,
+     * длительность совпадает с исходными дорожками (±2 с или 1 %), размер
+     * правдоподобен. Иначе склейка считается неудачной, исходники остаются.
+     */
+    fun verify(output: File, video: File, audio: File): String? {
+        val out = probe(output)
+        if (!out.hasVideo) return "в собранном файле нет изображения"
+        if (!out.hasAudio) return "в собранном файле нет звука"
+        val src = maxOf(runCatching { probe(video).durationUs }.getOrDefault(0L), runCatching { probe(audio).durationUs }.getOrDefault(0L))
+        if (out.durationUs <= 0) return "у собранного файла нет длительности"
+        if (src > 0) {
+            val tolerance = maxOf(2_000_000L, src / 100)
+            if (out.durationUs + tolerance < src) return "собранный файл короче исходных дорожек (${out.durationUs / 1_000_000} из ${src / 1_000_000} с)"
+        }
+        val inputs = video.length() + audio.length()
+        if (output.length() < inputs * 8 / 10) return "собранный файл заметно меньше исходных дорожек"
+        return null
     }
 
     /** Проверка результата: есть ли видео, звук и длительность. */

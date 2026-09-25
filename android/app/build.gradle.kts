@@ -33,14 +33,17 @@ val noxVersionCodeOverride: Int? = (project.findProperty("nox.versionCodeOverrid
 android {
     namespace = "com.nox.offline"
     compileSdk = 35
+    // Встроенный JS-движок (QuickJS-NG, src/main/cpp) для задач YouTube.
+    // Версия NDK закреплена, чтобы сборка libnoxjs.so была воспроизводимой.
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         applicationId = "com.nox.offline"
         minSdk = 26
         targetSdk = 35
-        versionCode = noxVersionCodeOverride ?: 3
-        versionName = "0.2.1"
+        versionCode = noxVersionCodeOverride ?: 4
+        versionName = "0.3.0"
 
         // Chaquopy требует явного списка ABI: под каждый кладётся свой
         // рантайм Python. Для Python 3.12 у Chaquopy есть только 64-битные
@@ -75,6 +78,13 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 
@@ -117,8 +127,11 @@ chaquopy {
         version = "3.12"
         pip {
             // Разбор ссылок. Только это — вся передача файла идёт в Kotlin.
-            install("yt-dlp")
-            install("certifi")
+            // Версии закреплены: nox_jsc.py опирается на внутренний EJS-API
+            // yt-dlp, а yt-dlp-ejs обязан точно совпадать с версией yt-dlp.
+            install("yt-dlp==2026.8.19")
+            install("yt-dlp-ejs==0.8.0")
+            install("certifi==2026.7.22")
         }
     }
 }

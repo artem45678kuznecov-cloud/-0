@@ -25,7 +25,7 @@ abstract class NoxDatabase : RoomDatabase() {
     abstract fun playback(): PlaybackDao
 
     companion object {
-        const val VERSION = 2
+        const val VERSION = 3
         const val NAME = "nox.db"
 
         fun build(context: Context): NoxDatabase =

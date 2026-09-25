@@ -18,7 +18,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -35,6 +39,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.TouchInjectionScope
 import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.unit.width
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -91,9 +96,7 @@ class GlassBottomBarGestureTest {
     ) {
         rule.setContent {
             val d = LocalDensity.current
-            barWidthPx = with(d) { width.toPx() }
             padPx = with(d) { 6.dp.toPx() }
-            slotPx = (barWidthPx - 2 * padPx) / items.size
             CompositionLocalProvider(LocalDensity provides Density(d.density, fontScale), LocalGlassConfig provides cfg) {
                 val layer: GraphicsLayer? = if (withBackdrop) rememberGraphicsLayer() else null
                 Box(Modifier.width(width)) {
@@ -113,12 +116,18 @@ class GlassBottomBarGestureTest {
                         val tick = progress.intValue
                         val fresh = items.map { it.copy() }.also { check(tick >= 0) }
                         GlassBottomBar(fresh, selected.intValue, { calls += it; selected.intValue = it },
-                            Modifier.testTag("bar"), state)
+                            Modifier.testTag("bar").measured(), state)
                     }
                 }
             }
         }
         rule.waitForIdle()
+    }
+
+    /** Фактический размер панели: экран стенда может быть уже запрошенной ширины. */
+    private fun Modifier.measured() = onSizeChanged {
+        barWidthPx = it.width.toFloat()
+        slotPx = (barWidthPx - 2 * padPx) / items.size
     }
 
     // Координаты внутри панели (с её внутренним отступом) и внутри области вкладок.
@@ -339,9 +348,11 @@ class GlassBottomBarGestureTest {
 
     @Test fun layoutAt360And411And600AndLargeFont() {
         for ((w, fs) in listOf(360.dp to 1f, 411.dp to 1f, 600.dp to 1f, 360.dp to 1.3f, 411.dp to 1.3f)) {
-            calls.clear(); selected.intValue = 0
+            calls.clear()
+            rule.runOnIdle { selected.intValue = 0 }
             setBarOnce(w, fs)
             val barBounds = bar.getBoundsInRoot()
+            assertEquals("bar width at $w", w.value, (barBounds.right - barBounds.left).value, 0.5f)
             for (it in items) {
                 val node = rule.onAllNodesWithText(it.label, useUnmergedTree = true)[0]
                 val b = node.getBoundsInRoot()
@@ -350,13 +361,14 @@ class GlassBottomBarGestureTest {
                 node.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { f -> f(results) }
                 assertFalse("${it.label} truncated at $w/$fs", results.first().isLineEllipsized(0))
             }
-            // Линза на краях не выходит за панель.
-            bar.performTouchInput { down(Offset(centerX(0), centerY)); slowMove(centerX(0), width + 200f, 10) }
-            rule.waitForIdle()
-            val half = LiquidBarMath(slotPx, 4).lensWidth / 2f
-            assertTrue(lensInner() + half <= 4 * slotPx + 0.5f)
-            bar.performTouchInput { up() }
-            rule.waitForIdle()
+            // Линза у крайних вкладок остаётся в пределах панели.
+            val m = LiquidBarMath(slotPx, 4)
+            for (edge in listOf(3, 0)) {
+                rule.runOnIdle { selected.intValue = edge }
+                rule.waitForIdle()
+                assertTrue(lensInner() - m.lensWidth / 2f >= -0.5f)
+                assertTrue(lensInner() + m.lensWidth / 2f <= 4 * slotPx + 0.5f)
+            }
         }
     }
 
@@ -370,12 +382,12 @@ class GlassBottomBarGestureTest {
             rule.setContent {
                 val d = LocalDensity.current
                 val (width, scale) = size.value
-                barWidthPx = with(d) { width.toPx() }
                 padPx = with(d) { 6.dp.toPx() }
-                slotPx = (barWidthPx - 2 * padPx) / items.size
                 CompositionLocalProvider(LocalDensity provides Density(d.density, scale), LocalGlassConfig provides economy) {
-                    Box(Modifier.width(width)) {
-                        GlassBottomBar(items, selected.intValue, { calls += it; selected.intValue = it }, Modifier.testTag("bar"), state)
+                    // Ширина раскладки ровно заданная, даже если экран стенда уже.
+                    Box(Modifier.wrapContentWidth(Alignment.Start, unbounded = true).requiredWidth(width)) {
+                        GlassBottomBar(items, selected.intValue, { calls += it; selected.intValue = it },
+                            Modifier.testTag("bar").measured(), state)
                     }
                 }
             }

@@ -31,83 +31,68 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
-import androidx.media3.common.AudioAttributes
-import androidx.media3.common.C
-import androidx.media3.common.MediaItem
-import androidx.media3.common.Player
-import androidx.media3.common.VideoSize
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.nox.offline.NoxApp
 import com.nox.offline.R
 import com.nox.offline.core.NoxLog
-import com.nox.offline.data.db.MediaEntity
-import com.nox.offline.data.db.PlaybackEntity
-import com.nox.offline.storage.MediaLocator
-import com.nox.offline.storage.PlaybackRegistry
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
- * Плеер: Media3 ExoPlayer, локальный файл или документ из папки
- * пользователя, без сети.
+ * Полноэкранный просмотр. Своего плеера у него нет: он показывает тот же
+ * ExoPlayer из [PlaybackHub], что и вкладка «Плеер», поэтому переход в
+ * полный экран и обратно не перезапускает видео и не даёт второго звука.
+ * Без обоев и нижней панели — только видео.
  *
- *  - «Картинка в картинке»: кнопка, автоматический вход при выходе из
- *    плеера (по настройке), системные действия ⟲10 ▶/⏸ 10⟳.
- *  - Двойное нажатие слева/справа — перемотка на 10 секунд, по центру —
- *    пауза. Одиночное — показать/скрыть управление.
+ *  - «Картинка в картинке»: кнопка, автоматический вход при выходе (по
+ *    настройке), системные действия ⟲10 ▶/⏸ 10⟳.
+ *  - Двойное нажатие слева/справа — ±10 секунд, по центру — пауза.
  *  - Масштаб: «вписать» или «заполнить с обрезкой» — без растягивания.
- *  - Скорость, аудиодорожки и субтитры — стандартное меню Media3.
- *  - Экземпляр один (singleTask): новое видео заменяет текущее.
- *  - Позиция пишется в Room каждые 4 секунды, на паузе и при уходе.
- *    Декодер освобождается, как только просмотр действительно закрыт.
+ *  - Свои субтитры, таймер сна и предложение следующей серии работают
+ *    и здесь: всё это живёт в [PlaybackHub].
  */
 @UnstableApi
 class PlayerActivity : ComponentActivity() {
     companion object {
-        private const val EXTRA_MEDIA_ID = "media_id"
-        private const val EXTRA_FROM_START = "from_start"
         private const val ACTION_PIP = "com.nox.offline.player.PIP"
         private const val EXTRA_PIP = "control"
+        private const val EXTRA_PIP_NOW = "pip_now"
         private const val PIP_PLAY = 1
         private const val PIP_BACK = 2
         private const val PIP_FWD = 3
         private const val SEEK_MS = 10_000L
 
-        fun intent(context: Context, m: MediaEntity, fromStart: Boolean = false): Intent =
-            Intent(context, PlayerActivity::class.java)
-                .putExtra(EXTRA_MEDIA_ID, m.id)
-                .putExtra(EXTRA_FROM_START, fromStart)
+        /** Показать на весь экран то, что уже открыто в [PlaybackHub]. */
+        fun fullscreen(context: Context, pip: Boolean = false): Intent =
+            Intent(context, PlayerActivity::class.java).putExtra(EXTRA_PIP_NOW, pip)
     }
 
-    private var player: ExoPlayer? = null
     private lateinit var playerView: PlayerView
     private lateinit var topBar: LinearLayout
     private lateinit var titleView: TextView
     private lateinit var hint: TextView
+    private lateinit var offerView: TextView
+    private lateinit var nextButton: ImageButton
     private lateinit var resizeButton: ImageButton
-    private var media: MediaEntity? = null
-    private var fromStart = false
-    private var saver: Job? = null
     private var hintJob: Job? = null
     private var resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
     private var videoAspect = Rational(16, 9)
+    private var pipOnStart = false
 
     private val app get() = NoxApp.get(this)
 
+    private val hub get() = app.playback
+
     private val pipReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val p = player ?: return
             when (intent.getIntExtra(EXTRA_PIP, 0)) {
-                PIP_PLAY -> if (p.isPlaying) p.pause() else p.play()
-                PIP_BACK -> p.seekTo((p.currentPosition - SEEK_MS).coerceAtLeast(0))
-                PIP_FWD -> p.seekTo(p.currentPosition + SEEK_MS)
+                PIP_PLAY -> hub.togglePlay()
+                PIP_BACK -> hub.seekBy(-SEEK_MS)
+                PIP_FWD -> hub.seekBy(SEEK_MS)
             }
             updatePipParams()
         }
@@ -122,107 +107,47 @@ class PlayerActivity : ComponentActivity() {
         }
         buildViews()
         ContextCompat.registerReceiver(this, pipReceiver, IntentFilter(ACTION_PIP), ContextCompat.RECEIVER_NOT_EXPORTED)
-        readIntent(intent)
+        pipOnStart = intent.getBooleanExtra(EXTRA_PIP_NOW, false)
+        if (hub.state.value.now == null) { finish(); return }
+        observeHub()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // Второго плеера нет: новое видео заменяет текущее, позиция старого сохраняется.
-        savePosition()
-        readIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_PIP_NOW, false)) enterPip()
     }
 
-    private fun readIntent(intent: Intent) {
-        val id = intent.getLongExtra(EXTRA_MEDIA_ID, -1)
-        fromStart = intent.getBooleanExtra(EXTRA_FROM_START, false)
+    // ------------------------------------------------------------------
+    //  Состояние общего плеера
+    // ------------------------------------------------------------------
+
+    private fun observeHub() {
         lifecycleScope.launch {
-            val m = withContext(Dispatchers.IO) { app.db.media().get(id) }
-            if (m == null) { finish(); return@launch }
-            media = m
-            titleView.text = m.title
-            startPlayback(m)
-        }
-    }
-
-    // ------------------------------------------------------------------
-    //  Воспроизведение
-    // ------------------------------------------------------------------
-
-    private fun ensurePlayer(): ExoPlayer {
-        player?.let { return it }
-        val exo = ExoPlayer.Builder(this)
-            .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
-            .setHandleAudioBecomingNoisy(true)
-            .setSeekBackIncrementMs(SEEK_MS)
-            .setSeekForwardIncrementMs(SEEK_MS)
-            .build()
-        exo.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                playerView.keepScreenOn = isPlaying
-                if (!isPlaying) savePosition()
-                updatePipParams()
-            }
-
-            override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED) savePosition(ended = true)
-            }
-
-            override fun onVideoSizeChanged(size: VideoSize) {
-                if (size.width > 0 && size.height > 0) {
-                    val w = (size.width * size.pixelWidthHeightRatio).toInt()
-                    videoAspect = Rational(w, size.height)
-                    updatePipParams()
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                hub.state.collect { st ->
+                    val now = st.now
+                    if (now == null) { finish(); return@collect }
+                    titleView.text = now.title
+                    playerView.keepScreenOn = st.isPlaying
+                    playerView.subtitleView?.setCues(hub.subtitleCues())
+                    nextButton.visibility = if (now.context?.next != null) View.VISIBLE else View.GONE
+                    val offer = st.offer
+                    offerView.visibility = if (offer != null && !isInPip()) View.VISIBLE else View.GONE
+                    if (offer != null) offerView.text = "Далее через ${offer.secondsLeft} с: ${offer.title}\nНажмите, чтобы начать сейчас · долгое нажатие — отмена"
+                    val a = st.videoAspect
+                    if (a > 0f) {
+                        val r = Rational((a * 1000).toInt().coerceAtLeast(1), 1000)
+                        if (r != videoAspect) { videoAspect = r; updatePipParams() }
+                    }
                 }
             }
-        })
-        playerView.player = exo
-        player = exo
-        return exo
-    }
-
-    private fun startPlayback(m: MediaEntity) {
-        val exo = ensurePlayer()
-        PlaybackRegistry.playingMediaId = m.id
-        exo.setMediaItem(MediaItem.fromUri(MediaLocator.playUri(m)))
-        exo.prepare()
-        NoxLog.event("player-open", "media" to m.id, "external" to m.isExternal)
-        // «Начать сначала» действует один раз: после сворачивания и
-        // возврата видео продолжается с сохранённого места.
-        val startOver = fromStart
-        fromStart = false
-        lifecycleScope.launch {
-            val saved = withContext(Dispatchers.IO) { app.db.playback().get(m.id) }
-            if (!startOver && saved != null && !saved.completed && saved.positionMs > 0 && saved.durationMs > 0 &&
-                saved.positionMs < saved.durationMs - 3000) {
-                exo.seekTo(saved.positionMs)
-            } else {
-                exo.seekTo(0)
-            }
-            exo.playWhenReady = true
         }
-    }
-
-    private fun releasePlayer() {
-        savePosition()
-        playerView.player = null
-        player?.release()
-        player = null
-        PlaybackRegistry.playingMediaId = -1
-    }
-
-    private fun savePosition(ended: Boolean = false) {
-        val p = player ?: return
-        val m = media ?: return
-        val duration = p.duration.takeIf { it > 0 && it != C.TIME_UNSET } ?: return
-        val entity = PlaybackEntity(
-            mediaId = m.id,
-            positionMs = if (ended) 0 else p.currentPosition,
-            durationMs = duration,
-            updatedAt = System.currentTimeMillis(),
-            completed = ended || (p.currentPosition >= duration - 5_000),
-        )
-        lifecycleScope.launch(Dispatchers.IO) {
-            try { app.db.playback().upsert(entity) } catch (_: Exception) { }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                app.settings.player.collect { p ->
+                    playerView.subtitleView?.let { SubtitleStyle.apply(it, p.subtitleScale, p.subtitleBackground) }
+                }
+            }
         }
     }
 
@@ -232,34 +157,27 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        media?.let { if (player == null) startPlayback(it) }
-        saver = lifecycleScope.launch {
-            while (isActive) {
-                delay(4000)
-                if (player?.isPlaying == true) savePosition()
-            }
-        }
+        hub.uiStarted()
+        hub.attach(playerView)
+        if (pipOnStart) { pipOnStart = false; playerView.post { enterPip() } }
     }
 
     override fun onStop() {
-        saver?.cancel()
-        saver = null
-        // В PiP окно остаётся видимым — видео не останавливаем. Иначе
-        // просмотр действительно закрыт: декодер освобождается.
-        if (!isInPip()) releasePlayer()
+        // В PiP окно остаётся видимым: видео не останавливаем.
+        if (!isInPip()) hub.uiStopped()
         super.onStop()
     }
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(pipReceiver) }
-        releasePlayer()
+        if (::playerView.isInitialized) hub.detach(playerView)
         super.onDestroy()
     }
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         // На Android 12+ это делает setAutoEnterEnabled, здесь — для 8–11.
-        if (Build.VERSION.SDK_INT < 31 && app.settings.player.value.pipOnLeave && player?.isPlaying == true) enterPip()
+        if (Build.VERSION.SDK_INT < 31 && app.settings.player.value.pipOnLeave && hub.state.value.isPlaying) enterPip()
     }
 
     private fun isInPip(): Boolean = isInPictureInPictureMode
@@ -284,7 +202,7 @@ class PlayerActivity : ComponentActivity() {
                 else -> it
             }
         }
-        val playing = player?.isPlaying == true
+        val playing = hub.state.value.isPlaying
         val b = PictureInPictureParams.Builder()
             .setAspectRatio(ratio)
             .setActions(listOf(
@@ -319,9 +237,11 @@ class PlayerActivity : ComponentActivity() {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         topBar.visibility = if (isInPictureInPictureMode) View.GONE else topBar.visibility
         playerView.useController = !isInPictureInPictureMode
+        if (isInPictureInPictureMode) offerView.visibility = View.GONE
         if (!isInPictureInPictureMode && !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-            // Окно PiP закрыли крестиком: просмотр окончен.
-            releasePlayer()
+            // Окно PiP закрыли крестиком: просмотр окончен, позиция сохранена.
+            hub.pause()
+            hub.uiStopped()
             finish()
         }
     }
@@ -337,7 +257,7 @@ class PlayerActivity : ComponentActivity() {
         playerView = PlayerView(this).apply {
             setShowNextButton(false)
             setShowPreviousButton(false)
-            setShowSubtitleButton(true)
+            setShowSubtitleButton(false)
             setShowFastForwardButton(true)
             setShowRewindButton(true)
             controllerAutoShow = true
@@ -364,6 +284,8 @@ class PlayerActivity : ComponentActivity() {
             setPadding(dp(8), 0, dp(8), 0)
         }
         topBar.addView(titleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        nextButton = iconButton(R.drawable.ic_pip_forward, "Следующая серия") { hub.next() }
+        topBar.addView(nextButton)
         resizeButton = iconButton(R.drawable.ic_player_resize, "Масштаб") { toggleResize() }
         topBar.addView(resizeButton)
         topBar.addView(iconButton(R.drawable.ic_player_pip, "Картинка в картинке") { enterPip() })
@@ -377,6 +299,17 @@ class PlayerActivity : ComponentActivity() {
             visibility = View.GONE
         }
         root.addView(hint, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        offerView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            background = GradientDrawable().apply { cornerRadius = dp(18).toFloat(); setColor(0xCC000000.toInt()); setStroke(dp(1), 0xFFF5A524.toInt()) }
+            visibility = View.GONE
+            setOnClickListener { hub.acceptOffer() }
+            setOnLongClickListener { hub.cancelOffer(); true }
+        }
+        root.addView(offerView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.END).apply { setMargins(dp(16), dp(16), dp(24), dp(96)) })
         setContentView(root)
         installGestures()
     }
@@ -399,12 +332,11 @@ class PlayerActivity : ComponentActivity() {
             }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                val p = player ?: return false
                 val third = playerView.width / 3f
                 when {
-                    e.x < third -> { p.seekTo((p.currentPosition - SEEK_MS).coerceAtLeast(0)); showHint("−10 с") }
-                    e.x > third * 2 -> { p.seekTo(p.currentPosition + SEEK_MS); showHint("+10 с") }
-                    else -> { if (p.isPlaying) p.pause() else p.play() }
+                    e.x < third -> { hub.seekBy(-SEEK_MS); showHint("−10 с") }
+                    e.x > third * 2 -> { hub.seekBy(SEEK_MS); showHint("+10 с") }
+                    else -> hub.togglePlay()
                 }
                 return true
             }

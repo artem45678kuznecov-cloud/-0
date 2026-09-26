@@ -11,6 +11,8 @@
     <!-- Android 13 и ниже: foreground service как запасной путь. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 0.4.0: воспроизведение (в том числе «Слушать») с уведомлением MediaSession. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Плеер: не гасить экран во время просмотра. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Только для установки обновления NOX, которое пользователь сам запросил. -->
@@ -55,6 +57,16 @@
             android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
             android:theme="@style/Theme.Nox.Player" />
+
+        <!-- 0.4.0: MediaSession поверх единственного плеера NOX. -->
+        <service
+            android:name=".player.PlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
 
         <!-- Android 14+: UIDT job. Права BIND_JOB_SERVICE есть только у системы. -->
         <service

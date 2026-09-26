@@ -193,6 +193,8 @@ class UpdateRepository(
         // Контрольная точка — только здесь, непосредственно перед установкой.
         _state.value = UpdateState.Installing(m)
         coordinator.checkpointForUpdate()
+        // Позиция просмотра — на диск до установки; после обновления звук сам не включится.
+        runCatching { com.nox.offline.NoxApp.get(context).playback.checkpointForUpdate() }
         settings.updateUpdates { it.copy(pendingInstallVersionCode = m.versionCode) }
         try {
             sessionId = installer.install(apk, m.versionCode)

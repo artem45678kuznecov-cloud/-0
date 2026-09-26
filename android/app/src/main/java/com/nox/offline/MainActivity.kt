@@ -31,6 +31,8 @@ class MainActivity : ComponentActivity() {
         const val TAB_DOWNLOADS = 1
         const val TAB_PLAYER = 2
         const val TAB_SETTINGS = 3
+        /** Из уведомления плеера: открыть вкладку «Плеер» с текущим видео. */
+        const val ACTION_OPEN_PLAYER = "com.nox.offline.OPEN_PLAYER"
     }
 
     private val vm: MainViewModel by viewModels()
@@ -59,6 +61,18 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
+    @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+    override fun onStart() {
+        super.onStart()
+        NoxApp.get(this).playback.uiStarted()
+    }
+
+    @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+    override fun onStop() {
+        NoxApp.get(this).playback.uiStopped()
+        super.onStop()
+    }
+
     override fun onResume() {
         super.onResume()
         vm.notificationsAllowed.value = notificationsGranted()
@@ -76,6 +90,7 @@ class MainActivity : ComponentActivity() {
         if (intent.hasExtra(EXTRA_TAB)) {
             requests.tab = Tab.entries.getOrNull(intent.getIntExtra(EXTRA_TAB, 0)) ?: Tab.HOME
         }
+        if (intent.action == ACTION_OPEN_PLAYER) requests.tab = Tab.PLAYER
         if (intent.action == Intent.ACTION_SEND) {
             intent.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() }?.let { requests.sharedText = it }
         }

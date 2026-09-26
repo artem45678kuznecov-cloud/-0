@@ -171,7 +171,7 @@ private fun RootContent(
 
     lateinit var actions: NoxActions
     actions = NoxActions(
-        openMedia = { item, fromStart -> context.startActivity(playerIntent(context, item.media, fromStart)) },
+        openMedia = { item, fromStart -> openInPlayer(context, item.media.id, fromStart); tab = Tab.PLAYER },
         mediaMenu = { item -> mediaMenu(item, vm, sheets, actions, context::startActivity) },
         openLibrary = { route = Route.LIBRARY },
         openDownloads = { route = null; tab = Tab.DOWNLOADS },
@@ -360,5 +360,5 @@ private fun downloadMenu(d: DownloadEntity, vm: MainViewModel, sheets: SheetCont
 
 /** Плеер помечен @UnstableApi (Media3); сам вызов Intent от этого не зависит. */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-private fun playerIntent(context: android.content.Context, m: com.nox.offline.data.db.MediaEntity, fromStart: Boolean) =
-    PlayerActivity.intent(context, m, fromStart)
+private fun openInPlayer(context: android.content.Context, mediaId: Long, fromStart: Boolean) =
+    com.nox.offline.NoxApp.get(context).playback.open(mediaId, fromStart = fromStart)

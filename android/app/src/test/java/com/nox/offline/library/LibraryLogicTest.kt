@@ -79,6 +79,11 @@ class LibraryLogicTest {
         assertEquals(SeriesNumbering.Guess(2, 5), SeriesNumbering.guess("Demon Slayer S02E05 [1080p]"))
         assertEquals(SeriesNumbering.Guess(2, 5), SeriesNumbering.guess("Истребитель демонов 2 сезон 5 серия"))
         assertEquals(SeriesNumbering.Guess(0, 12), SeriesNumbering.guess("Серия 12 — Финал"))
+        assertEquals("Тренировка в деревне", SeriesNumbering.episodeName("Клинки рассвета S02E05 — Тренировка в деревне", "Клинки рассвета"))
+        assertEquals("Финал", SeriesNumbering.episodeName("Серия 12 — Финал", "Другой сериал"))
+        assertEquals("Возвращение...", SeriesNumbering.episodeName("Сериал: 3 серия — Возвращение...", "сериал"))
+        // Ничего, кроме названия сериала и номера, — показываем как есть.
+        assertEquals("Клинки рассвета — 2 сезон, 9 серия", SeriesNumbering.episodeName("Клинки рассвета — 2 сезон, 9 серия", "Клинки рассвета"))
         assertEquals(SeriesNumbering.Guess(0, 3), SeriesNumbering.guess("Episode 3"))
         assertEquals(SeriesNumbering.Guess(1, 7), SeriesNumbering.guess("show.1x07.webm"))
         assertNull(SeriesNumbering.guess("Твоё имя (2016)"))

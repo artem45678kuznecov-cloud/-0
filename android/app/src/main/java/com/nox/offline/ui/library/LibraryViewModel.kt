@@ -115,6 +115,10 @@ data class CollectionDetail(
     }
 
     val isSeries: Boolean get() = collection.isSeries
+
+    /** Название для показа: в сериале — без названия сериала и метки номера (своё название серии не трогается). */
+    fun shownTitle(e: Entry): String =
+        if (isSeries && e.item.title.isBlank()) com.nox.offline.library.SeriesNumbering.episodeName(e.title, collection.title) else e.title
     val local: List<Entry> get() = items.filter { it.media != null }
     val missing: List<Entry> get() = items.filter { it.media == null && it.item.sourceUrl.isNotBlank() && it.item.unavailableReason.isBlank() }
 

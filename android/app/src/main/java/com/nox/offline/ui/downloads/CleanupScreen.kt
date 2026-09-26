@@ -63,6 +63,7 @@ import com.nox.offline.ui.theme.nox
 @Composable
 fun CleanupScreen(vm: MainViewModel, nav: Nav, padding: PaddingValues) {
     val all by vm.allItems.collectAsState()
+    val loaded by vm.libraryLoaded.collectAsState()
     val space by vm.space.collectAsState()
     val sheets = LocalSheets.current
     val playing = PlaybackRegistry.playingMediaId
@@ -93,7 +94,7 @@ fun CleanupScreen(vm: MainViewModel, nav: Nav, padding: PaddingValues) {
         item {
             Section("Просмотренные", icon = Icons.Rounded.CleaningServices,
                 trailing = if (candidates.isNotEmpty()) "≈ ${Format.bytes(total)}" else null) {
-                if (candidates.isEmpty()) {
+                if (loaded && candidates.isEmpty()) {
                     EmptyBlock(Icons.Rounded.CleaningServices, "Нечего предложить",
                         "Здесь появятся видео, досмотренные до конца. Защищённые и открытые в плеере не предлагаются.")
                 } else {

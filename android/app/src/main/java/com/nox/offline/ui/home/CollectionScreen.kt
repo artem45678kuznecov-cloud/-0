@@ -117,7 +117,7 @@ fun CollectionScreen(id: Long, lib: LibraryViewModel, vm: MainViewModel, nav: Na
                 val next = d.continueEntry
                 if (next != null) {
                     AmberButton(
-                        if (next.inProgress) "Продолжить: ${next.title.take(28)}" else "Смотреть: ${next.title.take(30)}",
+                        if (next.inProgress) "Продолжить: ${d.shownTitle(next)}" else "Смотреть: ${d.shownTitle(next)}",
                         { lib.play(d, next); nav.select(Tab.PLAYER) }, icon = Icons.Rounded.PlayArrow, height = 50.dp, textSize = 15.sp,
                         trailing = if (next.inProgress) Segments.clock(next.positionMs) else null)
                     Spacer(Modifier.height(8.dp))
@@ -148,7 +148,7 @@ fun CollectionScreen(id: Long, lib: LibraryViewModel, vm: MainViewModel, nav: Na
                 Section(if (season < 0) "Видео" else d.seasonTitle(season), trailing = "${entries.size}",
                     onTitleClick = if (season >= 0) ({ seasonTitleSheet(sheets, lib, d, season) }) else null) {
                     for ((i, e) in entries.withIndex()) {
-                        EntryRow(e, index = if (d.isSeries) (e.item.episode.takeIf { it > 0 } ?: (i + 1)) else null,
+                        EntryRow(e, d.shownTitle(e), index = if (d.isSeries) (e.item.episode.takeIf { it > 0 } ?: (i + 1)) else null,
                             onPlay = { if (e.media != null) { lib.play(d, e); nav.select(Tab.PLAYER) } },
                             onMenu = { entryMenu(sheets, lib, vm, d, e) })
                         if (i < entries.lastIndex) Spacer(Modifier.height(6.dp))
@@ -161,7 +161,7 @@ fun CollectionScreen(id: Long, lib: LibraryViewModel, vm: MainViewModel, nav: Na
 }
 
 @Composable
-private fun EntryRow(e: CollectionDetail.Entry, index: Int?, onPlay: () -> Unit, onMenu: () -> Unit) {
+private fun EntryRow(e: CollectionDetail.Entry, title: String, index: Int?, onPlay: () -> Unit, onMenu: () -> Unit) {
     val p = nox()
     Tile(Modifier.fillMaxWidth(), onClick = onPlay, onLongClick = onMenu) {
         Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -175,7 +175,7 @@ private fun EntryRow(e: CollectionDetail.Entry, index: Int?, onPlay: () -> Unit,
             }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text((if (index != null) "$index. " else "") + e.title, color = if (e.media != null) Nox.TextPrimary else Nox.TextSecondary,
+                Text((if (index != null) "$index. " else "") + title, color = if (e.media != null) Nox.TextPrimary else Nox.TextSecondary,
                     fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
                 val meta = listOfNotNull(
                     e.durationMs.takeIf { it > 0 }?.let { Segments.clock(it) },

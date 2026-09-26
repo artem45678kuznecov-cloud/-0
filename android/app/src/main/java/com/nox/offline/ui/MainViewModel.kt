@@ -71,10 +71,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val downloads: StateFlow<List<DownloadEntity>> = downloadsLoaded.map { it.orEmpty() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    private val items: StateFlow<List<LibraryItem>> = combine(nox.db.media().observeAll(), nox.db.playback().observeAll()) { media, playback ->
+    /** null — медиатека ещё читается из базы. */
+    private val itemsOrNull: StateFlow<List<LibraryItem>?> = combine(nox.db.media().observeAll(), nox.db.playback().observeAll()) { media, playback ->
         val byId = playback.associateBy { it.mediaId }
         media.map { LibraryItem(it, byId[it.id]) }
-    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    private val items: StateFlow<List<LibraryItem>> = itemsOrNull.map { it.orEmpty() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Медиатека прочитана: только после этого можно показывать «пусто». */
+    val libraryLoaded: StateFlow<Boolean> = itemsOrNull.map { it != null }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     val query = MutableStateFlow("")
     val filter = MutableStateFlow(LibraryFilter())

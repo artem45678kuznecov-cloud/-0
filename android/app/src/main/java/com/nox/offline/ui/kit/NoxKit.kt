@@ -187,13 +187,13 @@ fun Section(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (icon != null) {
-                        Icon(icon, null, tint = Color(0xFFDCE0FF), modifier = Modifier.size(22.dp))
+                        Icon(icon, null, tint = Color(0xFFDCE0FF), modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(10.dp))
                     }
                     Column(Modifier.weight(1f)) {
                         Text(title, color = Nox.TextPrimary, fontSize = Kit.SectionTitle, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (subtitle != null) Text(subtitle, color = LavenderText, fontSize = 11.5.sp, maxLines = 2)
+                        if (subtitle != null) Text(subtitle, color = LavenderText, fontSize = 10.sp, maxLines = 2, lineHeight = 12.5.sp)
                     }
                     if (trailing != null || onTrailing != null) {
                         Row(
@@ -269,12 +269,14 @@ fun AmberButton(
     GlassSurface(modifier.fillMaxWidth().height(height).semantics { role = Role.Button }, shape = RoundedCornerShape(height / 2.6f),
         style = if (enabled) GlassStyles.Amber else GlassStyles.Tile, onClick = onClick, enabled = enabled,
         contentAlignment = Alignment.Center) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             if (icon != null) {
                 Icon(icon, null, tint = Color.White.copy(alpha = if (enabled) 1f else 0.4f), modifier = Modifier.size((textSize.value * 1.45f).dp))
                 Spacer(Modifier.width((textSize.value * 0.9f).dp))
             }
-            Text(text, color = Color.White.copy(alpha = if (enabled) 1f else 0.45f), fontSize = textSize, fontWeight = FontWeight.SemiBold)
+            // Длинное название («Продолжить: …») — в одну строку с многоточием, кнопка не растёт.
+            Text(text, color = Color.White.copy(alpha = if (enabled) 1f else 0.45f), fontSize = textSize, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             if (trailing != null) {
                 Spacer(Modifier.width((textSize.value * 1.2f).dp))
                 Box(Modifier.width(1.dp).height((textSize.value * 1.45f).dp).background(p.accentLight.copy(alpha = 0.45f)))
@@ -301,12 +303,10 @@ fun TileButton(
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).align(Alignment.Center), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center) {
             if (icon != null) { Icon(icon, null, tint = Color(0xFFE6E9FF), modifier = Modifier.size(20.dp)); Spacer(Modifier.width(10.dp)) }
+            // Со стрелкой текст занимает всё место до неё (а не половину, деля его с распоркой).
             Text(text, color = Nox.TextPrimary.copy(alpha = if (enabled) 1f else 0.45f), fontSize = textSize, maxLines = 1,
-                modifier = if (chevron) Modifier.weight(1f, fill = false) else Modifier)
-            if (chevron) {
-                Spacer(Modifier.weight(1f))
-                Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = Color(0xFFE6E9FF))
-            }
+                overflow = TextOverflow.Ellipsis, modifier = if (chevron) Modifier.weight(1f) else Modifier)
+            if (chevron) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = Color(0xFFE6E9FF), modifier = Modifier.size(20.dp))
         }
     }
 }
@@ -368,11 +368,13 @@ fun <T> ChoiceRow(
     modifier: Modifier = Modifier,
     height: Dp = 34.dp,
     textSize: TextUnit = 13.5.sp,
+    /** Ширина по длине подписи («30 мин / 1 час / После серии»), а не поровну. */
+    fitLabels: Boolean = false,
 ) {
-    Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(if (fitLabels) 4.dp else 6.dp)) {
         for ((value, label) in options) {
             val on = value == selected
-            Tile(Modifier.weight(1f).height(height).semantics { stateDescription = if (on) "выбрано" else "" },
+            Tile(Modifier.weight(if (fitLabels) label.length + 3f else 1f).height(height).semantics { stateDescription = if (on) "выбрано" else "" },
                 onClick = { onSelect(value) }, selected = on, radius = height / 2) {
                 Text(label, color = if (on) nox().accentLight else Nox.TextPrimary, fontSize = textSize, maxLines = 1,
                     modifier = Modifier.align(Alignment.Center))
@@ -431,19 +433,19 @@ fun SettingLine(
     chevron: Boolean = onClick != null,
     trailing: @Composable (RowScope.() -> Unit)? = null,
 ) {
-    Tile(modifier.fillMaxWidth().heightIn(min = 44.dp), onClick = onClick) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+    Tile(modifier.fillMaxWidth().heightIn(min = 36.dp), onClick = onClick) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (icon != null) {
-                Icon(icon, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(22.dp))
-                Spacer(Modifier.width(12.dp))
+                Icon(icon, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(14.dp))
             }
             Column(Modifier.weight(1f)) {
-                Text(title, color = Nox.TextPrimary, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 16.sp)
-                if (!subtitle.isNullOrBlank()) Text(subtitle, color = LavenderText, fontSize = 11.sp, maxLines = 3,
-                    overflow = TextOverflow.Ellipsis, lineHeight = 13.5.sp)
+                Text(title, color = Nox.TextPrimary, fontSize = 11.5.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 14.sp)
+                if (!subtitle.isNullOrBlank()) Text(subtitle, color = LavenderText, fontSize = 9.5.sp, maxLines = 3,
+                    overflow = TextOverflow.Ellipsis, lineHeight = 12.sp)
             }
-            if (trailing != null) { Spacer(Modifier.width(10.dp)); trailing() }
-            if (chevron) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = Color(0xFFD5D9FF))
+            if (trailing != null) { Spacer(Modifier.width(8.dp)); trailing() }
+            if (chevron) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = Color(0xFFD5D9FF), modifier = Modifier.size(20.dp))
         }
     }
 }

@@ -83,6 +83,7 @@ import com.nox.offline.ui.theme.Nox
 fun LibraryScreen(vm: MainViewModel, actions: NoxActions, contentPadding: PaddingValues) {
     val list by vm.library.collectAsState()
     val all by vm.allItems.collectAsState()
+    val loaded by vm.libraryLoaded.collectAsState()
     val query by vm.query.collectAsState()
     val filter by vm.filter.collectAsState()
     val sheets = LocalSheets.current
@@ -131,6 +132,7 @@ fun LibraryScreen(vm: MainViewModel, actions: NoxActions, contentPadding: Paddin
         item("list") {
             Section(null, contentPadding = PaddingValues(10.dp)) {
                 when {
+                    !loaded -> Spacer(Modifier.height(80.dp))
                     all.isEmpty() -> EmptyBlock(Icons.Rounded.VideoLibrary, "Медиатека пуста",
                         "Скачайте видео во вкладке «Загрузки» или импортируйте файлы с устройства.",
                         action = "Импортировать видео", onAction = actions.pickImport)

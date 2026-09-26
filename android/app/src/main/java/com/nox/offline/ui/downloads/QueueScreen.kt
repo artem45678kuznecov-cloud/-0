@@ -250,30 +250,30 @@ private fun QueueCard(
             Cover(d.thumbnailUrl, Modifier.size(width = 76.dp, height = 76.dp), RoundedCornerShape(9.dp))
             Spacer(Modifier.width(9.dp))
             Column(Modifier.weight(1f)) {
-                Text(d.displayTitle.ifBlank { "Загрузка" }, color = Nox.TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Medium,
+                Text(d.displayTitle.ifBlank { "Загрузка" }, color = Nox.TextPrimary, fontSize = 11.5.sp, fontWeight = FontWeight.Medium,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, lineHeight = 15.sp)
                 val sub = when {
                     d.status == DownloadStatus.ERROR -> d.error.ifBlank { "Ошибка" }
                     d.subtitleError.isNotBlank() && done -> "Субтитры не скачались — повторить в меню ⋮"
                     else -> listOfNotNull(d.qualityLabel.ifBlank { null }, d.uploader.ifBlank { null }).joinToString(" · ")
                 }
-                Text(sub, color = if (d.status == DownloadStatus.ERROR) Nox.Danger else LavenderText, fontSize = 11.sp, maxLines = 1,
+                Text(sub, color = if (d.status == DownloadStatus.ERROR) Nox.Danger else LavenderText, fontSize = 10.5.sp, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, lineHeight = 13.sp)
                 Row(Modifier.padding(top = 3.dp)) {
                     Text(if (total > 0) "${Format.bytes(d.downloadedBytes.coerceAtMost(total))} / ${Format.bytes(total)}"
-                    else Format.bytes(d.downloadedBytes), color = Color(0xFFE3E6FA), fontSize = 11.sp, modifier = Modifier.weight(1f),
+                    else Format.bytes(d.downloadedBytes), color = Color(0xFFE3E6FA), fontSize = 10.5.sp, modifier = Modifier.weight(1f),
                         lineHeight = 13.sp)
-                    if (running && d.speedBps > 0) Text(Format.speed(d.speedBps), color = LavenderText, fontSize = 11.sp, lineHeight = 13.sp)
+                    if (running && d.speedBps > 0) Text(Format.speed(d.speedBps), color = LavenderText, fontSize = 10.5.sp, lineHeight = 13.sp)
                 }
                 ProgressLine(fraction, Modifier.padding(vertical = 4.dp), lavender = !running && !done, height = 4.dp)
                 Row {
-                    Text("${(fraction * 100).toInt()}%", color = Color(0xFFE3E6FA), fontSize = 11.sp, modifier = Modifier.weight(1f),
+                    Text("${(fraction * 100).toInt()}%", color = Color(0xFFE3E6FA), fontSize = 10.5.sp, modifier = Modifier.weight(1f),
                         lineHeight = 13.sp)
                     Text(when {
                         running && d.etaSec >= 0 -> "Осталось: ${Format.etaClock(d.etaSec)}"
                         done -> "Завершено"
                         else -> statusLabel(d)
-                    }, color = Color(0xFFE3E6FA), fontSize = 11.sp, maxLines = 1, lineHeight = 13.sp)
+                    }, color = Color(0xFFE3E6FA), fontSize = 10.5.sp, maxLines = 1, lineHeight = 13.sp)
                 }
             }
             Spacer(Modifier.width(8.dp))

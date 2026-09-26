@@ -28,7 +28,7 @@ import com.nox.offline.ui.kit.SectionGap
 import com.nox.offline.ui.library.CollectionCard
 import com.nox.offline.ui.library.LibraryViewModel
 
-/** «Все» у раздела главной: все категории, закреплённые или альбомы (и сериалы) с созданием новой. */
+/** «Все» у раздела главной: все коллекции, категории, закреплённые или альбомы (и сериалы) с созданием новой. */
 @Composable
 fun CollectionsListScreen(kind: String, lib: LibraryViewModel, nav: Nav, padding: PaddingValues) {
     val data by lib.home.collectAsState()
@@ -37,6 +37,7 @@ fun CollectionsListScreen(kind: String, lib: LibraryViewModel, nav: Nav, padding
     val (title, list: List<CollectionCard>) = when (kind) {
         CollectionType.CATEGORY -> "Категории" to data?.categories.orEmpty()
         "pinned" -> "Закреплённые" to data?.pinned.orEmpty()
+        "all" -> "Все коллекции" to data?.let { d -> (d.pinned + d.albums + d.categories).distinctBy { it.id } }.orEmpty()
         else -> "Альбомы и сериалы" to data?.albums.orEmpty()
     }
     val createType = if (kind == CollectionType.CATEGORY) CollectionType.CATEGORY else CollectionType.ALBUM
@@ -49,7 +50,8 @@ fun CollectionsListScreen(kind: String, lib: LibraryViewModel, nav: Nav, padding
             })
             SectionGap()
             Section(null, contentPadding = PaddingValues(8.dp)) {
-                if (list.isEmpty()) {
+                // Пока данные читаются из базы (data == null), «пусто» не показываем.
+                if (data != null && list.isEmpty()) {
                     EmptyBlock(Icons.Rounded.CollectionsBookmark, "Пока пусто",
                         if (kind == "pinned") "Закрепите коллекцию через ⋮ — она появится здесь." else "Создайте первую — это займёт секунду.",
                         action = if (kind == "pinned") null else "Создать",

@@ -108,14 +108,14 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
         item {
             Section("Обновления", icon = Icons.Rounded.Sync, onTrailing = { nav.open(Page.About) }) {
                 Tile(Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF1C2346)), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Rounded.Sync, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(22.dp))
+                    Row(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(32.dp).clip(RoundedCornerShape(9.dp)).background(Color(0xFF1C2346)), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Rounded.Sync, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(20.dp))
                         }
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("Текущая версия", color = LavenderText, fontSize = 11.sp, lineHeight = 13.sp)
-                            Text(version, color = Nox.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium, lineHeight = 18.sp)
+                            Text("Текущая версия", color = LavenderText, fontSize = 9.5.sp, lineHeight = 12.sp)
+                            Text(version, color = Nox.TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Medium, lineHeight = 15.sp)
                             Text(when (val u = update) {
                                 is UpdateState.UpToDate -> "Установлена последняя версия"
                                 is UpdateState.Checking -> "Проверяем…"
@@ -123,9 +123,10 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
                                 is UpdateState.Downloading -> "Скачивается обновление"
                                 is UpdateState.Failed -> "Проверка не удалась"
                                 else -> "Проверка — по кнопке или в фоне"
-                            }, color = LavenderText, fontSize = 11.sp, maxLines = 2, lineHeight = 13.sp)
+                            }, color = LavenderText, fontSize = 9.5.sp, maxLines = 2, lineHeight = 12.sp)
                         }
-                        TileButton("Проверить ещё раз", { vm.checkUpdates() }, Modifier.width(150.dp), icon = Icons.Rounded.Sync, height = 36.dp)
+                        TileButton("Проверить ещё раз", { vm.checkUpdates() }, Modifier.width(128.dp), icon = Icons.Rounded.Sync, height = 30.dp,
+                            textSize = 10.5.sp)
                     }
                 }
                 if (update is UpdateState.Available || update is UpdateState.Downloading || update is UpdateState.NeedsPermission ||
@@ -133,7 +134,7 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
                     Spacer(Modifier.height(6.dp))
                     Tile(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp)) { UpdateSection(update, vm, actions) } }
                 }
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(4.dp))
                 SettingLine(Icons.Rounded.NotificationsNone, "Автоматическая проверка обновлений", "Проверять наличие новых версий в фоне",
                     chevron = false, trailing = { AmberSwitch(upPrefs.autoCheck, vm::setAutoCheck, label = "Автоматическая проверка") })
             }
@@ -146,15 +147,15 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     for ((id, label) in quickThemes) {
                         val on = appearance.preset == id
-                        Tile(Modifier.weight(1f).height(58.dp), selected = on, radius = 12.dp,
+                        Tile(Modifier.weight(1f).height(52.dp), selected = on, radius = 12.dp,
                             onClick = { vm.updateAppearance { it.copy(preset = id) } }) {
                             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                                 val c = NoxPalettes.of(id, 0f).accent
-                                Box(Modifier.size(28.dp).clip(CircleShape).background(GBrush.radialGradient(
+                                Box(Modifier.size(26.dp).clip(CircleShape).background(GBrush.radialGradient(
                                     listOf(Color.White.copy(alpha = 0.9f), c, NoxPalettes.mix(c, Color.Black, 0.7f)),
                                     center = androidx.compose.ui.geometry.Offset(24f, 22f), radius = 56f)))
                                 Spacer(Modifier.height(3.dp))
-                                Text(label, color = Nox.TextPrimary, fontSize = 11.5.sp, lineHeight = 13.sp,
+                                Text(label, color = Nox.TextPrimary, fontSize = 10.5.sp, lineHeight = 12.sp,
                                     fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
                             }
                         }
@@ -169,12 +170,12 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
                 val frame = LocalWallpaperFrame.current
                 SettingLine(Icons.Rounded.Image, "Обои приложения", "Выбери фон из коллекции или загрузи свой", onClick = { nav.open(Page.Appearance) },
                     trailing = {
-                        Box(Modifier.size(width = 90.dp, height = 30.dp).clip(RoundedCornerShape(7.dp)).background(Color(0xFF0B0F20))) {
+                        Box(Modifier.size(width = 88.dp, height = 28.dp).clip(RoundedCornerShape(7.dp)).background(Color(0xFF0B0F20))) {
                             if (frame != null) Image(frame.display, "Текущие обои: ${appearance.wallpaper.label}", contentScale = ContentScale.Crop,
-                                alignment = Alignment.TopEnd, modifier = Modifier.fillMaxWidth().height(30.dp))
+                                alignment = Alignment.TopEnd, modifier = Modifier.fillMaxWidth().height(28.dp))
                         }
                     })
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(4.dp))
                 SettingLine(Icons.Rounded.ViewInAr, "Стекло", "Выбери уровень эффектов для лучшей производительности",
                     onClick = {
                         sheets.show("Стекло") { close ->
@@ -190,11 +191,11 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
                         }
                     },
                     trailing = {
-                        Tile(Modifier.size(width = 92.dp, height = 34.dp), selected = true, radius = 10.dp) {
+                        Tile(Modifier.size(width = 88.dp, height = 30.dp), selected = true, radius = 9.dp) {
                             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(glassLabel(appearance.glassMode).first, color = Nox.TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium,
-                                    lineHeight = 13.sp)
-                                Text("(${glassLabel(appearance.glassMode).third})", color = LavenderText, fontSize = 9.sp, lineHeight = 10.sp)
+                                Text(glassLabel(appearance.glassMode).first, color = Nox.TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Medium,
+                                    lineHeight = 12.sp)
+                                Text("(${glassLabel(appearance.glassMode).third})", color = LavenderText, fontSize = 8.5.sp, lineHeight = 9.5.sp)
                             }
                         }
                     })
@@ -205,13 +206,13 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
         item {
             Section("Загрузки", icon = Icons.Rounded.Download, onTrailing = { nav.open(Page.DownloadSettings) }) {
                 SettingLine(Icons.Rounded.FolderOpen, "Папка загрузок", vm.destinationStatus(), onClick = actions.pickDestination)
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(4.dp))
                 SettingLine(Icons.Rounded.Layers, "Одновременных загрузок", "Загружать несколько видео одновременно", chevron = false,
                     trailing = {
                         ChoiceRow(com.nox.offline.settings.DownloadPrefs.CONCURRENCY_CHOICES.map { it to "$it" }, dl.concurrency,
-                            { n -> vm.settings.updateDownloads { it.copy(concurrency = n) } }, Modifier.width(118.dp), height = 30.dp, textSize = 13.sp)
+                            { n -> vm.settings.updateDownloads { it.copy(concurrency = n) } }, Modifier.width(112.dp), height = 26.dp, textSize = 12.sp)
                     })
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(4.dp))
                 SettingLine(Icons.Rounded.Wifi, "Только Wi‑Fi для загрузок", "Использовать только Wi‑Fi, чтобы экономить трафик", chevron = false,
                     trailing = { AmberSwitch(dl.wifiOnly, vm::setWifiOnly, label = "Только Wi‑Fi") })
             }
@@ -221,7 +222,7 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
         item {
             Section("Язык", icon = Icons.Rounded.Language, onTrailing = { languageSheet(sheets) }) {
                 SettingLine(Icons.Rounded.Language, "Язык интерфейса", "Выбери язык приложения", chevron = false, trailing = {
-                    TileButton("Русский", { languageSheet(sheets) }, Modifier.width(130.dp), chevron = true, height = 32.dp)
+                    TileButton("Русский", { languageSheet(sheets) }, Modifier.width(124.dp), chevron = true, height = 28.dp, textSize = 11.5.sp)
                 })
             }
             SectionGap()
@@ -258,10 +259,10 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
         item {
             Section("О NOX", icon = Icons.Rounded.Info, onTrailing = { nav.open(Page.About) }) {
                 SettingLine(Icons.Rounded.WorkspacePremium, "Версия приложения", null, onClick = { nav.open(Page.About) },
-                    trailing = { Text("NOX Android $version", color = LavenderText, fontSize = 13.sp) })
-                Spacer(Modifier.height(4.dp))
+                    trailing = { Text("NOX Android $version", color = LavenderText, fontSize = 11.sp) })
+                Spacer(Modifier.height(3.dp))
                 SettingLine(Icons.AutoMirrored.Rounded.Article, "Лицензионные соглашения", null, onClick = { nav.open(Page.Licenses) })
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(3.dp))
                 SettingLine(Icons.Rounded.Policy, "Политика конфиденциальности", null, onClick = { nav.open(Page.Privacy) })
             }
         }
@@ -277,13 +278,13 @@ private fun glassLabel(g: GlassMode): Triple<String, String, String> = when (g) 
 @Composable
 private fun SmallAction(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, sub: String, modifier: Modifier,
                         onClick: () -> Unit) {
-    Tile(modifier.height(44.dp), onClick = onClick, radius = 12.dp) {
+    Tile(modifier.height(38.dp), onClick = onClick, radius = 12.dp) {
         Row(Modifier.padding(horizontal = 10.dp).align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(22.dp))
-            Spacer(Modifier.width(10.dp))
+            Icon(icon, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(12.dp))
             Column {
-                Text(title, color = Nox.TextPrimary, fontSize = 12.5.sp, lineHeight = 15.sp)
-                Text(sub, color = LavenderText, fontSize = 10.5.sp, lineHeight = 13.sp)
+                Text(title, color = Nox.TextPrimary, fontSize = 11.sp, lineHeight = 13.5.sp)
+                Text(sub, color = LavenderText, fontSize = 9.5.sp, lineHeight = 12.sp)
             }
         }
     }

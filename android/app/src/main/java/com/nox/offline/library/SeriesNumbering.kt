@@ -35,4 +35,25 @@ object SeriesNumbering {
         }
         return null
     }
+
+    /**
+     * Название серии для показа внутри сериала: без названия сериала в начале и
+     * без метки номера («Клинки рассвета S02E05 — Тренировка» → «Тренировка»).
+     * Только отображение — сохранённое название не меняется. Если после этого
+     * ничего не осталось, показывается исходное название.
+     */
+    fun episodeName(title: String, seriesTitle: String): String {
+        var t = title.trim()
+        if (seriesTitle.isNotBlank() && t.startsWith(seriesTitle.trim(), ignoreCase = true)) t = t.substring(seriesTitle.trim().length)
+        for ((re, _) in patterns) {
+            val m = re.find(t) ?: continue
+            t = t.removeRange(m.range)
+            break
+        }
+        // Многоточие в конце названия — часть названия, его не трогаем.
+        t = t.trimStart { it.isWhitespace() || it in SEPARATORS }.trimEnd { it.isWhitespace() || (it in SEPARATORS && it != '.') }
+        return t.ifBlank { title.trim() }
+    }
+
+    private const val SEPARATORS = "—–-:.|,·•"
 }

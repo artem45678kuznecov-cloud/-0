@@ -139,7 +139,7 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
 
         // ---------- рекомендуемая ----------
         item {
-            Section("Рекомендуемая коллекция", trailing = "Смотреть все", onTrailing = { nav.open(Page.AllVideos) }) {
+            Section("Рекомендуемая коллекция", trailing = "Смотреть все", onTrailing = { nav.open(Page.Collections("all")) }) {
                 val f = d.featured
                 if (f == null) {
                     EmptyBlock(Icons.Rounded.CollectionsBookmark,

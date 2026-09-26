@@ -87,4 +87,42 @@ class RoomMigrationDeviceTest {
             }
         }
     }
+
+    /** База 0.3.0 (схема 3) обновляется до 0.4.0: всё на месте, очередь в прежнем порядке, новые таблицы пустые. */
+    @Test fun filledV3DatabaseMigratesTo4AndValidates() {
+        helper.createDatabase("migration-test-3", 3).use { db ->
+            db.execSQL("""INSERT INTO downloads (id,pageUrl,quality,title,videoId,formatId,resolvedUrl,headersJson,fileName,ext,height,
+                totalBytes,downloadedBytes,status,error,speedBps,etaSec,retries,resolveRetries,thumbnailUrl,durationSec,lastStopReason,createdAt,updatedAt)
+                VALUES (5,'https://www.youtube.com/watch?v=q1','1440p','Пауза 0.3.0','q1','400','','{}','Пауза [q1].webm','webm',1440,
+                900000000,300000000,'PAUSED','',0,-1,0,0,'',1200,'user',1700000000000,1700000000500)""")
+            db.execSQL("""INSERT INTO downloads (id,pageUrl,quality,title,videoId,formatId,resolvedUrl,headersJson,fileName,ext,height,
+                totalBytes,downloadedBytes,status,error,speedBps,etaSec,retries,resolveRetries,thumbnailUrl,durationSec,lastStopReason,createdAt,updatedAt)
+                VALUES (6,'https://vk.com/video-9_9','720p','Очередь','v9','url720','','{}','Очередь [v9].mp4','mp4',720,
+                100,0,'QUEUED','',0,-1,0,0,'',60,'',1600000000000,1600000000000)""")
+            db.execSQL("""INSERT INTO media (id,title,filePath,sizeBytes,quality,height,durationSec,coverPath,pageUrl,videoId,createdAt)
+                VALUES (20,'Готовое 0.3.0','/m/ready.webm',7000,'1440p60',1440,600,'','https://www.youtube.com/watch?v=r1','r1',50)""")
+            db.execSQL("INSERT INTO playback (mediaId,positionMs,durationMs,updatedAt,completed) VALUES (20,123456,600000,99,0)")
+        }
+        helper.runMigrationsAndValidate("migration-test-3", 4, true, *Migrations.ALL).use { db ->
+            db.query("SELECT id, status, downloadedBytes, queueOrder, audioOnly, subtitleRequest, collectionId FROM downloads ORDER BY queueOrder").use { c ->
+                c.moveToFirst()
+                assertEquals(6L, c.getLong(0))            // более раннее задание — раньше в очереди
+                assertEquals(1600000000000L, c.getLong(3))
+                c.moveToNext()
+                assertEquals(5L, c.getLong(0))
+                assertEquals("PAUSED", c.getString(1))
+                assertEquals(300000000L, c.getLong(2))
+                assertEquals(0, c.getInt(4))
+                assertEquals("[]", c.getString(5))
+                assertEquals(0L, c.getLong(6))
+            }
+            db.query("SELECT kind, protectedFromCleanup, subtitleId FROM media WHERE id=20").use { c ->
+                c.moveToFirst(); assertEquals("video", c.getString(0)); assertEquals(0, c.getInt(1)); assertEquals(0L, c.getLong(2))
+            }
+            db.query("SELECT positionMs FROM playback WHERE mediaId=20").use { c -> c.moveToFirst(); assertEquals(123456L, c.getLong(0)) }
+            for (t in listOf("collections", "collection_items", "seasons", "chapters", "segment_progress", "bookmarks", "subtitles")) {
+                db.query("SELECT COUNT(*) FROM $t").use { c -> c.moveToFirst(); assertEquals(0L, c.getLong(0)) }
+            }
+        }
+    }
 }

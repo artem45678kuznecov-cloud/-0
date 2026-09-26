@@ -81,9 +81,9 @@ object Kit {
     val ScreenPad = 12.dp
     val SectionRadius = 16.dp
     val TileRadius = 10.dp
-    val SectionGap = 12.dp
-    val TitleSize = 28.sp
-    val SectionTitle = 18.sp
+    val SectionGap = 8.dp
+    val TitleSize = 23.sp
+    val SectionTitle = 13.5.sp
 }
 
 /** Вторичный текст макетов — холодная лаванда. */
@@ -110,15 +110,15 @@ fun BrandHeader(
         Column(Modifier.weight(1f)) {
             Image(painterResource(R.drawable.nox_logo_amber), contentDescription = "NOX",
                 modifier = Modifier.width(128.dp).height(42.dp))
-            Text("офлайн-медиатека", color = Color(0xFFE4E7FF).copy(alpha = 0.92f), fontSize = 11.sp, letterSpacing = 3.2.sp,
-                modifier = Modifier.padding(start = 2.dp, top = 4.dp))
-            Text("Твои видео. Всегда с тобой.", color = Color(0xFFE4E7FF).copy(alpha = 0.92f), fontSize = 11.5.sp, letterSpacing = 2.4.sp,
-                modifier = Modifier.padding(start = 2.dp, top = 6.dp))
+            Text("офлайн-медиатека", color = Color(0xFFE4E7FF).copy(alpha = 0.92f), fontSize = 10.5.sp, letterSpacing = 2.3.sp,
+                lineHeight = 13.sp, modifier = Modifier.padding(start = 2.dp, top = 2.dp))
+            Text("Твои видео. Всегда с тобой.", color = Color(0xFFE4E7FF).copy(alpha = 0.92f), fontSize = 10.5.sp, letterSpacing = 1.3.sp,
+                lineHeight = 14.sp, modifier = Modifier.padding(start = 2.dp, top = 4.dp))
         }
         Column(horizontalAlignment = Alignment.End) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (onSearch != null) RoundButton(Icons.Rounded.Search, searchLabel, onSearch)
-                if (onSettings != null) RoundButton(Icons.Rounded.Settings, "Настройки", onSettings)
+                if (onSearch != null) RoundButton(Icons.Rounded.Search, searchLabel, onSearch, size = 38.dp)
+                if (onSettings != null) RoundButton(Icons.Rounded.Settings, "Настройки", onSettings, size = 38.dp)
             }
             if (note != null) {
                 Text(note, color = Color(0xFFD8DCF5).copy(alpha = 0.85f), fontSize = 10.5.sp, lineHeight = 13.sp,
@@ -145,9 +145,9 @@ fun ScreenHeading(
         }
         Column(Modifier.weight(1f)) {
             Text(title, color = Nox.TextPrimary, fontSize = Kit.TitleSize, fontWeight = FontWeight.Bold, maxLines = 2,
-                overflow = TextOverflow.Ellipsis, lineHeight = 32.sp)
+                overflow = TextOverflow.Ellipsis, lineHeight = 27.sp)
             if (!subtitle.isNullOrBlank()) {
-                Text(subtitle, color = LavenderText, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, color = LavenderText, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 15.sp)
             }
         }
         if (trailing != null) { Spacer(Modifier.width(10.dp)); trailing() }
@@ -171,7 +171,7 @@ fun Section(
     icon: ImageVector? = null,
     subtitle: String? = null,
     onTitleClick: (() -> Unit)? = null,
-    contentPadding: PaddingValues = PaddingValues(start = 10.dp, end = 10.dp, bottom = 10.dp),
+    contentPadding: PaddingValues = PaddingValues(start = 8.dp, end = 8.dp, bottom = 8.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     GlassSurface(modifier.fillMaxWidth().padding(horizontal = Kit.ScreenPad), shape = RoundedCornerShape(Kit.SectionRadius),
@@ -181,17 +181,17 @@ fun Section(
                 Row(
                     Modifier.fillMaxWidth()
                         .then(if (onTitleClick != null) Modifier.clickable(onClick = onTitleClick) else Modifier)
-                        .padding(start = 14.dp, end = 12.dp, top = 12.dp, bottom = 10.dp),
+                        .padding(start = 12.dp, end = 8.dp, top = 7.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (icon != null) {
-                        Icon(icon, null, tint = Color(0xFFDCE0FF), modifier = Modifier.size(24.dp))
-                        Spacer(Modifier.width(12.dp))
+                        Icon(icon, null, tint = Color(0xFFDCE0FF), modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(10.dp))
                     }
                     Column(Modifier.weight(1f)) {
                         Text(title, color = Nox.TextPrimary, fontSize = Kit.SectionTitle, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (subtitle != null) Text(subtitle, color = LavenderText, fontSize = 12.5.sp, maxLines = 2)
+                        if (subtitle != null) Text(subtitle, color = LavenderText, fontSize = 11.5.sp, maxLines = 2)
                     }
                     if (trailing != null || onTrailing != null) {
                         Row(
@@ -200,9 +200,9 @@ fun Section(
                                 .padding(horizontal = 4.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            if (trailing != null) Text(trailing, color = LavenderText, fontSize = 13.5.sp)
+                            if (trailing != null) Text(trailing, color = LavenderText, fontSize = 11.5.sp)
                             if (onTrailing != null) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = LavenderText,
-                                modifier = Modifier.size(22.dp))
+                                modifier = Modifier.size(19.dp))
                         }
                     }
                 }
@@ -297,8 +297,8 @@ fun TileButton(
     Tile(modifier.height(height), onClick = if (enabled) onClick else null, radius = 14.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).align(Alignment.Center), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center) {
-            if (icon != null) { Icon(icon, null, tint = Color(0xFFE6E9FF), modifier = Modifier.size(22.dp)); Spacer(Modifier.width(12.dp)) }
-            Text(text, color = Nox.TextPrimary.copy(alpha = if (enabled) 1f else 0.45f), fontSize = 15.sp,
+            if (icon != null) { Icon(icon, null, tint = Color(0xFFE6E9FF), modifier = Modifier.size(20.dp)); Spacer(Modifier.width(10.dp)) }
+            Text(text, color = Nox.TextPrimary.copy(alpha = if (enabled) 1f else 0.45f), fontSize = 13.5.sp, maxLines = 1,
                 modifier = if (chevron) Modifier.weight(1f, fill = false) else Modifier)
             if (chevron) {
                 Spacer(Modifier.weight(1f))
@@ -382,14 +382,14 @@ fun AmberSwitch(checked: Boolean, onChange: (Boolean) -> Unit, modifier: Modifie
     val p = nox()
     val t by animateFloatAsState(if (checked) 1f else 0f, label = "switch")
     Box(
-        modifier.size(width = 58.dp, height = 32.dp).clip(RoundedCornerShape(16.dp))
+        modifier.size(width = 46.dp, height = 26.dp).clip(RoundedCornerShape(13.dp))
             .background(if (checked) Brush.horizontalGradient(listOf(p.accentDeep, p.accent))
             else SolidColor(Color(0xFF1A1F38)))
-            .border(1.dp, if (checked) p.accentLight.copy(alpha = 0.9f) else Lavender.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+            .border(1.dp, if (checked) p.accentLight.copy(alpha = 0.9f) else Lavender.copy(alpha = 0.35f), RoundedCornerShape(13.dp))
             .clickable(role = Role.Switch) { onChange(!checked) }
             .semantics { contentDescription = label; stateDescription = if (checked) "включено" else "выключено" },
     ) {
-        Box(Modifier.padding(start = (3 + 26 * t).dp, top = 3.dp).size(26.dp).clip(CircleShape).background(Color(0xFFF7F4EF)))
+        Box(Modifier.padding(start = (3 + 20 * t).dp, top = 3.dp).size(20.dp).clip(CircleShape).background(Color(0xFFF7F4EF)))
     }
 }
 
@@ -426,16 +426,16 @@ fun SettingLine(
     chevron: Boolean = onClick != null,
     trailing: @Composable (RowScope.() -> Unit)? = null,
 ) {
-    Tile(modifier.fillMaxWidth().heightIn(min = 58.dp), onClick = onClick) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+    Tile(modifier.fillMaxWidth().heightIn(min = 44.dp), onClick = onClick) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (icon != null) {
-                Icon(icon, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(26.dp))
-                Spacer(Modifier.width(14.dp))
+                Icon(icon, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(12.dp))
             }
             Column(Modifier.weight(1f)) {
-                Text(title, color = Nox.TextPrimary, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (!subtitle.isNullOrBlank()) Text(subtitle, color = LavenderText, fontSize = 12.5.sp, maxLines = 3,
-                    overflow = TextOverflow.Ellipsis, lineHeight = 16.sp)
+                Text(title, color = Nox.TextPrimary, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 16.sp)
+                if (!subtitle.isNullOrBlank()) Text(subtitle, color = LavenderText, fontSize = 11.sp, maxLines = 3,
+                    overflow = TextOverflow.Ellipsis, lineHeight = 13.5.sp)
             }
             if (trailing != null) { Spacer(Modifier.width(10.dp)); trailing() }
             if (chevron) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = Color(0xFFD5D9FF))
@@ -467,11 +467,11 @@ fun KitField(
         verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top,
     ) {
         if (leading != null) { Icon(leading, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(24.dp)); Spacer(Modifier.width(12.dp)) }
-        Box(Modifier.weight(1f).padding(vertical = if (singleLine) 12.dp else 0.dp)) {
-            if (value.isEmpty()) Text(placeholder, color = Color(0xFF8A90B8), fontSize = 15.5.sp, lineHeight = 21.sp)
+        Box(Modifier.weight(1f).padding(vertical = if (singleLine) 9.dp else 0.dp)) {
+            if (value.isEmpty()) Text(placeholder, color = Color(0xFF8A90B8), fontSize = 14.5.sp, lineHeight = 20.sp)
             BasicTextField(
                 value = value, onValueChange = onChange, singleLine = singleLine,
-                textStyle = TextStyle(color = Nox.TextPrimary, fontSize = 15.5.sp, lineHeight = 21.sp),
+                textStyle = TextStyle(color = Nox.TextPrimary, fontSize = 14.5.sp, lineHeight = 20.sp),
                 cursorBrush = SolidColor(p.accent),
                 keyboardOptions = KeyboardOptions(imeAction = imeAction),
                 keyboardActions = KeyboardActions(onAny = { onIme?.invoke() }),

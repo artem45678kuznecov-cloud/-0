@@ -107,18 +107,18 @@ fun QueueScreen(vm: MainViewModel, nav: Nav, padding: PaddingValues, onDownloadM
         item {
             BrandHeader(onSearch = { nav.open(Page.Downloader) }, onSettings = { nav.select(Tab.SETTINGS) },
                 searchLabel = "Загрузчик: найти видео по ссылке")
-            Spacer(Modifier.height(22.dp))
+            Spacer(Modifier.height(14.dp))
             ScreenHeading("Загрузки", "Скачивайте видео для просмотра без сети")
             Spacer(Modifier.height(10.dp))
             // Действия над очередью целиком — только те, что сейчас имеют смысл.
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Chip("Добавить видео", amber = true, icon = Icons.Rounded.Download, onClick = { nav.open(Page.Downloader) }, height = 34.dp)
+                Chip("Добавить видео", amber = true, icon = Icons.Rounded.Download, onClick = { nav.open(Page.Downloader) }, height = 30.dp, textSize = 11.5.sp)
                 if (active.isNotEmpty() || queued.isNotEmpty()) Chip("Пауза для всех", icon = Icons.Rounded.Pause,
-                    onClick = { vm.pauseAll() }, height = 34.dp)
-                if (paused.isNotEmpty()) Chip("Продолжить все", icon = Icons.Rounded.PlayArrow, onClick = { vm.resumeAll() }, height = 34.dp)
-                if (failed.isNotEmpty()) Chip("Повторить ошибки", icon = Icons.Rounded.Refresh, onClick = { vm.retryErrors() }, height = 34.dp)
-                if (done.isNotEmpty()) Chip("Убрать готовые", icon = Icons.Rounded.DoneAll, onClick = { vm.clearCompleted() }, height = 34.dp)
+                    onClick = { vm.pauseAll() }, height = 30.dp, textSize = 11.5.sp)
+                if (paused.isNotEmpty()) Chip("Продолжить все", icon = Icons.Rounded.PlayArrow, onClick = { vm.resumeAll() }, height = 30.dp, textSize = 11.5.sp)
+                if (failed.isNotEmpty()) Chip("Повторить ошибки", icon = Icons.Rounded.Refresh, onClick = { vm.retryErrors() }, height = 30.dp, textSize = 11.5.sp)
+                if (done.isNotEmpty()) Chip("Убрать готовые", icon = Icons.Rounded.DoneAll, onClick = { vm.clearCompleted() }, height = 30.dp, textSize = 11.5.sp)
             }
             SectionGap()
             if (net != NetworkGate.State.OK && (queued.isNotEmpty() || active.isNotEmpty())) {
@@ -245,46 +245,48 @@ private fun QueueCard(
     }
     Tile(Modifier.fillMaxWidth(), selected = selected, onClick = { if (selecting) onSelect() else if (done) onOpen() else onMenu() },
         onLongClick = onSelect) {
-        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Cover(d.thumbnailUrl, Modifier.size(width = 78.dp, height = 82.dp), RoundedCornerShape(9.dp))
-            Spacer(Modifier.width(10.dp))
+        Row(Modifier.padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Cover(d.thumbnailUrl, Modifier.size(width = 76.dp, height = 76.dp), RoundedCornerShape(9.dp))
+            Spacer(Modifier.width(9.dp))
             Column(Modifier.weight(1f)) {
-                Text(d.displayTitle.ifBlank { "Загрузка" }, color = Nox.TextPrimary, fontSize = 14.5.sp, fontWeight = FontWeight.Medium,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(d.displayTitle.ifBlank { "Загрузка" }, color = Nox.TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, lineHeight = 15.sp)
                 val sub = when {
                     d.status == DownloadStatus.ERROR -> d.error.ifBlank { "Ошибка" }
                     d.subtitleError.isNotBlank() && done -> "Субтитры не скачались — повторить в меню ⋮"
                     else -> listOfNotNull(d.qualityLabel.ifBlank { null }, d.uploader.ifBlank { null }).joinToString(" · ")
                 }
-                Text(sub, color = if (d.status == DownloadStatus.ERROR) Nox.Danger else LavenderText, fontSize = 12.sp, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis)
-                Row(Modifier.padding(top = 4.dp)) {
+                Text(sub, color = if (d.status == DownloadStatus.ERROR) Nox.Danger else LavenderText, fontSize = 11.sp, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, lineHeight = 13.sp)
+                Row(Modifier.padding(top = 3.dp)) {
                     Text(if (total > 0) "${Format.bytes(d.downloadedBytes.coerceAtMost(total))} / ${Format.bytes(total)}"
-                    else Format.bytes(d.downloadedBytes), color = Color(0xFFE3E6FA), fontSize = 12.5.sp, modifier = Modifier.weight(1f))
-                    if (running && d.speedBps > 0) Text(Format.speed(d.speedBps), color = LavenderText, fontSize = 12.5.sp)
+                    else Format.bytes(d.downloadedBytes), color = Color(0xFFE3E6FA), fontSize = 11.sp, modifier = Modifier.weight(1f),
+                        lineHeight = 13.sp)
+                    if (running && d.speedBps > 0) Text(Format.speed(d.speedBps), color = LavenderText, fontSize = 11.sp, lineHeight = 13.sp)
                 }
-                ProgressLine(fraction, Modifier.padding(vertical = 5.dp), lavender = !running && !done, height = 5.dp)
+                ProgressLine(fraction, Modifier.padding(vertical = 4.dp), lavender = !running && !done, height = 4.dp)
                 Row {
-                    Text("${(fraction * 100).toInt()}%", color = Color(0xFFE3E6FA), fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    Text("${(fraction * 100).toInt()}%", color = Color(0xFFE3E6FA), fontSize = 11.sp, modifier = Modifier.weight(1f),
+                        lineHeight = 13.sp)
                     Text(when {
                         running && d.etaSec >= 0 -> "Осталось: ${Format.etaClock(d.etaSec)}"
                         done -> "Завершено"
                         else -> statusLabel(d)
-                    }, color = Color(0xFFE3E6FA), fontSize = 12.sp, maxLines = 1)
+                    }, color = Color(0xFFE3E6FA), fontSize = 11.sp, maxLines = 1, lineHeight = 13.sp)
                 }
             }
             Spacer(Modifier.width(8.dp))
             if (done) {
-                ActionCircle(Icons.Rounded.Check, "Смотреть «${d.displayTitle}»", onOpen)
+                ActionCircle(Icons.Rounded.Check, "Смотреть «${d.displayTitle}»", onOpen, size = 32.dp)
                 Spacer(Modifier.width(6.dp))
                 Icon(Icons.Rounded.MoreVert, "Действия", tint = Color(0xFFD5D9FF),
                     modifier = Modifier.size(36.dp).clip(RoundedCornerShape(18.dp)).clickable(onClick = onMenu).padding(6.dp))
             } else if (d.status != DownloadStatus.PROCESSING) {
                 val paused = d.status == DownloadStatus.PAUSED || d.status == DownloadStatus.ERROR
                 ActionCircle(if (paused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
-                    if (paused) "Продолжить" else "Пауза", onToggle)
+                    if (paused) "Продолжить" else "Пауза", onToggle, size = 32.dp)
                 Spacer(Modifier.width(8.dp))
-                ActionCircle(Icons.Rounded.Close, "Удалить загрузку", onCancel, amber = false)
+                ActionCircle(Icons.Rounded.Close, "Удалить загрузку", onCancel, amber = false, size = 32.dp)
             }
         }
     }

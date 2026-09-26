@@ -116,7 +116,7 @@ object GlassStyles {
 
     // ---- 0.4.0: язык макетов ----
     /** Секция экрана: тёмная полупрозрачная подложка, янтарная светящаяся рамка. */
-    val Section = GlassStyle(tintAlpha = 0.64f, glow = 0.55f, edge = 1f, highlight = 0.45f, edgeTone = EdgeTone.ACCENT, edgeWidth = 1.2f)
+    val Section = GlassStyle(tintAlpha = 0.64f, glow = 0.75f, edge = 1.15f, highlight = 0.45f, edgeTone = EdgeTone.ACCENT, edgeWidth = 1.5f)
     /** Плитка внутри секции: темнее, тонкая лавандовая рамка. */
     val Tile = GlassStyle(tintAlpha = 0.70f, edge = 1f, highlight = 0.35f, edgeTone = EdgeTone.LAVENDER)
     /** Круглые кнопки шапки и строки поиска. */
@@ -127,7 +127,7 @@ object GlassStyles {
     /** Выбранный элемент (строка качества, чип, вкладка плеера). */
     val Chosen = GlassStyle(tintAlpha = 0.6f, accentFill = 0.22f, glow = 0.45f, edge = 1.1f, edgeTone = EdgeTone.ACCENT, edgeWidth = 1.3f)
     /** Нижняя панель 0.4.0: живое стекло + янтарная кромка. */
-    val BarAmber = GlassStyle(live = true, refraction = true, tintAlpha = 0.66f, glow = 0.5f, edge = 1f, edgeTone = EdgeTone.ACCENT,
+    val BarAmber = GlassStyle(live = true, refraction = true, tintAlpha = 0.84f, glow = 0.5f, edge = 1f, edgeTone = EdgeTone.ACCENT,
         edgeWidth = 1.2f)
 }
 

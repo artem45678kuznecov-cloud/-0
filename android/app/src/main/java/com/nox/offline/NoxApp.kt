@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+
 package com.nox.offline
 
 import android.app.Application
@@ -73,7 +75,6 @@ class NoxApp : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** 0.4.0: единственный владелец воспроизведения (создаётся при первом обращении). */
-    @get:androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
     val playback: com.nox.offline.player.PlaybackHub by lazy { com.nox.offline.player.PlaybackHub(this) }
 
     /** Короткая фоновая запись в базу, которая не должна зависеть от экрана. */

@@ -95,19 +95,19 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
                 onSettings = { nav.select(Tab.SETTINGS) },
                 searchLabel = "Поиск в коллекциях",
             )
-            Spacer(Modifier.height(22.dp))
+            Spacer(Modifier.height(12.dp))
             ScreenHeading("Коллекции", "Ваша медиатека, как вы любите", trailing = {
-                Tile(Modifier.height(44.dp), onClick = { showCollectionFilter(sheets, lib, nav) }, radius = 16.dp, selected = filter.active) {
-                    Row(Modifier.padding(horizontal = 16.dp).align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Tune, null, tint = Color(0xFFE8EAFF), modifier = Modifier.size(22.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Text("Фильтры", color = Nox.TextPrimary, fontSize = 15.sp)
+                Tile(Modifier.height(32.dp), onClick = { showCollectionFilter(sheets, lib, nav) }, radius = 12.dp, selected = filter.active) {
+                    Row(Modifier.padding(horizontal = 10.dp).align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Tune, null, tint = Color(0xFFE8EAFF), modifier = Modifier.size(17.dp))
+                        Spacer(Modifier.width(7.dp))
+                        Text("Фильтры", color = Nox.TextPrimary, fontSize = 12.5.sp)
                     }
                 }
             })
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(12.dp))
             KitField(query, { lib.query.value = it }, "Поиск в коллекциях…",
-                Modifier.padding(horizontal = 12.dp).focusRequester(searchFocus), leading = Icons.Rounded.Search,
+                Modifier.padding(horizontal = 12.dp).focusRequester(searchFocus), leading = Icons.Rounded.Search, minHeight = 38.dp,
                 trailing = if (query.isNotEmpty()) ({
                     Icon(Icons.Rounded.Close, "Очистить поиск", tint = Color(0xFFBFC6FF),
                         modifier = Modifier.size(32.dp).clip(RoundedCornerShape(16.dp)).clickable { lib.query.value = "" }.padding(5.dp))
@@ -162,10 +162,14 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
                     Text("Категорий нет. Создайте свою метку в «Все».", color = LavenderText, fontSize = 13.sp,
                         modifier = Modifier.padding(6.dp))
                 } else {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(d.categories, key = { it.id }) { c ->
-                            CategoryTile(c, Modifier.width(74.dp), onOpen = { nav.open(Page.Collection(c.id)) },
-                                onMenu = { actions.menu(c) })
+                    // Пять плиток ровно по ширине, как на макете; больше пяти — прокрутка вбок.
+                    androidx.compose.foundation.layout.BoxWithConstraints {
+                        val w = (maxWidth - 6.dp * 4) / 5
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(d.categories, key = { it.id }) { c ->
+                                CategoryTile(c, Modifier.width(w), onOpen = { nav.open(Page.Collection(c.id)) },
+                                    onMenu = { actions.menu(c) })
+                            }
                         }
                     }
                 }
@@ -181,9 +185,12 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
                     Text("Закрепите коллекцию через ⋮ — она будет здесь, сверху.", color = LavenderText, fontSize = 13.sp,
                         modifier = Modifier.padding(6.dp))
                 } else {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(d.pinned, key = { it.id }) { c ->
-                            CollectionTile(c, Modifier.width(122.dp), onOpen = { nav.open(Page.Collection(c.id)) }, onMenu = { actions.menu(c) })
+                    androidx.compose.foundation.layout.BoxWithConstraints {
+                        val w = (maxWidth - 8.dp * 2) / 3
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(d.pinned, key = { it.id }) { c ->
+                                CollectionTile(c, Modifier.width(w), onOpen = { nav.open(Page.Collection(c.id)) }, onMenu = { actions.menu(c) })
+                            }
                         }
                     }
                 }
@@ -216,25 +223,26 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
 
 @Composable
 private fun FeaturedCard(c: CollectionCard, reason: String, onOpen: () -> Unit) {
-    Tile(Modifier.fillMaxWidth().height(96.dp), onClick = onOpen) {
+    Tile(Modifier.fillMaxWidth().height(86.dp), onClick = onOpen) {
         Row(Modifier.fillMaxHeight()) {
             Cover(c.cover, Modifier.fillMaxHeight().aspectRatio(1.95f), RoundedCornerShape(topStart = 10.dp, bottomStart = 10.dp))
-            Column(Modifier.weight(1f).padding(start = 10.dp, top = 8.dp, end = 4.dp, bottom = 6.dp)) {
-                Text(c.title, color = Nox.TextPrimary, fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis)
-                Text(com.nox.offline.ui.library.videosLabel(c.summary.local), color = LavenderText, fontSize = 13.sp)
-                Text(c.summary.description.ifBlank { reason }, color = LavenderText, fontSize = 11.5.sp, maxLines = 2,
-                    overflow = TextOverflow.Ellipsis, lineHeight = 14.sp)
+            Column(Modifier.weight(1f).padding(start = 8.dp, top = 5.dp, end = 2.dp, bottom = 5.dp)) {
+                Text(c.title, color = Nox.TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, lineHeight = 15.sp)
+                Text(com.nox.offline.ui.library.videosLabel(c.summary.local), color = LavenderText, fontSize = 11.sp, lineHeight = 13.sp)
+                Text(c.summary.description.ifBlank { reason }, color = LavenderText, fontSize = 10.sp,
+                    maxLines = if (c.summary.entity.tagList.isEmpty()) 2 else 1,
+                    overflow = TextOverflow.Ellipsis, lineHeight = 12.sp)
                 val tags = c.summary.entity.tagList
                 if (tags.isNotEmpty()) {
                     Spacer(Modifier.weight(1f))
-                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        for (t in tags.take(3)) Chip(t, height = 20.dp, textSize = 10.5.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        for (t in tags.take(3)) Chip(t, height = 17.dp, textSize = 9.sp)
                     }
                 }
             }
-            Box(Modifier.fillMaxHeight().padding(end = 8.dp), contentAlignment = Alignment.Center) {
-                ActionCircle(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Открыть «${c.title}»", onOpen, size = 38.dp)
+            Box(Modifier.fillMaxHeight().padding(end = 6.dp), contentAlignment = Alignment.Center) {
+                ActionCircle(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Открыть «${c.title}»", onOpen, size = 30.dp)
             }
         }
     }
@@ -257,13 +265,13 @@ private fun CategoryTile(c: CollectionCard, modifier: Modifier, onOpen: () -> Un
             Cover(c.cover, Modifier.fillMaxWidth().height(54.dp), RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp),
                 showPlaceholderIcon = false)
             Row(Modifier.padding(horizontal = 4.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(categoryIcon(c), null, tint = Color(0xFFE8EAFF), modifier = Modifier.size(17.dp))
+                Icon(categoryIcon(c), null, tint = Color(0xFFE8EAFF), modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(3.dp))
                 Column {
-                    Text(c.title, color = Nox.TextPrimary, fontSize = 10.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        lineHeight = 12.sp)
-                    Text(com.nox.offline.ui.library.videosLabel(c.summary.local), color = LavenderText, fontSize = 9.5.sp, maxLines = 1,
-                        lineHeight = 11.sp)
+                    Text(c.title, color = Nox.TextPrimary, fontSize = 9.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        lineHeight = 11.sp, letterSpacing = (-0.1).sp)
+                    Text(com.nox.offline.ui.library.videosLabel(c.summary.local), color = LavenderText, fontSize = 8.5.sp, maxLines = 1,
+                        lineHeight = 10.sp)
                 }
             }
         }
@@ -275,13 +283,14 @@ fun CollectionTile(c: CollectionCard, modifier: Modifier, onOpen: () -> Unit, on
     Tile(modifier, onClick = onOpen, onLongClick = onMenu) {
         Column {
             Cover(c.cover, Modifier.fillMaxWidth().aspectRatio(2.1f), RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp))
-            Row(Modifier.padding(start = 7.dp, top = 4.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.padding(start = 6.dp, top = 3.dp, bottom = 3.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(c.title, color = Nox.TextPrimary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(com.nox.offline.ui.library.videosLabel(c.summary.local), color = LavenderText, fontSize = 11.sp, maxLines = 1)
+                    Text(c.title, color = Nox.TextPrimary, fontSize = 10.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, lineHeight = 13.sp)
+                    Text(com.nox.offline.ui.library.videosLabel(c.summary.local), color = LavenderText, fontSize = 9.5.sp, maxLines = 1,
+                        lineHeight = 12.sp)
                 }
                 Icon(Icons.Rounded.MoreVert, "Меню «${c.title}»", tint = Color(0xFFD5D9FF),
-                    modifier = Modifier.size(32.dp).clip(RoundedCornerShape(16.dp)).clickable(onClick = onMenu).padding(5.dp))
+                    modifier = Modifier.size(28.dp).clip(RoundedCornerShape(14.dp)).clickable(onClick = onMenu).padding(5.dp))
             }
         }
     }

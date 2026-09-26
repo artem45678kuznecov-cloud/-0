@@ -9,7 +9,7 @@ name: android-apk
 
 on:
   push:
-    branches: [android-stage-02-complete, android-0.2.1-liquid-bottom-bar, android-youtube-dynamic-quality]
+    branches: [android-stage-02-complete, android-0.2.1-liquid-bottom-bar, android-youtube-dynamic-quality, android-0.4-redesign-library]
     paths:
       - "android/**"
       - ".github/workflows/android-apk.yml"
@@ -77,7 +77,7 @@ jobs:
         timeout-minutes: 10
         run: tools/ejs-host-check/run.sh
 
-      - name: Unit tests (JVM, incl. Room migrations 1→2→3)
+      - name: Unit tests (JVM, incl. Room migrations 1→2→3→4)
         run: ./gradlew --no-daemon --stacktrace testDebugUnitTest
 
       - name: Lint

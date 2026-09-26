@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+
 package com.nox.offline.ui.library
 
 import android.app.Application
@@ -145,7 +147,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val playback = db.playback().observeAll().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     private val allItems = db.collections().observeAllItems().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val home: StateFlow<HomeData?> = combine(summaries, media, playback, allItems, combine(query, filter) { q, f -> q to f }) {
+    // Прямо из Room (без пустых начальных значений): пока база не ответила, экран не показывает «пусто».
+    val home: StateFlow<HomeData?> = combine(repo.summaries, db.media().observeAll(), db.playback().observeAll(),
+        db.collections().observeAllItems(), combine(query, filter) { q, f -> q to f }) {
             sums, med, pb, items, (q, f) ->
         val byId = med.associateBy { it.id }
         fun card(s: CollectionSummary) = CollectionCard(s, coverOf(s, byId))

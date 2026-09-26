@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+
 package com.nox.offline.ui
 
 import androidx.compose.material.icons.rounded.PlayCircleOutline

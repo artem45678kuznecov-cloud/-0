@@ -35,11 +35,11 @@ object SubtitleParser {
 
     /** Формат по содержимому: WEBVTT-заголовок или SRT. */
     fun detectFormat(text: String): String =
-        if (text.trimStart('﻿', ' ', '\n', '\r').startsWith("WEBVTT")) "vtt" else "srt"
+        if (text.trimStart('\uFEFF', ' ', '\n', '\r').startsWith("WEBVTT")) "vtt" else "srt"
 
     fun parse(text: String): List<Cue> {
         if (text.length > MAX_BYTES) throw SubtitleException("Файл субтитров слишком большой")
-        val lines = text.removePrefix("﻿").replace("\r\n", "\n").replace('\r', '\n').split('\n')
+        val lines = text.removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n').split('\n')
         val cues = ArrayList<Cue>()
         var i = 0
         while (i < lines.size) {

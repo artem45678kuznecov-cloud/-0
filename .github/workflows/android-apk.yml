@@ -328,11 +328,11 @@ jobs:
           }
           json.dump(m, open("dist/nox-update.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
           PY
-          # Настоящие снимки экрана, если они есть в репозитории.
+          # Настоящие снимки экрана и короткая запись, если они есть в репозитории.
           SHOTS=""
-          if ls docs/screenshots/*.png >/dev/null 2>&1; then
-            cp docs/screenshots/*.png dist/
-            SHOTS=$(cd dist && ls *.png | tr '\n' ' ')
+          if ls docs/screenshots/*.png >/dev/null 2>&1 || ls docs/screenshots/*.mp4 >/dev/null 2>&1; then
+            cp docs/screenshots/*.png docs/screenshots/*.mp4 dist/ 2>/dev/null || true
+            SHOTS=$(cd dist && { ls *.png *.mp4 2>/dev/null || true; } | tr '\n' ' ')
           fi
           (cd dist && sha256sum "$APK_NAME" nox-update.json $SHOTS > SHA256SUMS)
           {

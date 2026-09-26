@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -85,20 +86,21 @@ fun GlassBottomBar(
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
     state: LiquidBarState = rememberLiquidBarState(),
+    height: androidx.compose.ui.unit.Dp = 62.dp,
 ) {
     val palette = nox()
     val cfg = LocalGlassConfig.current
     val backdrop = LocalContentBackdrop.current
     val frame = LocalWallpaperFrame.current
-    val shape = RoundedCornerShape(34.dp)
+    val shape = RoundedCornerShape(height / 2)
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     val lensLayer = if (cfg.live && cfg.refraction && Build.VERSION.SDK_INT >= 33) rememberGraphicsLayer() else null
     val painter = remember { LiquidLensPainter() }
     var rootOffset by remember { mutableStateOf(Offset.Unspecified) }
 
-    Box(modifier = modifier.fillMaxWidth().height(72.dp).glass(shape, GlassStyles.Bar)) {
-        BoxWithConstraints(Modifier.fillMaxSize().padding(6.dp)) {
+    Box(modifier = modifier.fillMaxWidth().height(height).glass(shape, GlassStyles.BarAmber)) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(5.dp)) {
             val density = LocalDensity.current
             val slotPx = with(density) { (maxWidth / items.size).toPx() }
             val heightPx = with(density) { maxHeight.toPx() }
@@ -249,7 +251,7 @@ fun GlassBottomBar(
                     ) {
                         val itemCenter = math.centerOf(i)
                         Icon(item.icon, contentDescription = null,
-                            tint = if (lit) palette.accentLight else Nox.TextSecondary,
+                            tint = if (lit) palette.accent else Lavender.copy(alpha = 0.92f),
                             modifier = Modifier
                                 .size(24.dp)
                                 // Иконка под линзой чуть увеличивается — как под толстым стеклом.
@@ -259,10 +261,14 @@ fun GlassBottomBar(
                                     val k = (if (cfg.reduceMotion) 0.06f else 0.16f) * near * (0.35f + 0.65f * state.lift.value.coerceIn(0f, 1f))
                                     scaleX = 1f + k; scaleY = 1f + k
                                 })
-                        Text(item.label, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            fontWeight = if (lit) FontWeight.SemiBold else FontWeight.Normal,
-                            color = if (lit || focused) Nox.TextPrimary else Nox.TextSecondary,
-                            modifier = Modifier.padding(top = 3.dp))
+                        Text(item.label, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            fontWeight = if (lit) FontWeight.SemiBold else FontWeight.Medium,
+                            color = when {
+                                lit -> palette.accentLight
+                                focused -> Nox.TextPrimary
+                                else -> Color(0xFFD5DAFF)
+                            },
+                            modifier = Modifier.padding(top = 2.dp))
                     }
                 }
             }

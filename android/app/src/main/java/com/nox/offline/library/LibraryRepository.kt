@@ -214,9 +214,13 @@ class LibraryRepository(
      * если задание было поставлено «в коллекцию», связь создаётся на его месте
      * в порядке источника (не в порядке завершения).
      */
-    suspend fun onDownloaded(mediaId: Long, sourceKey: String, collectionId: Long, position: Long) = db.withTransaction {
-        if (sourceKey.isNotBlank()) {
-            for (it in dao.itemsForSource(sourceKey)) {
+    suspend fun onDownloaded(mediaId: Long, sourceKey: String, collectionId: Long, position: Long, pageUrl: String = "") = db.withTransaction {
+        val pending = LinkedHashMap<Long, CollectionItemEntity>()
+        if (sourceKey.isNotBlank()) dao.itemsForSource(sourceKey).forEach { pending[it.id] = it }
+        // Серия, файл которой удаляли раньше, узнаётся и по известной ссылке.
+        if (pageUrl.isNotBlank()) dao.allItems().filter { it.mediaId == 0L && it.sourceUrl == pageUrl }.forEach { pending[it.id] = it }
+        run {
+            for (it in pending.values) {
                 if (it.mediaId == 0L) {
                     val clash = dao.items(it.collectionId).any { o -> o.mediaId == mediaId && o.chapterId == 0L }
                     if (clash) dao.deleteItem(it.id) else dao.updateItem(it.copy(mediaId = mediaId, unavailableReason = ""))

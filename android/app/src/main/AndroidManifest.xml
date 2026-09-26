@@ -75,6 +75,12 @@
             tools:targetApi="34"
             android:permission="android.permission.BIND_JOB_SERVICE" />
 
+        <!-- 0.4.0: периодическая автокопия записей и настроек. -->
+        <service
+            android:name=".storage.AutoBackupJobService"
+            android:exported="true"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
         <!-- Android 13 и ниже: foreground service типа dataSync. -->
         <service
             android:name=".downloader.TransferForegroundService"

@@ -48,6 +48,7 @@ import com.nox.offline.ui.theme.nox
 fun statusLabel(d: DownloadEntity): String = when (d.status) {
     DownloadStatus.QUEUED -> when {
         d.lastStopReason == "update" -> "Ждёт после обновления"
+        d.lastStopReason == "network" -> "Ждёт сети"
         d.retries > 0 || d.resolveRetries > 0 -> "Повтор после сбоя"
         else -> "В очереди"
     }

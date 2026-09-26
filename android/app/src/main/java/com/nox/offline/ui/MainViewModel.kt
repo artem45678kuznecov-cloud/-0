@@ -59,6 +59,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val coordinator = nox.coordinator
     val settings = nox.settings
 
+    /** Где пользователь: вкладка и стек вложенных страниц. Переживает поворот экрана. */
+    val nav = Nav()
+
     // ---------------- данные ----------------
 
     val downloads: StateFlow<List<DownloadEntity>> = nox.db.downloads().observeAll()
@@ -126,6 +129,79 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Пакет ссылок: у каждой свой каталог и свой выбор. */
     val batch = BatchFinder(viewModelScope, analyze, nox.deviceCaps, pickPrefs, gate = analyzeGate)
+    /** 0.4.0: плейлист по одной ссылке. */
+    val playlist = com.nox.offline.ui.downloads.PlaylistSession(
+        scope = viewModelScope,
+        loadPage = { url, start, count ->
+            when (val r = nox.resolver.playlist(url, start, count)) {
+                is com.nox.offline.downloader.YtDlpResolver.PlaylistResult.Ok -> Result.success(r.page)
+                is com.nox.offline.downloader.YtDlpResolver.PlaylistResult.Failed ->
+                    Result.failure(com.nox.offline.ui.downloads.PlaylistSession.PlaylistError(r.error))
+            }
+        },
+        analyze = analyze,
+        presence = { e -> coordinator.presence(e.extractor, e.videoId) ?: coordinator.duplicateReason(e.url) },
+        caps = nox.deviceCaps,
+        prefs = pickPrefs,
+        gate = analyzeGate,
+    )
+
+    /**
+     * Поставить выбранное из плейлиста. [collection] — создать (или найти по
+     * ссылке) коллекцию: весь список попадает в неё в порядке источника,
+     * нескачанное — как «не скачано», без дублей при повторе.
+     */
+    fun enqueuePlaylist(collection: Boolean, onDone: (Long?) -> Unit) {
+        val st = playlist.state.value
+        viewModelScope.launch(Dispatchers.IO) {
+            var colId: Long? = null
+            if (collection) {
+                colId = nox.db.collections().bySourceUrl(st.url)?.id
+                    ?: nox.library.create(st.title.ifBlank { "Плейлист" }, com.nox.offline.data.db.CollectionType.SERIES,
+                        description = st.uploader, sourceUrl = st.url)
+                for (it in st.items) {
+                    nox.library.addPending(colId, it.entry.url, it.entry.sourceKey, it.entry.title, it.entry.index.toLong(),
+                        it.entry.unavailable)
+                }
+                // Уже скачанное из этого списка сразу занимает своё место.
+                for (it in st.items) {
+                    if (it.entry.videoId.isBlank()) continue
+                    val m = nox.db.media().byVideoId(it.entry.videoId).firstOrNull() ?: continue
+                    nox.library.onDownloaded(m.id, it.entry.sourceKey, 0, 0, it.entry.url)
+                }
+            }
+            var added = 0
+            var failed = 0
+            var skipped = 0
+            for (it in st.selected) {
+                val r = it.state as? FinderState.Ready
+                if (r == null) { skipped++; continue }
+                val pos = it.entry.index.toLong()
+                val res = if (st.audioOnly) {
+                    val a = r.audioVariants.firstOrNull { v -> v.support.ok }
+                    if (a == null) { failed++; continue }
+                    coordinator.enqueueAudio(DownloadCoordinator.AudioRequest(r.catalog.details, a, collectionId = colId ?: 0,
+                        collectionPosition = pos))
+                } else {
+                    val v = r.selected ?: run { skipped++; null } ?: continue
+                    coordinator.enqueue(DownloadCoordinator.DownloadRequest(r.catalog.details, v, collectionId = colId ?: 0,
+                        collectionPosition = pos))
+                }
+                res.onSuccess { added++ }.onFailure { failed++ }
+            }
+            if (added > 0) TransferScheduler.ensureRunning(getApplication())
+            com.nox.offline.core.AppEvents.notice(buildString {
+                append("В очереди: $added")
+                if (skipped > 0) append(", без выбранного качества: $skipped")
+                if (failed > 0) append(", не удалось: $failed")
+                if (colId != null) append(". Коллекция готова")
+            })
+            NoxLog.event("playlist-enqueue", "added" to added, "skipped" to skipped, "failed" to failed, "collection" to (colId != null),
+                "audio" to st.audioOnly)
+            withContext(Dispatchers.Main) { onDone(colId) }
+        }
+    }
+
     /** Текст для листа массового добавления (например, пришёл через «Поделиться»). */
     val pendingBatch = MutableStateFlow<String?>(null)
 
@@ -172,14 +248,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         finder.replanId = d.id
     }
 
-    /** «Скачать» выбранный вариант: задание в очередь и запуск носителя. Только из видимого окна. */
-    fun downloadSelected() {
+    /**
+     * «Скачать» выбранное: видео выбранного качества (с субтитрами) или
+     * «только звук». Задание в очередь и запуск носителя. Только из видимого окна.
+     */
+    fun downloadSelected(onQueued: () -> Unit = {}) {
         val s = finder.state.value as? FinderState.Ready ?: return
-        val v = s.selected ?: run { message.value = "Выберите качество"; return }
         val replan = finder.replanId
+        val audio = if (s.audioOnly) s.selectedAudio ?: run { message.value = "Выберите звуковую дорожку"; return } else null
+        val v = if (!s.audioOnly) s.selected ?: run { message.value = "Выберите качество"; return } else null
         viewModelScope.launch(Dispatchers.IO) {
-            val request = DownloadCoordinator.DownloadRequest(s.catalog.details, v)
-            val r = if (replan != null) coordinator.replan(replan, request) else coordinator.enqueue(request)
+            val r = if (audio != null) {
+                coordinator.enqueueAudio(DownloadCoordinator.AudioRequest(s.catalog.details, audio))
+            } else {
+                val request = DownloadCoordinator.DownloadRequest(s.catalog.details, v!!, subtitles = s.subtitles)
+                if (replan != null) coordinator.replan(replan, request) else coordinator.enqueue(request)
+            }
             r.onFailure { message.value = it.message ?: "Не удалось добавить" }
             r.onSuccess {
                 withContext(Dispatchers.Main) {
@@ -187,10 +271,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     if (finder.state.value === s) finder.cancel()
                     if (urlInput.value.trim() == s.url || SafeUrl.extract(urlInput.value) == s.url) urlInput.value = ""
                 }
-                message.value = when (val st = TransferScheduler.ensureRunning(getApplication())) {
+                val what = audio?.let { "звук ${it.title}" } ?: v!!.title
+                val text = when (val st = TransferScheduler.ensureRunning(getApplication())) {
                     is TransferScheduler.Result.Failed -> "Добавлено, но фоновая загрузка не запустилась: ${st.reason}"
-                    else -> "Добавлено в очередь: ${v.title}"
+                    else -> "Добавлено в очередь: $what"
                 }
+                message.value = ""
+                com.nox.offline.core.AppEvents.notice(text)
+                withContext(Dispatchers.Main) { onQueued() }
             }
         }
     }
@@ -284,6 +372,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearCompleted() = viewModelScope.launch(Dispatchers.IO) { coordinator.clearCompleted() }
 
+    // ---------------- 0.4.0: очередь ----------------
+
+    /** Сеть для загрузок: есть / нет / не Wi‑Fi при «Только Wi‑Fi». */
+    val networkState = nox.network.state
+
+    fun retryErrors() = viewModelScope.launch(Dispatchers.IO) {
+        val n = coordinator.retryErrors()
+        if (n > 0) TransferScheduler.ensureRunning(getApplication())
+        message.value = if (n > 0) "Повтор: $n" else "Ошибок нет"
+    }
+
+    fun pauseMany(ids: Collection<Long>) = viewModelScope.launch(Dispatchers.IO) { coordinator.pauseMany(ids) }
+
+    fun resumeMany(ids: Collection<Long>) = viewModelScope.launch(Dispatchers.IO) {
+        coordinator.resumeMany(ids)
+        TransferScheduler.ensureRunning(getApplication())
+    }
+
+    fun removeMany(ids: Collection<Long>) = viewModelScope.launch(Dispatchers.IO) { coordinator.removeMany(ids); refreshSpace() }
+
+    /** «Скачать следующим» — те же задания с их частями поднимаются в начало очереди. */
+    fun playNext(ids: List<Long>) = viewModelScope.launch(Dispatchers.IO) {
+        for (id in ids) coordinator.playNext(id)
+        TransferScheduler.ensureRunning(getApplication())
+        com.nox.offline.core.AppEvents.notice(if (ids.size == 1) "Будет скачано следующим" else "Поднято в начало очереди: ${ids.size}")
+    }
+
+    fun retrySubtitles(id: Long) = viewModelScope.launch(Dispatchers.IO) {
+        com.nox.offline.core.AppEvents.notice("Повторяем субтитры…")
+        if (!coordinator.retrySubtitles(id)) com.nox.offline.core.AppEvents.notice("Видео для этих субтитров не найдено")
+        else {
+            val e = coordinator.downloadsDao.get(id)
+            com.nox.offline.core.AppEvents.notice(if (e?.subtitleError.isNullOrBlank()) "Субтитры скачаны" else "Субтитры снова не скачались")
+        }
+    }
+
+    /** Готовое видео для завершённого задания. */
+    suspend fun mediaFor(d: DownloadEntity): MediaEntity? = withContext(Dispatchers.IO) {
+        val byVideo = if (d.videoId.isNotBlank()) nox.db.media().byVideoId(d.videoId) else emptyList()
+        byVideo.firstOrNull { it.variantKey == d.variantKey } ?: byVideo.firstOrNull()
+            ?: nox.db.media().getAll().firstOrNull { MediaLocator.fileName(it) == d.fileName }
+    }
+
     fun renameDownload(id: Long, title: String) = viewModelScope.launch(Dispatchers.IO) { coordinator.rename(id, title) }
 
     // ---------------- медиатека ----------------
@@ -294,6 +425,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         MediaLocator.delete(nox.saf, m)
         if (m.coverPath.isNotBlank()) runCatching { File(m.coverPath).delete() }
+        // Коллекции: серия с известной ссылкой остаётся «не скачано»; разметка и субтитры файла — уходят с ним.
+        runCatching { nox.library.onMediaDeleted(m.id) }
+        runCatching { nox.markup.onMediaDeleted(m.id) }
+        runCatching { nox.subtitles.onMediaDeleted(m.id) }
         nox.db.playback().delete(m.id)
         nox.db.media().delete(m)
         NoxLog.event("media-deleted", "id" to m.id)
@@ -332,6 +467,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val send = Intent(Intent.ACTION_SEND).setType("video/*").putExtra(Intent.EXTRA_STREAM, uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         return Intent.createChooser(send, "Поделиться видео").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
+    /** «Защитить от очистки» — не то же самое, что закрепить коллекцию. */
+    fun setProtected(m: MediaEntity, on: Boolean) = viewModelScope.launch(Dispatchers.IO) { nox.db.media().setProtected(m.id, on) }
+
+    /** Удалить выбранное пользователем в «Очистке» после подтверждения. Ничего не удаляется само. */
+    fun cleanup(list: List<MediaEntity>) = viewModelScope.launch(Dispatchers.IO) {
+        var n = 0
+        var freed = 0L
+        for (m in list) {
+            val fresh = nox.db.media().get(m.id) ?: continue
+            // Защитили, открыли в плеере или файл переносится — пропускаем.
+            if (fresh.protectedFromCleanup || PlaybackRegistry.playingMediaId == m.id || fresh.moveState.isNotBlank()) continue
+            deleteMedia(fresh).join()
+            n++; freed += fresh.sizeBytes
+        }
+        com.nox.offline.core.AppEvents.notice("Удалено: $n, освобождено ≈ ${Format.bytes(freed)}")
+        refreshSpace()
     }
 
     fun restartFromBeginning(m: MediaEntity) = viewModelScope.launch(Dispatchers.IO) { nox.db.playback().delete(m.id) }
@@ -429,6 +582,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "Восстановлено видео: ${r.media}, позиций: ${r.positions}, заданий: ${r.downloads}" +
                 if (r.skipped > 0) ", пропущено: ${r.skipped}" else ""
         }
+    }
+
+    // ---------------- 0.4.0: автокопия ----------------
+
+    val backupPrefs = settings.backup
+
+    /** Папка для автокопии: доступ сохраняется, прежний отпускается. */
+    fun setAutoBackupFolder(tree: Uri) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            val old = settings.backup.value.tree
+            val label = nox.saf.persist(tree)
+            if (old.isNotBlank() && old != tree.toString() && old != settings.downloads.value.destinationTree) nox.saf.release(old)
+            settings.updateBackup { it.copy(tree = tree.toString(), treeLabel = label, autoEnabled = true, lastError = "") }
+            nox.autoBackup.schedule()
+            nox.autoBackup.runIfDue(force = true)
+        } catch (e: Exception) {
+            com.nox.offline.core.AppEvents.notice("Не удалось получить доступ к папке: ${e.message}")
+        }
+    }
+
+    fun setAutoBackup(on: Boolean) = viewModelScope.launch(Dispatchers.IO) {
+        settings.updateBackup { it.copy(autoEnabled = on, lastError = if (on) it.lastError else "") }
+        nox.autoBackup.schedule()
+        if (on) nox.autoBackup.runIfDue()
+    }
+
+    fun runAutoBackupNow() = viewModelScope.launch(Dispatchers.IO) {
+        val ok = nox.autoBackup.runIfDue(force = true)
+        com.nox.offline.core.AppEvents.notice(if (ok) "Автокопия сделана" else settings.backup.value.lastError.ifBlank { "Автокопия выключена" })
+    }
+
+    fun setWifiOnly(on: Boolean) {
+        settings.updateDownloads { it.copy(wifiOnly = on) }
+        nox.network.refresh()
     }
 
     fun cancelFileTask() = nox.tasks.cancel()

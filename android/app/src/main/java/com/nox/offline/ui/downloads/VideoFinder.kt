@@ -33,8 +33,19 @@ sealed class FinderState {
         val selectedKey: String?,
         /** Группа, у которой раскрыто «Подробнее». */
         val expanded: String? = null,
+        /** 0.4.0: «Только звук» — отдельная звуковая дорожка без видео. */
+        val audioOnly: Boolean = false,
+        val audioKey: String? = null,
+        /** 0.4.0: ключи выбранных субтитров источника. */
+        val subtitleKeys: Set<String> = emptySet(),
     ) : FinderState() {
         val selected: Variant? get() = selectedKey?.let(catalog::find)?.takeIf { it.support.ok }
+        val audioVariants: List<com.nox.offline.downloader.catalog.AudioVariant>
+            get() = CatalogBuilder.audioVariants(catalog.analysis, catalog.language)
+        val selectedAudio: com.nox.offline.downloader.catalog.AudioVariant?
+            get() = audioVariants.firstOrNull { it.key == audioKey && it.support.ok }
+        val subtitles: List<com.nox.offline.downloader.catalog.SourceSubtitle>
+            get() = catalog.details.subtitles.filter { it.key in subtitleKeys }
     }
     data class Failed(override val url: String, val error: ResolveError) : FinderState()
 }
@@ -130,6 +141,25 @@ class VideoFinder(
         _state.value = s.copy(expanded = if (s.expanded == groupKey) null else groupKey)
     }
 
+    /** Переключить «Видео» / «Только звук». Лучшая звуковая дорожка выделяется заранее — выбирает пользователь. */
+    fun setAudioOnly(on: Boolean) {
+        val s = _state.value as? FinderState.Ready ?: return
+        val key = s.audioKey ?: s.audioVariants.firstOrNull { it.support.ok }?.key
+        _state.value = s.copy(audioOnly = on, audioKey = key)
+    }
+
+    fun selectAudio(key: String) {
+        val s = _state.value as? FinderState.Ready ?: return
+        if (s.audioVariants.none { it.key == key && it.support.ok }) return
+        _state.value = s.copy(audioKey = key)
+    }
+
+    fun toggleSubtitle(key: String) {
+        val s = _state.value as? FinderState.Ready ?: return
+        if (s.catalog.details.subtitles.none { it.key == key }) return
+        _state.value = s.copy(subtitleKeys = if (key in s.subtitleKeys) s.subtitleKeys - key else s.subtitleKeys + key)
+    }
+
     /** Другой язык звука: каталог пересобирается из того же анализа, без сети. */
     fun setLanguage(code: String) {
         val s = _state.value as? FinderState.Ready ?: return
@@ -137,7 +167,8 @@ class VideoFinder(
         val oldGroup = s.selected?.groupKey
         val keep = rebuilt.main.firstOrNull { it.groupKey == oldGroup && it.support.ok }
         val p = prefs()
-        _state.value = s.copy(catalog = rebuilt, selectedKey = (keep ?: rebuilt.preselect(p.preferredHeight, p.preferSingleFile))?.key)
+        _state.value = s.copy(catalog = rebuilt, selectedKey = (keep ?: rebuilt.preselect(p.preferredHeight, p.preferSingleFile))?.key,
+            audioKey = CatalogBuilder.audioVariants(rebuilt.analysis, rebuilt.language).firstOrNull { it.support.ok }?.key)
     }
 }
 

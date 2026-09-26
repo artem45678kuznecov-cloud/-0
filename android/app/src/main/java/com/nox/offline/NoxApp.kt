@@ -64,6 +64,8 @@ class NoxApp : Application() {
         private set
     lateinit var network: com.nox.offline.downloader.NetworkGate
         private set
+    lateinit var autoBackup: com.nox.offline.storage.AutoBackup
+        private set
 
     /** Версия Android и декодеры телефона — для каталога вариантов качества. */
     val deviceCaps: com.nox.offline.downloader.catalog.DeviceCaps by lazy { com.nox.offline.downloader.catalog.AndroidDeviceCaps() }
@@ -114,7 +116,7 @@ class NoxApp : Application() {
         coordinator.subtitleStore = subtitles
         coordinator.libraryHook = object : DownloadCoordinator.LibraryHook {
             override suspend fun onMediaAdded(mediaId: Long, e: com.nox.offline.data.db.DownloadEntity) {
-                library.onDownloaded(mediaId, e.sourceKey, e.collectionId, e.collectionPosition)
+                library.onDownloaded(mediaId, e.sourceKey, e.collectionId, e.collectionPosition, e.pageUrl)
             }
         }
         network.start()
@@ -128,12 +130,15 @@ class NoxApp : Application() {
         backup = BackupManager(this, db, storage, settings, saf) { e ->
             listOf(coordinator.partFileOf(e), coordinator.videoPartOf(e), coordinator.audioPartOf(e))
         }
+        autoBackup = com.nox.offline.storage.AutoBackup(this, settings, backup, saf)
         wallpaper = WallpaperController(this, settings)
         updates = UpdateRepository(this, settings, coordinator, client)
         updates.onAppStart()
         // Восстановление после гибели процесса или обновления: всё «в работе» -> в очередь.
         appScope.launch { coordinator.recover() }
         appScope.launch { runCatching { library.ensureDefaults() } }
+        // Автокопия: срок проверяется и при запуске (JobScheduler не обещает точного времени).
+        appScope.launch { runCatching { autoBackup.schedule(); autoBackup.runIfDue() } }
     }
 
     companion object {

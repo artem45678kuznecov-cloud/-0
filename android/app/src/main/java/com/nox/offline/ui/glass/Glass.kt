@@ -92,7 +92,17 @@ data class GlassStyle(
     val highlight: Float = 1f,
     /** Лёгкое преломление у краёв (API 33+, только для live). */
     val refraction: Boolean = false,
+    /** 0.4.0: цвет кромки — как на утверждённых макетах. */
+    val edgeTone: EdgeTone = EdgeTone.DEFAULT,
+    /** Толщина кромки, dp. */
+    val edgeWidth: Float = 1f,
 )
+
+/**
+ * Кромка поверхности. [ACCENT] — светящаяся рамка цвета темы (секции,
+ * выбранная вкладка); [LAVENDER] — тонкая холодная рамка внутренних плиток.
+ */
+enum class EdgeTone { DEFAULT, ACCENT, LAVENDER }
 
 object GlassStyles {
     val Card = GlassStyle()
@@ -101,9 +111,28 @@ object GlassStyles {
     val Selected = GlassStyle(accentFill = 0.30f, glow = 0.55f, edge = 1.3f)
     val Primary = GlassStyle(accentFill = 0.82f, glow = 1f, edge = 1.2f, highlight = 1.2f)
     val Bar = GlassStyle(live = true, refraction = true, glow = 0.35f, edge = 1.1f)
-    val Sheet = GlassStyle(live = true, tintAlpha = 0.78f, edge = 1f)
+    val Sheet = GlassStyle(live = true, tintAlpha = 0.86f, edge = 1f, glow = 0.3f, edgeTone = EdgeTone.ACCENT, edgeWidth = 1.2f)
     val Field = GlassStyle(tintAlpha = 0.62f, edge = 0.6f, highlight = 0.4f)
+
+    // ---- 0.4.0: язык макетов ----
+    /** Секция экрана: тёмная полупрозрачная подложка, янтарная светящаяся рамка. */
+    val Section = GlassStyle(tintAlpha = 0.64f, glow = 0.55f, edge = 1f, highlight = 0.45f, edgeTone = EdgeTone.ACCENT, edgeWidth = 1.2f)
+    /** Плитка внутри секции: темнее, тонкая лавандовая рамка. */
+    val Tile = GlassStyle(tintAlpha = 0.70f, edge = 1f, highlight = 0.35f, edgeTone = EdgeTone.LAVENDER)
+    /** Круглые кнопки шапки и строки поиска. */
+    val Round = GlassStyle(tintAlpha = 0.58f, edge = 1f, highlight = 0.6f, edgeTone = EdgeTone.LAVENDER, edgeWidth = 1.1f)
+    /** Главная кнопка («Найти видео», «Скачать»): янтарная заливка и ореол. */
+    val Amber = GlassStyle(tintAlpha = 0.5f, accentFill = 0.46f, glow = 0.9f, edge = 1.3f, highlight = 0.9f,
+        edgeTone = EdgeTone.ACCENT, edgeWidth = 1.5f)
+    /** Выбранный элемент (строка качества, чип, вкладка плеера). */
+    val Chosen = GlassStyle(tintAlpha = 0.6f, accentFill = 0.22f, glow = 0.45f, edge = 1.1f, edgeTone = EdgeTone.ACCENT, edgeWidth = 1.3f)
+    /** Нижняя панель 0.4.0: живое стекло + янтарная кромка. */
+    val BarAmber = GlassStyle(live = true, refraction = true, tintAlpha = 0.66f, glow = 0.5f, edge = 1f, edgeTone = EdgeTone.ACCENT,
+        edgeWidth = 1.2f)
 }
+
+/** Холодный лавандовый цвет вторичного текста и рамок плиток (как на макетах). */
+val Lavender = Color(0xFF8F9BFF)
 
 /**
  * Стеклянная поверхность как модификатор. Рисует задний слой, окраску,
@@ -208,9 +237,28 @@ private class GlassNode(private var e: GlassElement) : Node(), DrawModifierNode,
             if (e.pressed > 0f) drawRect(Color.White.copy(alpha = 0.09f * e.pressed))
         }
 
+        val ea = (s.edge * (0.35f + 0.65f * cfg.intensity) * (1f + 0.4f * e.pressed)).coerceIn(0f, 1.6f)
+        when (s.edgeTone) {
+            EdgeTone.ACCENT -> {
+                // Рамка по всему контуру, чуть ярче сверху и снизу — как на макетах.
+                drawOutline(outline, Brush.verticalGradient(
+                    0f to pal.accentLight.copy(alpha = (0.95f * ea).coerceAtMost(1f)),
+                    0.5f to pal.accent.copy(alpha = (0.62f * ea).coerceAtMost(1f)),
+                    1f to pal.accentLight.copy(alpha = (0.85f * ea).coerceAtMost(1f))),
+                    style = Stroke(width = s.edgeWidth.dp.toPx()))
+                drawContent(); return
+            }
+            EdgeTone.LAVENDER -> {
+                drawOutline(outline, Brush.verticalGradient(
+                    0f to Lavender.copy(alpha = (0.42f * ea).coerceAtMost(1f)),
+                    1f to Lavender.copy(alpha = (0.20f * ea).coerceAtMost(1f))),
+                    style = Stroke(width = s.edgeWidth.dp.toPx()))
+                drawContent(); return
+            }
+            EdgeTone.DEFAULT -> Unit
+        }
         // Световая кромка: ярче у верхнего левого угла и у нижнего правого,
         // почти гаснет по бокам — «неоднородный край».
-        val ea = (s.edge * (0.35f + 0.65f * cfg.intensity) * (1f + 0.4f * e.pressed)).coerceIn(0f, 1.6f)
         drawOutline(outline, Brush.linearGradient(
             0f to pal.edge.copy(alpha = (0.80f * ea).coerceAtMost(1f)),
             0.30f to pal.edge.copy(alpha = 0.20f * ea),

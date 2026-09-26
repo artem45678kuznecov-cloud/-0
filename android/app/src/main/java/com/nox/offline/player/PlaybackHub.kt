@@ -72,6 +72,9 @@ class PlaybackHub(private val app: NoxApp) {
 
     data class Offer(val next: Playable, val title: String, val secondsLeft: Int)
 
+    /** Звуковая дорожка файла (язык/озвучка), как её видит плеер. */
+    data class AudioTrack(val group: Int, val track: Int, val label: String, val selected: Boolean)
+
     data class State(
         val now: Now? = null,
         val isPlaying: Boolean = false,
@@ -94,6 +97,9 @@ class PlaybackHub(private val app: NoxApp) {
         val subtitleText: String = "",
         val videoAspect: Float = 16f / 9f,
         val hasVideo: Boolean = true,
+        val audioTracks: List<AudioTrack> = emptyList(),
+        /** Масштаб в окне: false — вписать, true — заполнить с обрезкой. */
+        val zoom: Boolean = false,
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -166,6 +172,21 @@ class PlaybackHub(private val app: NoxApp) {
             if (videoSize.width > 0 && videoSize.height > 0) {
                 _state.value = _state.value.copy(videoAspect = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height)
             }
+        }
+
+        override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+            val list = ArrayList<AudioTrack>()
+            tracks.groups.forEachIndexed { gi, g ->
+                if (g.type != C.TRACK_TYPE_AUDIO) return@forEachIndexed
+                for (ti in 0 until g.length) {
+                    val f = g.getTrackFormat(ti)
+                    val label = f.label?.takeIf { it.isNotBlank() }
+                        ?: f.language?.takeIf { it.isNotBlank() && it != "und" }?.let { com.nox.offline.downloader.catalog.CatalogBuilder.languageName(it) }
+                        ?: "Дорожка ${list.size + 1}"
+                    list.add(AudioTrack(gi, ti, label, g.isTrackSelected(ti)))
+                }
+            }
+            _state.value = _state.value.copy(audioTracks = list)
         }
 
         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
@@ -334,6 +355,16 @@ class PlaybackHub(private val app: NoxApp) {
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             .build()
     }
+
+    fun selectAudioTrack(t: AudioTrack) {
+        val p = exo ?: return
+        val g = p.currentTracks.groups.getOrNull(t.group) ?: return
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .setOverrideForType(androidx.media3.common.TrackSelectionOverride(g.mediaTrackGroup, t.track))
+            .build()
+    }
+
+    fun setZoom(on: Boolean) { _state.value = _state.value.copy(zoom = on) }
 
     fun next() {
         val ctx = _state.value.now?.context ?: return

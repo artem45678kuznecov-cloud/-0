@@ -26,6 +26,8 @@ class NoxActions(
     val pickWallpaper: () -> Unit,
     val pickBackupExport: (includeMedia: Boolean, includeParts: Boolean) -> Unit,
     val pickBackupImport: () -> Unit,
+    /** 0.4.0: папка для автоматической копии. */
+    val pickAutoBackupFolder: () -> Unit,
     val requestNotifications: () -> Unit,
     val openInstallPermission: () -> Unit,
     val copyDiagnostics: () -> Unit,

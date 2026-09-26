@@ -1,5 +1,34 @@
 package com.nox.offline.ui.library
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.VideoLibrary
+import androidx.compose.material3.Icon
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
+import com.nox.offline.ui.components.Cover
+import com.nox.offline.ui.components.DurationBadge
+import com.nox.offline.ui.kit.Chip
+import com.nox.offline.ui.kit.EmptyBlock
+import com.nox.offline.ui.kit.KitField
+import com.nox.offline.ui.kit.LavenderText
+import com.nox.offline.ui.kit.ProgressLine
+import com.nox.offline.ui.kit.RoundButton
+import com.nox.offline.ui.kit.ScreenHeading
+import com.nox.offline.ui.kit.Section
+import com.nox.offline.ui.kit.SectionGap
+import com.nox.offline.ui.kit.Tile
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -45,7 +74,11 @@ import com.nox.offline.ui.components.SearchRow
 import com.nox.offline.ui.components.VSpace
 import com.nox.offline.ui.theme.Nox
 
-@OptIn(ExperimentalFoundationApi::class)
+/**
+ * «Все видео»: вся медиатека списком — поиск, фильтры, импорт, выбор
+ * нескольких для экспорта или удаления. Коллекции — на главной; здесь
+ * каждое видео один раз, как оно лежит на устройстве.
+ */
 @Composable
 fun LibraryScreen(vm: MainViewModel, actions: NoxActions, contentPadding: PaddingValues) {
     val list by vm.library.collectAsState()
@@ -56,73 +89,88 @@ fun LibraryScreen(vm: MainViewModel, actions: NoxActions, contentPadding: Paddin
     var selected by remember { mutableStateOf(setOf<Long>()) }
     val selecting = selected.isNotEmpty()
 
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
         item("top") {
-            Row(Modifier.padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                GlassIconButton(Icons.AutoMirrored.Rounded.ArrowBack, "Назад", actions.back, size = 48.dp)
-                HSpace(14)
-                Column(Modifier.weight(1f)) {
-                    Text("Медиатека", color = Nox.TextPrimary, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-                    Muted("${list.size} из ${all.size} • ${filter.sort.label.lowercase()}", size = 14.sp, color = Nox.TextSecondary)
-                }
-                GlassIconButton(Icons.Rounded.FileDownload, "Импорт видео", actions.pickImport, size = 48.dp)
+            Spacer(Modifier.height(8.dp))
+            ScreenHeading("Все видео", "${list.size} из ${all.size} · ${filter.sort.label.lowercase()}", onBack = actions.back, trailing = {
+                RoundButton(Icons.Rounded.FileDownload, "Импортировать видео с устройства", actions.pickImport, size = 44.dp)
+            })
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                KitField(query, { vm.query.value = it }, "Поиск по названию или каналу", Modifier.weight(1f), leading = Icons.Rounded.Search)
+                Spacer(Modifier.width(8.dp))
+                RoundButton(Icons.Rounded.Tune, "Фильтр и сортировка", actions.openFilter, size = 48.dp, accent = !filter.isDefault)
             }
-        }
-        item("search") {
-            SearchRow(query, { vm.query.value = it }, actions.openFilter, filterActive = !filter.isDefault,
-                modifier = Modifier.padding(horizontal = 20.dp))
+            SectionGap()
         }
         if (selecting) {
             item("selection") {
-                GlassCard(Modifier.padding(horizontal = 20.dp), padding = PaddingValues(12.dp)) {
+                Section(null, contentPadding = PaddingValues(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        GlassIconButton(Icons.Rounded.Close, "Снять выбор", { selected = emptySet() }, size = 40.dp, iconSize = 20.dp)
-                        HSpace(10)
+                        RoundButton(Icons.Rounded.Close, "Снять выбор", { selected = emptySet() })
+                        Spacer(Modifier.width(10.dp))
                         Text("Выбрано: ${selected.size}", color = Nox.TextPrimary, fontSize = 16.sp, modifier = Modifier.weight(1f))
-                        GlassPill("Экспорт", icon = Icons.Rounded.IosShare, height = 40.dp, textSize = 14.sp, onClick = {
+                        Chip("Экспорт", icon = Icons.Rounded.IosShare, height = 36.dp, onClick = {
                             actions.pickExportFor(all.filter { it.id in selected }); selected = emptySet()
                         })
-                        HSpace(8)
-                        GlassIconButton(Icons.Rounded.Delete, "Удалить выбранные", {
+                        Spacer(Modifier.width(8.dp))
+                        RoundButton(Icons.Rounded.Delete, "Удалить выбранные", {
                             val chosen = all.filter { it.id in selected }
                             sheets.confirm("Удалить ${chosen.size} видео?",
-                                "Файлы будут удалены с устройства, позиции просмотра — тоже. Это нельзя отменить.",
-                                "Удалить", danger = true) {
+                                "Файлы будут удалены с устройства, позиции просмотра — тоже. Коллекции сохранят ссылки на ролики, " +
+                                    "у которых источник известен. Это нельзя отменить.", "Удалить", danger = true) {
                                 chosen.forEach { vm.deleteMedia(it.media) }
                                 selected = emptySet()
                             }
-                        }, size = 40.dp, iconSize = 20.dp, tint = Nox.Danger)
+                        }, tint = Nox.Danger)
+                    }
+                }
+                SectionGap()
+            }
+        }
+        item("list") {
+            Section(null, contentPadding = PaddingValues(10.dp)) {
+                when {
+                    all.isEmpty() -> EmptyBlock(Icons.Rounded.VideoLibrary, "Медиатека пуста",
+                        "Скачайте видео во вкладке «Загрузки» или импортируйте файлы с устройства.",
+                        action = "Импортировать видео", onAction = actions.pickImport)
+                    list.isEmpty() -> EmptyBlock(Icons.Rounded.Search, "Ничего не найдено", "Попробуйте другой запрос или сбросьте фильтры.",
+                        action = "Сбросить", onAction = { vm.query.value = ""; vm.filter.value = LibraryFilter() })
+                    else -> {
+                        Text("Удерживайте видео, чтобы выбрать несколько.", color = LavenderText, fontSize = 12.5.sp,
+                            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp))
+                        for (item in list) {
+                            val isSel = item.id in selected
+                            Tile(Modifier.fillMaxWidth().padding(bottom = 6.dp), selected = isSel,
+                                onClick = { if (selecting) selected = if (isSel) selected - item.id else selected + item.id
+                                else actions.openMedia(item, false) },
+                                onLongClick = { selected = if (isSel) selected - item.id else selected + item.id }) {
+                                Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Box {
+                                        Cover(item.media.coverPath, Modifier.width(112.dp).aspectRatio(16f / 9f), RoundedCornerShape(8.dp))
+                                        DurationBadge(item.durationLabel, Modifier.align(Alignment.BottomEnd).padding(3.dp))
+                                    }
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(item.media.title, color = Nox.TextPrimary, fontSize = 14.sp, maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis)
+                                        Text(listOfNotNull(if (item.media.isAudio) "Только звук" else null, item.meta.ifBlank { null })
+                                            .joinToString(" · "), color = LavenderText, fontSize = 12.sp, maxLines = 1)
+                                        val p = item.playback
+                                        if (p != null && p.durationMs > 0 && (p.inProgress || p.completed)) {
+                                            ProgressLine(if (p.completed) 1f else p.positionMs.toFloat() / p.durationMs,
+                                                Modifier.padding(top = 5.dp), height = 4.dp)
+                                        }
+                                    }
+                                    Icon(Icons.Rounded.MoreVert, "Действия", tint = Color(0xFFD5D9FF),
+                                        modifier = Modifier.size(34.dp).clip(RoundedCornerShape(17.dp))
+                                            .clickable { actions.mediaMenu(item) }.padding(6.dp))
+                                }
+                            }
+                        }
                     }
                 }
             }
-        } else if (all.isNotEmpty()) {
-            item("hint") { Muted("Удерживайте карточку, чтобы выбрать несколько видео.", size = 13.sp, modifier = Modifier.padding(horizontal = 22.dp)) }
-        }
-        if (all.isEmpty()) {
-            item("empty") {
-                GlassCard(Modifier.padding(horizontal = 20.dp)) {
-                    Muted("Медиатека пуста. Скачайте видео или импортируйте своё кнопкой вверху.", size = 15.sp, color = Nox.TextSecondary)
-                }
-            }
-        } else if (list.isEmpty()) {
-            item("none") {
-                GlassCard(Modifier.padding(horizontal = 20.dp)) {
-                    Muted("Ничего не найдено.", size = 15.sp, color = Nox.TextSecondary)
-                    VSpace(10)
-                    GlassPill("Сбросить поиск и фильтры", onClick = { vm.query.value = ""; vm.filter.value = LibraryFilter() })
-                }
-            }
-        }
-        items(list, key = { it.id }) { item ->
-            val isSel = item.id in selected
-            PlayerRowCard(
-                item,
-                onPlay = { if (selecting) selected = if (isSel) selected - item.id else selected + item.id else actions.openMedia(item, false) },
-                onMenu = { actions.mediaMenu(item) },
-                selected = isSel,
-                onLongPress = { selected = if (isSel) selected - item.id else selected + item.id },
-                modifier = Modifier.padding(horizontal = 20.dp),
-            )
         }
     }
 }

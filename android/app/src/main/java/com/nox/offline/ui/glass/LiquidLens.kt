@@ -114,7 +114,8 @@ internal class LiquidLensPainter {
         path.reset(); path.addRoundRect(rr)
 
         // Мягкое свечение акцентом под линзой — снаружи обрезки.
-        val glowA = (0.10f + 0.10f * lift) * cfg.glow.coerceIn(0f, 1f)
+        // 0.4.0: выбранная вкладка светится янтарём, как на макетах.
+        val glowA = (0.24f + 0.12f * lift) * cfg.glow.coerceIn(0.35f, 1f)
         for (i in 1..3) {
             val g = (i * 2.4f).dp.toPx()
             drawRoundRect(palette.accent.copy(alpha = glowA / i), Offset(left - g, top - g), Size(lensW + 2 * g, lensH + 2 * g),
@@ -134,7 +135,7 @@ internal class LiquidLensPainter {
             // Тонкое тёмное стекло с акцентом темы: содержимое видно, текст на нём — нет.
             drawRect(palette.glassTint.copy(alpha = 0.26f), Offset(left, top), Size(lensW, lensH))
             drawRect(Brush.linearGradient(
-                listOf(palette.accent.copy(alpha = 0.26f), palette.accentDeep.copy(alpha = 0.20f)),
+                listOf(palette.accent.copy(alpha = 0.34f), palette.accentDeep.copy(alpha = 0.30f)),
                 start = Offset(left, top), end = Offset(left + lensW, top + lensH)), Offset(left, top), Size(lensW, lensH))
             // Объём: к краю темнее, в середине светлее.
             drawRect(Brush.radialGradient(
@@ -154,14 +155,14 @@ internal class LiquidLensPainter {
 
         // Световая кромка: ведущий по движению край ярче.
         val lead = abs(s)
-        val la = 0.55f + (if (s < 0) 0.35f * lead else 0f)
-        val ra = 0.55f + (if (s > 0) 0.35f * lead else 0f)
+        val la = 0.80f + (if (s < 0) 0.2f * lead else 0f)
+        val ra = 0.80f + (if (s > 0) 0.2f * lead else 0f)
         drawRoundRect(Brush.horizontalGradient(
-            0f to palette.edge.copy(alpha = la.coerceAtMost(1f)),
-            0.5f to Color.White.copy(alpha = 0.16f),
+            0f to palette.accentLight.copy(alpha = la.coerceAtMost(1f)),
+            0.5f to palette.accent.copy(alpha = 0.70f),
             1f to palette.accentLight.copy(alpha = ra.coerceAtMost(1f)),
             startX = left, endX = left + lensW),
-            Offset(left, top), Size(lensW, lensH), CornerRadius(radius, radius), style = Stroke(width = 1.2.dp.toPx()))
+            Offset(left, top), Size(lensW, lensH), CornerRadius(radius, radius), style = Stroke(width = 1.6.dp.toPx()))
         // Очень слабая цветная кайма — только в движении.
         if (lead > 0.05f && !cfg.reduceMotion) {
             val o = 0.9.dp.toPx() * lead

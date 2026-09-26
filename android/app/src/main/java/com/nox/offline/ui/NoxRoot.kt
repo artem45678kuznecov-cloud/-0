@@ -1,5 +1,22 @@
 package com.nox.offline.ui
 
+import androidx.compose.material.icons.rounded.PlayCircleOutline
+import androidx.compose.material.icons.rounded.VerticalAlignTop
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nox.offline.ui.downloads.CleanupScreen
+import com.nox.offline.ui.downloads.DownloaderScreen
+import com.nox.offline.ui.downloads.PlaylistScreen
+import com.nox.offline.ui.downloads.QueueScreen
+import com.nox.offline.ui.home.CollectionScreen
+import com.nox.offline.ui.home.CollectionsListScreen
+import com.nox.offline.ui.library.LibraryViewModel
+import com.nox.offline.ui.settings.AboutPage
+import com.nox.offline.ui.settings.BackupPage
+import com.nox.offline.ui.settings.DownloadSettingsPage
+import com.nox.offline.ui.settings.LicensesPage
+import com.nox.offline.ui.settings.PrivacyPage
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
@@ -33,7 +50,6 @@ import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.SaveAlt
 import androidx.compose.material.icons.rounded.Settings
@@ -65,7 +81,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nox.offline.core.AppEvents
 import com.nox.offline.data.db.DownloadEntity
-import com.nox.offline.player.PlayerActivity
 import com.nox.offline.ui.components.GlassIconButton
 import com.nox.offline.ui.components.GlassPill
 import com.nox.offline.ui.components.HSpace
@@ -77,7 +92,6 @@ import com.nox.offline.ui.components.SheetAction
 import com.nox.offline.ui.components.SheetController
 import com.nox.offline.ui.components.SheetHost
 import com.nox.offline.ui.downloads.BatchAddSheet
-import com.nox.offline.ui.downloads.DownloadsScreen
 import com.nox.offline.ui.glass.BarItem
 import com.nox.offline.ui.glass.GlassBottomBar
 import com.nox.offline.ui.glass.GlassStyles
@@ -92,7 +106,6 @@ import com.nox.offline.ui.library.LibraryScreen
 import com.nox.offline.ui.player.PlayerTabScreen
 import com.nox.offline.ui.components.RenameSheet
 import com.nox.offline.ui.settings.AppearanceScreen
-import com.nox.offline.ui.settings.DownloadSettingsContent
 import com.nox.offline.ui.settings.SettingsScreen
 import com.nox.offline.ui.settings.UpdateBanner
 import com.nox.offline.ui.theme.LocalGlassConfig
@@ -102,14 +115,16 @@ import com.nox.offline.updates.UpdateState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-enum class Tab { HOME, DOWNLOADS, PLAYER, SETTINGS }
-enum class Route { LIBRARY, APPEARANCE }
-
 /** Внешние запросы к корню: вкладка из уведомления, ссылки из «Поделиться». */
 class RootRequests {
     var tab by mutableStateOf<Tab?>(null)
     var sharedText by mutableStateOf<String?>(null)
 }
+
+/** Системные окна выбора (изображение, файл субтитров) для экранов глубже корня. */
+class Pickers(val pickImage: ((Uri) -> Unit) -> Unit, val pickSubtitle: ((Uri) -> Unit) -> Unit)
+
+val LocalPickers = staticCompositionLocalOf<Pickers> { error("Pickers не предоставлены") }
 
 @Composable
 fun NoxRoot(
@@ -121,11 +136,8 @@ fun NoxRoot(
     NoxTheme(appearance) {
         val sheets = remember { SheetController() }
         val frame by vm.wallpaperFrame.collectAsState()
-        val cfg = LocalGlassConfig.current
         CompositionLocalProvider(LocalWallpaperFrame provides frame, LocalSheets provides sheets) {
-            // Слой с содержимым экрана. «Живое» стекло карточек и листов берёт его
-            // только в полном режиме; линза нижней панели — всегда (API 29+),
-            // чтобы и в экономичном режиме показывать настоящее содержимое под собой.
+            // Слой с содержимым экрана: его размывает «живое» стекло листов и линза панели (API 29+).
             val layer: GraphicsLayer? = if (Build.VERSION.SDK_INT >= 29) rememberGraphicsLayer() else null
             RootContent(vm, requests, sheets, layer, onRequestNotifications)
         }
@@ -143,15 +155,23 @@ private fun RootContent(
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
-    var route by rememberSaveable { mutableStateOf<Route?>(null) }
+    val lib: LibraryViewModel = viewModel()
+    val nav = vm.nav
     val reduce = LocalGlassConfig.current.reduceMotion
     val frame = LocalWallpaperFrame.current
 
     // ---------- системные окна выбора ----------
     var pendingExport by remember { mutableStateOf<List<LibraryItem>>(emptyList()) }
     var pendingBackup by remember { mutableStateOf(false to false) }
+    var imageCallback by remember { mutableStateOf<((Uri) -> Unit)?>(null) }
+    var subtitleCallback by remember { mutableStateOf<((Uri) -> Unit)?>(null) }
     val pickWallpaper = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let(vm::importWallpaper) }
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        uri?.let { u -> imageCallback?.invoke(u) }; imageCallback = null
+    }
+    val pickSubtitle = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { u -> subtitleCallback?.invoke(u) }; subtitleCallback = null
+    }
     val pickImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) vm.importVideos(uris)
     }
@@ -164,34 +184,47 @@ private fun RootContent(
         uri?.let { vm.backupExport(it, pendingBackup.first, pendingBackup.second) }
     }
     val pickBackupIn = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let(vm::backupImport) }
+    val pickAutoBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let(vm::setAutoBackupFolder) }
 
     fun launchSafely(block: () -> Unit) {
         try { block() } catch (e: ActivityNotFoundException) { AppEvents.notice("На устройстве нет подходящего системного окна") }
     }
 
+    val pickers = remember {
+        Pickers(
+            pickImage = { cb -> imageCallback = cb; launchSafely { pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) } },
+            pickSubtitle = { cb ->
+                subtitleCallback = cb
+                // Многие файловые менеджеры отдают .srt как text/plain или application/octet-stream.
+                launchSafely { pickSubtitle.launch(arrayOf("application/x-subrip", "text/vtt", "text/plain", "application/octet-stream")) }
+            },
+        )
+    }
+
     lateinit var actions: NoxActions
     actions = NoxActions(
-        openMedia = { item, fromStart -> openInPlayer(context, item.media.id, fromStart); tab = Tab.PLAYER },
+        openMedia = { item, fromStart -> openInPlayer(context, item.media.id, fromStart); nav.select(Tab.PLAYER) },
         mediaMenu = { item -> mediaMenu(item, vm, sheets, actions, context::startActivity) },
-        openLibrary = { route = Route.LIBRARY },
-        openDownloads = { route = null; tab = Tab.DOWNLOADS },
+        openLibrary = { nav.open(Page.AllVideos, Tab.HOME) },
+        openDownloads = { nav.root(Tab.DOWNLOADS) },
         openFilter = { sheets.show("Фильтр и сортировка") { close -> FilterSheet(vm, close) } },
-        downloadMenu = { d -> downloadMenu(d, vm, sheets, context::startActivity) },
+        downloadMenu = { d -> downloadMenu(d, vm, sheets, nav, context::startActivity) },
         confirmCancel = { d ->
             sheets.confirm("Удалить загрузку?",
                 "«${d.displayTitle.ifBlank { "Без названия" }}» будет остановлена, скачанная часть удалена. Другие загрузки продолжатся.",
                 "Удалить", danger = true) { vm.cancel(d.id) }
         },
         openBatch = { initial -> sheets.show("Несколько ссылок") { close -> BatchAddSheet(vm, initial, close) } },
-        openDownloadSettings = { sheets.show("Настройки загрузок") { _ -> DownloadSettingsContent(vm, actions) } },
-        openAppearance = { route = Route.APPEARANCE },
-        openStorage = { route = null; tab = Tab.SETTINGS },
-        pickImport = { launchSafely { pickImport.launch(arrayOf("video/*")) } },
+        openDownloadSettings = { nav.open(Page.DownloadSettings, Tab.SETTINGS) },
+        openAppearance = { nav.open(Page.Appearance, Tab.SETTINGS) },
+        openStorage = { nav.open(Page.Cleanup, Tab.DOWNLOADS) },
+        pickImport = { launchSafely { pickImport.launch(arrayOf("video/*", "audio/*")) } },
         pickExportFor = { list -> pendingExport = list; launchSafely { pickExport.launch(null) } },
         pickDestination = { launchSafely { pickDestination.launch(null) } },
         pickWallpaper = { launchSafely { pickWallpaper.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) } },
         pickBackupExport = { m, p -> pendingBackup = m to p; launchSafely { pickBackupOut.launch(null) } },
         pickBackupImport = { launchSafely { pickBackupIn.launch(null) } },
+        pickAutoBackupFolder = { launchSafely { pickAutoBackup.launch(null) } },
         requestNotifications = onRequestNotifications,
         openInstallPermission = { launchSafely { context.startActivity(vm.installPermissionIntent()) } },
         copyDiagnostics = {
@@ -200,72 +233,102 @@ private fun RootContent(
                 AppEvents.notice("Диагностика скопирована")
             }
         },
-        back = { route = null },
+        back = { nav.back() },
     )
 
     // ---------- внешние запросы ----------
-    LaunchedEffect(requests.tab) { requests.tab?.let { tab = it; route = null; requests.tab = null } }
+    LaunchedEffect(requests.tab) { requests.tab?.let { nav.select(it); requests.tab = null } }
     LaunchedEffect(requests.sharedText) {
         val t = requests.sharedText ?: return@LaunchedEffect
         requests.sharedText = null
-        route = null; tab = Tab.DOWNLOADS
         // Одна ссылка — сразу та же карточка, что и после «Найти видео».
-        if (com.nox.offline.core.LinkParser.links(t).size > 1) actions.openBatch(t) else vm.openShared(com.nox.offline.core.SafeUrl.extract(t) ?: t)
+        if (com.nox.offline.core.LinkParser.links(t).size > 1) { nav.root(Tab.DOWNLOADS); actions.openBatch(t) }
+        else {
+            nav.open(Page.Downloader, Tab.DOWNLOADS)
+            vm.openShared(com.nox.offline.core.SafeUrl.extract(t) ?: t)
+        }
     }
     val pendingBatch by vm.pendingBatch.collectAsState()
     LaunchedEffect(pendingBatch) {
         pendingBatch?.let { vm.pendingBatch.value = null; actions.openBatch(it) }
     }
 
-    BackHandler(enabled = route != null && !sheets.isOpen) { route = null }
-    BackHandler(enabled = route == null && tab != Tab.HOME && !sheets.isOpen) { tab = Tab.HOME }
+    BackHandler(enabled = nav.canGoBack && !sheets.isOpen) { nav.back() }
 
-    val barHeight = 72.dp
+    val barHeight = 62.dp
     val insetsTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val insetsBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-    val contentPadding = PaddingValues(top = insetsTop + 10.dp, bottom = insetsBottom + barHeight + 36.dp)
+    // Последний блок прокручивается целиком над панелью.
+    val contentPadding = PaddingValues(top = insetsTop + 4.dp, bottom = insetsBottom + barHeight + 28.dp)
 
-    Box(Modifier.fillMaxSize().onSizeChanged { vm.onWindowSize(it.width, it.height) }) {
-        // Всё, что под панелью, записывается в слой — его размывает «живое» стекло.
-        Box(Modifier.fillMaxSize().backdropSource(layer)) {
-            WallpaperLayer(frame)
-            Crossfade(targetState = route to tab, animationSpec = if (reduce) snap() else tween(180), label = "screen") { (r, t) ->
-                when (r) {
-                    Route.LIBRARY -> LibraryScreen(vm, actions, contentPadding)
-                    Route.APPEARANCE -> AppearanceScreen(vm, actions, contentPadding)
-                    null -> when (t) {
-                        Tab.HOME -> HomeScreen(vm, actions, contentPadding)
-                        Tab.DOWNLOADS -> DownloadsScreen(vm, actions, contentPadding)
-                        Tab.PLAYER -> PlayerTabScreen(vm, actions, contentPadding)
-                        Tab.SETTINGS -> SettingsScreen(vm, actions, contentPadding)
-                    }
+    CompositionLocalProvider(LocalPickers provides pickers) {
+        Box(Modifier.fillMaxSize().onSizeChanged { vm.onWindowSize(it.width, it.height) }) {
+            // Всё, что под панелью, записывается в слой — его размывает «живое» стекло.
+            Box(Modifier.fillMaxSize().backdropSource(layer)) {
+                WallpaperLayer(frame)
+                val page = nav.current
+                Crossfade(targetState = nav.tab to page, animationSpec = if (reduce) snap() else tween(180), label = "screen") { (_, p) ->
+                    Screen(p, vm, lib, nav, actions, contentPadding, sheets, context)
                 }
             }
-        }
-        CompositionLocalProvider(LocalContentBackdrop provides layer) {
-            val update by vm.updateState.collectAsState()
-            UpdateBanner(update, vm, onOpenSettings = { route = null; tab = Tab.SETTINGS }, modifier = Modifier.align(Alignment.TopCenter))
+            CompositionLocalProvider(LocalContentBackdrop provides layer) {
+                val update by vm.updateState.collectAsState()
+                UpdateBanner(update, vm, onOpenSettings = { nav.root(Tab.SETTINGS) }, modifier = Modifier.align(Alignment.TopCenter))
 
-            // Мягкое затемнение под системной навигацией и плавающей панелью:
-            // прокручиваемый текст не просвечивает под кнопками системы.
-                        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(insetsBottom + 56.dp)
-                .background(Brush.verticalGradient(0f to Color.Transparent, 0.45f to nox().bgDeep.copy(alpha = 0.72f), 1f to nox().bgDeep.copy(alpha = 0.94f))))
-            Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                FileTaskBanner(vm)
-                NoticeToast()
-                GlassBottomBar(
-                    items = listOf(
-                        BarItem("Главная", Icons.Rounded.Home),
-                        BarItem("Загрузки", Icons.Rounded.Download),
-                        BarItem("Плеер", Icons.Rounded.PlayCircle),
-                        BarItem("Настройки", Icons.Rounded.Settings),
-                    ),
-                    selected = tab.ordinal,
-                    onSelect = { i -> route = null; tab = Tab.entries[i] },
-                )
+                // Мягкое затемнение под системной навигацией и панелью: текст не просвечивает под кнопками.
+                Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(insetsBottom + 48.dp)
+                    .background(Brush.verticalGradient(0f to Color.Transparent, 0.5f to nox().bgDeep.copy(alpha = 0.66f),
+                        1f to nox().bgDeep.copy(alpha = 0.92f))))
+                Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding()
+                    .padding(start = 10.dp, end = 10.dp, bottom = 8.dp)) {
+                    FileTaskBanner(vm)
+                    NoticeToast()
+                    GlassBottomBar(
+                        items = listOf(
+                            BarItem("Главная", Icons.Rounded.Home),
+                            BarItem("Загрузки", Icons.Rounded.Download),
+                            BarItem("Плеер", Icons.Rounded.PlayCircleOutline),
+                            BarItem("Настройки", Icons.Rounded.Settings),
+                        ),
+                        selected = nav.tab.ordinal,
+                        onSelect = { i -> nav.select(Tab.entries[i]) },
+                        height = barHeight,
+                    )
+                }
+                SheetHost(sheets)
             }
-            SheetHost(sheets)
         }
+    }
+}
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun Screen(page: Page, vm: MainViewModel, lib: LibraryViewModel, nav: Nav, actions: NoxActions, padding: PaddingValues,
+                   sheets: SheetController, context: android.content.Context) {
+    when (page) {
+        Page.Home -> HomeScreen(lib, nav, padding, onPlayMedia = { id -> openInPlayer(context, id, false); nav.select(Tab.PLAYER) })
+        is Page.Collection -> CollectionScreen(page.id, lib, vm, nav, padding)
+        is Page.Collections -> CollectionsListScreen(page.kind, lib, nav, padding)
+        Page.AllVideos -> LibraryScreen(vm, actions, padding)
+        Page.Queue -> QueueScreen(vm, nav, padding, onDownloadMenu = actions.downloadMenu, onConfirmCancel = actions.confirmCancel,
+            onOpenCompleted = { d ->
+                vm.viewModelScope.launch {
+                    val m = vm.mediaFor(d)
+                    if (m == null) AppEvents.notice("Видео этой загрузки нет в медиатеке — его удалили или перенесли")
+                    else { openInPlayer(context, m.id, false); nav.select(Tab.PLAYER) }
+                }
+            })
+        Page.Downloader -> DownloaderScreen(vm, nav, padding, onBatch = actions.openBatch)
+        is Page.Playlist -> PlaylistScreen(page.url, vm, nav, padding)
+        Page.Cleanup -> CleanupScreen(vm, nav, padding)
+        Page.Player -> PlayerTabScreen(vm, lib, nav, padding)
+        Page.Settings -> SettingsScreen(vm, actions, nav, padding)
+        Page.Appearance -> AppearanceScreen(vm, actions, padding)
+        Page.DownloadSettings -> DownloadSettingsPage(vm, actions, nav, padding)
+        Page.Backup -> BackupPage(vm, actions, nav, padding)
+        Page.About, Page.Diagnostics -> AboutPage(vm, actions, nav, padding)
+        Page.Licenses -> LicensesPage(nav, padding)
+        Page.Privacy -> PrivacyPage(nav, padding)
     }
 }
 
@@ -338,21 +401,31 @@ private fun mediaMenu(item: LibraryItem, vm: MainViewModel, sheets: SheetControl
     ))
 }
 
-private fun downloadMenu(d: DownloadEntity, vm: MainViewModel, sheets: SheetController, start: (Intent) -> Unit) {
-    val rechoose = d.status == com.nox.offline.data.db.DownloadStatus.ERROR &&
+private fun downloadMenu(d: DownloadEntity, vm: MainViewModel, sheets: SheetController, nav: Nav, start: (Intent) -> Unit) {
+    val st = d.status
+    val rechoose = st == com.nox.offline.data.db.DownloadStatus.ERROR &&
         d.errorKind in setOf("format-gone", "format-changed", "size-mismatch")
+    val waiting = st == com.nox.offline.data.db.DownloadStatus.QUEUED || st == com.nox.offline.data.db.DownloadStatus.PAUSED ||
+        st == com.nox.offline.data.db.DownloadStatus.ERROR
     sheets.actions(d.displayTitle.ifBlank { "Загрузка" }, com.nox.offline.ui.components.statusLabel(d), listOfNotNull(
+        if (waiting) SheetAction("Скачать следующим", Icons.Rounded.VerticalAlignTop, hint = "То же задание, скачанные части сохраняются") {
+            vm.playNext(listOf(d.id))
+        } else null,
         if (rechoose) SheetAction("Выбрать качество заново", Icons.Rounded.Edit,
-            hint = "Прежний вариант недоступен; части будут удалены после нового выбора") { vm.rechoose(d) } else null,
-        SheetAction("Переименовать", Icons.Rounded.Edit, hint = "Файл получит имя при завершении") {
+            hint = "Прежний вариант недоступен; части будут удалены после нового выбора") { vm.rechoose(d); nav.open(Page.Downloader, Tab.DOWNLOADS) } else null,
+        if (st == com.nox.offline.data.db.DownloadStatus.COMPLETED && d.subtitleError.isNotBlank())
+            SheetAction("Повторить субтитры", Icons.Rounded.Replay, hint = d.subtitleError.take(80)) { vm.retrySubtitles(d.id) } else null,
+        if (st != com.nox.offline.data.db.DownloadStatus.COMPLETED) SheetAction("Переименовать", Icons.Rounded.Edit, hint = "Файл получит имя при завершении") {
             sheets.show("Название загрузки") { close ->
                 RenameSheet(d.displayTitle, allowFile = false) { title, _ -> vm.renameDownload(d.id, title); close() }
             }
-        },
+        } else null,
         SheetAction("Источник", Icons.Rounded.Language, hint = com.nox.offline.core.SafeUrl.host(d.pageUrl)) {
             try { start(Intent(Intent.ACTION_VIEW, Uri.parse(d.pageUrl)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) { }
         },
-        SheetAction("Удалить", Icons.Rounded.Delete, danger = true, hint = "Скачанная часть будет удалена") {
+        if (st == com.nox.offline.data.db.DownloadStatus.COMPLETED) SheetAction("Убрать из списка", Icons.Rounded.Close, hint = "Видео останется в медиатеке") {
+            vm.removeMany(listOf(d.id))
+        } else SheetAction("Удалить", Icons.Rounded.Delete, danger = true, hint = "Скачанная часть будет удалена") {
             sheets.confirm("Удалить загрузку?", "Скачанная часть «${d.displayTitle}» будет удалена.", "Удалить", danger = true) { vm.cancel(d.id) }
         },
     ))

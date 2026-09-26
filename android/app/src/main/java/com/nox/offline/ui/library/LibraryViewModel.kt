@@ -71,9 +71,14 @@ data class HomeData(
     val pinned: List<CollectionCard>,
     val albums: List<CollectionCard>,
     val totalMedia: Int,
+    /** Последние видео медиатеки (по просмотру, иначе по дате) — видны и тем, у кого ещё нет коллекций. */
+    val recent: List<RecentVideo> = emptyList(),
     /** Видео, подходящие под поиск (если поиск задан). */
     val matchedMedia: List<MediaEntity>,
 )
+
+/** Видео для ряда «Все видео» на главной: доля просмотра 0..1. */
+data class RecentVideo(val media: MediaEntity, val fraction: Float, val watched: Boolean)
 
 /** Экран коллекции / сериала. */
 data class CollectionDetail(
@@ -182,6 +187,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             pinned = visible.filter { it.pinned && it.type != CollectionType.CATEGORY && it.type !in CollectionType.system }.map(::card),
             albums = visible.filter { !it.pinned && (it.type == CollectionType.ALBUM || it.type == CollectionType.SERIES) }.map(::card),
             totalMedia = med.size,
+            recent = med.sortedByDescending { pbMap[it.id]?.updatedAt ?: it.createdAt }.take(10).map { m ->
+                val p = pbMap[m.id]
+                RecentVideo(m, when {
+                    p == null || p.durationMs <= 0 -> 0f
+                    p.completed -> 1f
+                    else -> (p.positionMs.toFloat() / p.durationMs).coerceIn(0f, 1f)
+                }, p?.completed == true)
+            },
             matchedMedia = if (needle.isBlank()) emptyList() else med.filter { it.title.lowercase().contains(needle) }.take(30),
         )
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)

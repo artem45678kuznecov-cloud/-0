@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CollectionsBookmark
 import androidx.compose.material.icons.rounded.FavoriteBorder
@@ -64,6 +65,7 @@ import com.nox.offline.ui.kit.Chip
 import com.nox.offline.ui.kit.EmptyBlock
 import com.nox.offline.ui.kit.KitField
 import com.nox.offline.ui.kit.LavenderText
+import com.nox.offline.ui.kit.ProgressLine
 import com.nox.offline.ui.kit.ScreenHeading
 import com.nox.offline.ui.kit.Section
 import com.nox.offline.ui.kit.SectionGap
@@ -71,6 +73,7 @@ import com.nox.offline.ui.kit.Tile
 import com.nox.offline.ui.library.CollectionCard
 import com.nox.offline.ui.library.LibraryViewModel
 import com.nox.offline.ui.theme.Nox
+import com.nox.offline.ui.theme.nox
 import kotlinx.coroutines.launch
 
 /**
@@ -137,6 +140,21 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
             }
         }
 
+        // ---------- все видео ----------
+        // Видео медиатеки видны на главной всегда, даже без единой коллекции (например, сразу после
+        // обновления с 0.3.0). Без коллекций этот ряд стоит первым, иначе — после рекомендуемой.
+        val videosRow: () -> Unit = {
+            if (d.totalMedia > 0 && query.isBlank()) item(key = "all-videos") {
+                Section("Все видео", trailing = "${d.totalMedia}", onTrailing = { nav.open(Page.AllVideos) }) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(d.recent, key = { it.media.id }) { v -> RecentTile(v) { onPlayMedia(v.media.id) } }
+                    }
+                }
+                SectionGap()
+            }
+        }
+        if (d.featured == null) videosRow()
+
         // ---------- рекомендуемая ----------
         item {
             Section("Рекомендуемая коллекция", trailing = "Смотреть все", onTrailing = { nav.open(Page.Collections("all")) }) {
@@ -155,6 +173,8 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
             }
             SectionGap()
         }
+
+        if (d.featured != null) videosRow()
 
         // ---------- категории ----------
         item {
@@ -248,6 +268,23 @@ private fun FeaturedCard(c: CollectionCard, reason: String, onOpen: () -> Unit) 
             Box(Modifier.fillMaxHeight().padding(end = 6.dp), contentAlignment = Alignment.Center) {
                 ActionCircle(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Открыть «${c.title}»", onOpen, size = 30.dp)
             }
+        }
+    }
+}
+
+/** Плитка ряда «Все видео»: обложка, название и доля просмотра. */
+@Composable
+private fun RecentTile(v: com.nox.offline.ui.library.RecentVideo, onOpen: () -> Unit) {
+    Tile(Modifier.width(104.dp), onClick = onOpen, radius = 10.dp) {
+        Column(Modifier.padding(4.dp)) {
+            Box {
+                Cover(v.media.coverPath, Modifier.fillMaxWidth().aspectRatio(16f / 10f), RoundedCornerShape(8.dp))
+                if (v.watched) Icon(Icons.Rounded.CheckCircle, "Просмотрено", tint = nox().accent,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(3.dp).size(16.dp))
+            }
+            Text(v.media.title, color = Nox.TextPrimary, fontSize = 10.5.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                lineHeight = 13.sp, modifier = Modifier.padding(top = 4.dp, start = 2.dp, end = 2.dp).height(26.dp))
+            ProgressLine(v.fraction, Modifier.padding(start = 2.dp, end = 2.dp, top = 3.dp, bottom = 2.dp), lavender = !v.watched, height = 3.dp)
         }
     }
 }

@@ -72,7 +72,7 @@ class WallpaperController(private val context: Context, private val settings: Ap
             val palette = NoxPalettes.of(a.preset, a.customHue)
             val started = System.currentTimeMillis()
             val r = try {
-                WallpaperRenderer.render(a, palette, w, h, customFile.takeIf { it.exists() })
+                WallpaperRenderer.render(a, palette, w, h, customFile.takeIf { it.exists() }, ::decodeFox)
             } catch (t: Throwable) {
                 NoxLog.event("wallpaper-error", "error" to "${t.javaClass.simpleName}: ${t.message?.take(80)}")
                 return@launch
@@ -82,6 +82,12 @@ class WallpaperController(private val context: Context, private val settings: Ap
                 "lum" to "%.2f".format(r.luminance), "extraDim" to "%.2f".format(r.extraDim))
         }
     }
+
+    /** Встроенные обои «Лиса NOX» из ресурсов, без масштабирования по плотности. */
+    private fun decodeFox(): android.graphics.Bitmap? = runCatching {
+        android.graphics.BitmapFactory.decodeResource(context.resources, com.nox.offline.R.drawable.wallpaper_fox,
+            android.graphics.BitmapFactory.Options().apply { inScaled = false })
+    }.getOrNull()
 
     private fun keyOf(a: Appearance, w: Int, h: Int): String =
         listOf(a.preset, a.customHue, a.wallpaper.key, a.focusX, a.focusY, a.zoom, a.dim, a.blur,

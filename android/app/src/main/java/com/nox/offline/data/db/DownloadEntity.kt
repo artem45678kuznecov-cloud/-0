@@ -99,6 +99,19 @@ data class DownloadEntity(
     @ColumnInfo(defaultValue = "''") val errorKind: String = "",
     /** Этап для диагностики: plan, video, audio, merge, verify. */
     @ColumnInfo(defaultValue = "''") val stage: String = "",
+
+    // ---- v4 (0.4.0) ----
+    /** Только звук: файл аудио, проверка готовности не требует видеодорожку. */
+    @ColumnInfo(defaultValue = "0") val audioOnly: Boolean = false,
+    /** Запрошенные субтитры: JSON [{"lang":"ru","origin":"source"}]. */
+    @ColumnInfo(defaultValue = "'[]'") val subtitleRequest: String = "[]",
+    /** Итог субтитров: '' — не запрашивались/готовы; иначе причина сбоя (видео от этого не страдает). */
+    @ColumnInfo(defaultValue = "''") val subtitleError: String = "",
+    /** Куда добавить готовое видео (0 — никуда) и на какое место (порядок источника). */
+    @ColumnInfo(defaultValue = "0") val collectionId: Long = 0,
+    @ColumnInfo(defaultValue = "0") val collectionPosition: Long = 0,
+    /** Порядок очереди: меньше — раньше. «Скачать следующим» ставит минимальный. */
+    @ColumnInfo(defaultValue = "0") val queueOrder: Long = 0,
 ) {
     val displayTitle: String get() = customTitle.ifBlank { title }
 
@@ -106,6 +119,9 @@ data class DownloadEntity(
         get() = if (totalBytes > 0) ((downloadedBytes.coerceIn(0, totalBytes) * 100) / totalBytes).toInt() else 0
 
     val isSplit: Boolean get() = mode == DownloadMode.SPLIT
+
+    /** «extractor:videoId» — для сопоставления с коллекциями и плейлистами. */
+    val sourceKey: String get() = if (videoId.isBlank()) "" else "${extractorKey.lowercase()}:$videoId"
 
     /** Задание с точным выбором формата (0.3.0+). */
     val isPlanned: Boolean get() = planVersion >= 1

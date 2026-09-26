@@ -104,6 +104,10 @@ data class VideoDetails(
     val durationSec: Long,
     val thumbnail: String,
     val webpageUrl: String,
+    /** 0.4.0: настоящие дорожки субтитров источника. */
+    val subtitles: List<SourceSubtitle> = emptyList(),
+    /** 0.4.0: главы, которые передал источник. */
+    val chapters: List<SourceChapter> = emptyList(),
 ) {
     val isYouTube: Boolean get() = extractor.startsWith("Youtube", ignoreCase = true)
 
@@ -126,6 +130,12 @@ data class VideoDetails(
             durationSec = o.optLong("duration"),
             thumbnail = o.optString("thumbnail"),
             webpageUrl = o.optString("webpage_url"),
+            subtitles = o.optJSONArray("subtitles")?.let { a ->
+                (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let(SourceSubtitle::parse) }
+            }.orEmpty(),
+            chapters = o.optJSONArray("chapters")?.let { a ->
+                (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let(SourceChapter::parse) }
+            }.orEmpty(),
         )
     }
 }
@@ -354,3 +364,105 @@ object CatalogJson {
         PlanResult.Failed(ResolveError("json", "Внутренняя ошибка разбора ответа.", e.message.orEmpty().take(200)))
     }
 }
+
+
+/** Дорожка субтитров у источника: авторская или автоматическая (распознанная речь). */
+data class SourceSubtitle(val key: String, val lang: String, val name: String, val auto: Boolean, val ext: String) {
+    /** «Русский», «English (автоматические)». */
+    val label: String
+        get() {
+            val base = name.ifBlank { CatalogBuilder.languageName(lang).ifBlank { key } }
+            return if (auto) "$base (автоматические)" else base
+        }
+
+    fun toJson(): JSONObject = JSONObject().put("key", key).put("lang", lang).put("name", name).put("auto", auto).put("ext", ext)
+
+    companion object {
+        fun parse(o: JSONObject): SourceSubtitle? {
+            val key = o.optString("key")
+            if (key.isBlank()) return null
+            return SourceSubtitle(key, o.optString("lang"), o.optString("name"), o.optBoolean("auto"), o.optString("ext", "vtt"))
+        }
+
+        fun listToJson(list: List<SourceSubtitle>): String = org.json.JSONArray().also { a -> list.forEach { a.put(it.toJson()) } }.toString()
+
+        fun listFromJson(json: String): List<SourceSubtitle> = runCatching {
+            val a = org.json.JSONArray(json)
+            (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let(::parse) }
+        }.getOrDefault(emptyList())
+    }
+}
+
+data class SourceChapter(val title: String, val startMs: Long, val endMs: Long) {
+    companion object {
+        fun parse(o: JSONObject): SourceChapter? {
+            val s = o.optLong("start_ms", -1)
+            val e = o.optLong("end_ms", -1)
+            if (s < 0 || e <= s) return null
+            return SourceChapter(o.optString("title"), s, e)
+        }
+    }
+}
+
+/**
+ * «Только звук»: отдельная звуковая дорожка источника как есть — Opus в
+ * WebM или AAC в M4A. Без перекодирования и без переименования в MP3.
+ */
+data class AudioVariant(
+    val track: Track,
+    val sizeBytes: Long,
+    val sizeKind: SizeKind,
+    val support: Support,
+) {
+    val key: String get() = "audio:${track.id}"
+    val bitrateKbps: Int get() = track.abr.let { if (it > 0) it.toInt() else track.tbr.toInt() }
+    val codecLabel: String get() = CodecNames.audio(track.acodec, track.acodecRaw)
+    val outputExt: String get() = when {
+        track.container == "webm" || track.ext == "webm" -> "webm"
+        track.ext.isNotBlank() -> track.ext
+        else -> "m4a"
+    }
+    val formatLabel: String get() = "$codecLabel · ${outputExt.uppercase()}"
+    val title: String get() = listOfNotNull(
+        if (bitrateKbps > 0) "$bitrateKbps кбит/с" else null,
+        codecLabel,
+    ).joinToString(" · ")
+}
+
+/** Одна запись плейлиста в порядке источника. */
+data class PlaylistEntry(
+    val index: Int,
+    val videoId: String,
+    val extractor: String,
+    val url: String,
+    val title: String,
+    val uploader: String,
+    val durationSec: Long,
+    val thumbnail: String,
+    /** '' — доступно; иначе причина (закрыто, удалено…). */
+    val unavailable: String,
+) {
+    val sourceKey: String get() = if (videoId.isBlank()) "" else "${extractor.lowercase()}:$videoId"
+
+    companion object {
+        fun parse(o: JSONObject) = PlaylistEntry(
+            index = o.optInt("index"), videoId = o.optString("id"), extractor = o.optString("extractor"),
+            url = o.optString("url"), title = o.optString("title"), uploader = o.optString("uploader"),
+            durationSec = o.optLong("duration"), thumbnail = o.optString("thumbnail"), unavailable = o.optString("unavailable"),
+        )
+    }
+}
+
+/** Страница плейлиста. */
+data class PlaylistPage(
+    val id: String,
+    val title: String,
+    val uploader: String,
+    val webpageUrl: String,
+    val extractor: String,
+    /** Всего элементов по словам источника; 0 — неизвестно. */
+    val count: Int,
+    val start: Int,
+    val entries: List<PlaylistEntry>,
+    val hasMore: Boolean,
+)

@@ -9,19 +9,19 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface DownloadDao {
-    @Query("SELECT * FROM downloads ORDER BY createdAt ASC")
+    @Query("SELECT * FROM downloads ORDER BY queueOrder ASC, createdAt ASC")
     fun observeAll(): Flow<List<DownloadEntity>>
 
-    @Query("SELECT * FROM downloads WHERE status IN ('QUEUED','RESOLVING','DOWNLOADING','PAUSED','PROCESSING') ORDER BY createdAt ASC")
+    @Query("SELECT * FROM downloads WHERE status IN ('QUEUED','RESOLVING','DOWNLOADING','PAUSED','PROCESSING') ORDER BY queueOrder ASC, createdAt ASC")
     fun observeLive(): Flow<List<DownloadEntity>>
 
-    @Query("SELECT * FROM downloads ORDER BY createdAt ASC")
+    @Query("SELECT * FROM downloads ORDER BY queueOrder ASC, createdAt ASC")
     suspend fun getAll(): List<DownloadEntity>
 
     @Query("SELECT * FROM downloads WHERE id = :id")
     suspend fun get(id: Long): DownloadEntity?
 
-    @Query("SELECT * FROM downloads WHERE status = :status ORDER BY createdAt ASC")
+    @Query("SELECT * FROM downloads WHERE status = :status ORDER BY queueOrder ASC, createdAt ASC")
     suspend fun byStatus(status: DownloadStatus): List<DownloadEntity>
 
     @Query("SELECT COUNT(*) FROM downloads WHERE status IN ('QUEUED','RESOLVING','DOWNLOADING','PROCESSING')")
@@ -39,7 +39,7 @@ interface DownloadDao {
     @Query("SELECT pageUrl FROM downloads WHERE status != 'COMPLETED' AND status != 'ERROR'")
     suspend fun livePageUrls(): List<String>
 
-    @Query("SELECT * FROM downloads WHERE status IN ('QUEUED','RESOLVING','DOWNLOADING') ORDER BY createdAt ASC")
+    @Query("SELECT * FROM downloads WHERE status IN ('QUEUED','RESOLVING','DOWNLOADING') ORDER BY queueOrder ASC, createdAt ASC")
     suspend fun running(): List<DownloadEntity>
 
     @Query("SELECT COALESCE(SUM(totalBytes - downloadedBytes), 0) FROM downloads WHERE status IN ('QUEUED','RESOLVING','DOWNLOADING') AND totalBytes > 0")
@@ -59,4 +59,16 @@ interface DownloadDao {
 
     @Query("UPDATE downloads SET status = :status, error = :error, speedBps = 0, etaSec = -1, updatedAt = :now WHERE id = :id")
     suspend fun setStatus(id: Long, status: DownloadStatus, error: String, now: Long)
+
+    @Query("SELECT COALESCE(MIN(queueOrder), 0) FROM downloads WHERE status != 'COMPLETED'")
+    suspend fun minQueueOrder(): Long
+
+    @Query("SELECT COALESCE(MAX(queueOrder), 0) FROM downloads")
+    suspend fun maxQueueOrder(): Long
+
+    @Query("UPDATE downloads SET queueOrder = :order, updatedAt = :now WHERE id = :id")
+    suspend fun setQueueOrder(id: Long, order: Long, now: Long)
+
+    @Query("SELECT * FROM downloads WHERE videoId != '' AND videoId = :videoId AND status != 'COMPLETED'")
+    suspend fun liveByVideoId(videoId: String): List<DownloadEntity>
 }

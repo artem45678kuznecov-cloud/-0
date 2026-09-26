@@ -48,6 +48,7 @@ object WallpaperRenderer {
         width: Int,
         height: Int,
         customImage: File?,
+        foxImage: () -> Bitmap? = { null },
     ): Result {
         val w = width.coerceIn(64, 2160)
         val h = height.coerceIn(64, 3840)
@@ -59,6 +60,9 @@ object WallpaperRenderer {
 
         if (kind == WallpaperKind.CUSTOM) {
             drawCustom(canvas, w, h, customImage!!, appearance, palette)
+        } else if (kind == WallpaperKind.FOX) {
+            val fox = foxImage()
+            if (fox != null) drawFox(canvas, w, h, fox) else drawBuiltIn(canvas, w, h, WallpaperKind.DEFAULT, palette)
         } else {
             drawBuiltIn(canvas, w, h, kind, palette)
         }
@@ -167,6 +171,21 @@ object WallpaperRenderer {
             paint.color = color.copy(alpha = a).toArgb()
             c.drawCircle(rnd.nextFloat() * w, rnd.nextFloat() * h, 0.6f + rnd.nextFloat() * 1.4f, paint)
         }
+    }
+
+    /**
+     * «Лиса NOX»: картинка прижата к верху и заполняет ширину; на высоких
+     * экранах обрезается снизу, на широких — по бокам. Не тонируется темой:
+     * это самостоятельная картина из утверждённых макетов.
+     */
+    private fun drawFox(c: Canvas, w: Int, h: Int, src: Bitmap) {
+        c.drawColor(android.graphics.Color.rgb(3, 4, 12))
+        val scale = max(w.toFloat() / src.width, h.toFloat() / src.height)
+        val dw = src.width * scale
+        val left = -(dw - w) / 2f
+        val m = Matrix().apply { setScale(scale, scale); postTranslate(left, 0f) }
+        c.drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG))
+        src.recycle()
     }
 
     private fun drawCustom(c: Canvas, w: Int, h: Int, file: File, a: Appearance, p: NoxPalette) {

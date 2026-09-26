@@ -15,7 +15,11 @@ import androidx.room.RoomDatabase
  * стереть медиатеку, очередь и позиции просмотра пользователя.
  */
 @Database(
-    entities = [DownloadEntity::class, MediaEntity::class, PlaybackEntity::class],
+    entities = [
+        DownloadEntity::class, MediaEntity::class, PlaybackEntity::class,
+        CollectionEntity::class, CollectionItemEntity::class, SeasonEntity::class,
+        ChapterEntity::class, SegmentProgressEntity::class, BookmarkEntity::class, SubtitleEntity::class,
+    ],
     version = NoxDatabase.VERSION,
     exportSchema = true,
 )
@@ -23,9 +27,12 @@ abstract class NoxDatabase : RoomDatabase() {
     abstract fun downloads(): DownloadDao
     abstract fun media(): MediaDao
     abstract fun playback(): PlaybackDao
+    abstract fun collections(): CollectionDao
+    abstract fun chapters(): ChapterDao
+    abstract fun subtitles(): SubtitleDao
 
     companion object {
-        const val VERSION = 3
+        const val VERSION = 4
         const val NAME = "nox.db"
 
         fun build(context: Context): NoxDatabase =

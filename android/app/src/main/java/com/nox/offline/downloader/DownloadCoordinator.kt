@@ -70,7 +70,35 @@ class DownloadCoordinator(
     private val client: OkHttpClient,
     private val relocator: MediaRelocator? = null,
     private val splitDefault: () -> Boolean = { false },
+    private val policy: Policy = Policy(),
 ) {
+    /**
+     * 0.4.0: правила очереди из настроек. Меняются на лету: уменьшение
+     * числа одновременных загрузок не обрывает идущие (новые просто не
+     * стартуют), смена предела скорости действует со следующего куска.
+     */
+    class Policy(
+        val concurrency: () -> Int = { MAX_CONCURRENT },
+        val network: NetworkGate? = null,
+        val limiter: SpeedLimiter? = null,
+        /** Готовые видео уходят в другую папку (SAF) — там тоже нужно место. */
+        val externalTarget: () -> Boolean = { false },
+        /** Свободно в той папке, байт (-1 — неизвестно). */
+        val externalFree: () -> Long = { -1L },
+    )
+
+    /** Медиатека узнаёт о новом файле: коллекция из плейлиста, ожидающие серии. */
+    interface LibraryHook {
+        suspend fun onMediaAdded(mediaId: Long, e: DownloadEntity)
+    }
+
+    @Volatile
+    var libraryHook: LibraryHook? = null
+
+    /** Куда сохранять скачанные субтитры (null — субтитры не качаются). */
+    @Volatile
+    var subtitleStore: com.nox.offline.subtitles.SubtitleRepository? = null
+
     companion object {
         const val MAX_CONCURRENT = 3
         const val HTTP_RETRIES = 8
@@ -79,6 +107,8 @@ class DownloadCoordinator(
         const val SPEED_WINDOW_MS = 1500L
         const val COVER_LIMIT = 8L * 1024 * 1024
         const val STOP_UPDATE = "update"
+        /** Ждёт сети (нет связи или не Wi-Fi при «Только Wi-Fi»). Не пользовательская пауза. */
+        const val STOP_NETWORK = "network"
         const val SPACE_MARGIN = 64L * 1024 * 1024
         /** Ошибки, после которых повтор разбора бессмыслен. */
         val FINAL_KINDS = setOf("private", "age-restricted", "members-only", "unavailable", "unsupported",
@@ -94,6 +124,13 @@ class DownloadCoordinator(
     private val pauseRequested: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
     private val cancelRequested: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
     private val updateStopping: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
+    private val networkStopping: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
+
+    init {
+        policy.network?.onChanged = { state ->
+            if (state == NetworkGate.State.OK) pump() else stopForNetwork()
+        }
+    }
 
     /** Сколько передач идёт прямо сейчас. */
     private val _activeCount = MutableStateFlow(0)
@@ -167,7 +204,7 @@ class DownloadCoordinator(
         val now = System.currentTimeMillis()
         val id = downloadsDao.insert(
             DownloadEntity(pageUrl = url, quality = quality.key, createdAt = now, updatedAt = now,
-                allowSplit = allowSplit, customTitle = customTitle.trim())
+                allowSplit = allowSplit, customTitle = customTitle.trim(), queueOrder = nextQueueOrder(now))
         )
         NoxLog.event("job-added", "id" to id, "host" to SafeUrl.host(url), "quality" to quality.key, "split" to allowSplit)
         pump()
@@ -179,12 +216,96 @@ class DownloadCoordinator(
         val details: VideoDetails,
         val variant: Variant,
         val customTitle: String = "",
+        /** 0.4.0: субтитры, которые скачать вместе с видео. */
+        val subtitles: List<com.nox.offline.downloader.catalog.SourceSubtitle> = emptyList(),
+        /** 0.4.0: коллекция (из плейлиста) и место в ней по порядку источника. */
+        val collectionId: Long = 0,
+        val collectionPosition: Long = 0,
     )
 
     /** Сколько места нужно варианту: дорожки + собранный файл, с запасом. */
     fun requiredSpace(v: Variant): Long {
         if (v.sizeBytes <= 0) return SPACE_MARGIN
         return (if (v.needsMerge) v.sizeBytes * 2 else v.sizeBytes) + SPACE_MARGIN
+    }
+
+    /** Проверка места на пике (части + объединение + папка назначения + очередь). */
+    suspend fun checkSpace(sizeBytes: Long, approx: Boolean, needsMerge: Boolean): SpaceEstimate.Check {
+        val need = SpaceEstimate.need(sizeBytes, approx, needsMerge, 0, downloadsDao.remainingKnownBytes(), policy.externalTarget())
+        return SpaceEstimate.check(need, storage.space().freeBytes, policy.externalFree(), Format::bytes)
+    }
+
+    private suspend fun nextQueueOrder(now: Long): Long = maxOf(now, downloadsDao.maxQueueOrder() + 1)
+
+    /** Уже скачано или уже в очереди — для плейлистов и повторного добавления. */
+    suspend fun presence(extractor: String, videoId: String): String? {
+        if (videoId.isBlank()) return null
+        if (db.media().byVideoId(videoId).isNotEmpty()) return "уже в медиатеке"
+        if (downloadsDao.liveByVideoId(videoId).any { it.extractorKey.equals(extractor, true) || extractor.isBlank() }) return "уже в очереди"
+        return null
+    }
+
+    /** «Только звук»: отдельная звуковая дорожка источника без перекодирования. */
+    data class AudioRequest(
+        val details: VideoDetails,
+        val variant: com.nox.offline.downloader.catalog.AudioVariant,
+        val customTitle: String = "",
+        val collectionId: Long = 0,
+        val collectionPosition: Long = 0,
+    )
+
+    suspend fun enqueueAudio(request: AudioRequest): Result<Long> {
+        val d = request.details
+        val a = request.variant
+        val t = a.track
+        val url = d.pageUrl.trim()
+        if (!SafeUrl.looksLikeUrl(url)) return Result.failure(IllegalArgumentException("Это не похоже на ссылку"))
+        (a.support as? Support.No)?.let { return Result.failure(IllegalStateException(it.reason)) }
+        if (d.videoId.isNotBlank() && downloadsDao.countLiveVariant(d.extractor, d.videoId, a.key) > 0) {
+            return Result.failure(IllegalStateException("Этот звук уже в очереди"))
+        }
+        val space = checkSpace(a.sizeBytes, a.sizeKind != com.nox.offline.downloader.catalog.SizeKind.EXACT, false)
+        if (!space.ok) return Result.failure(IllegalStateException(space.message))
+        val now = System.currentTimeMillis()
+        val name = uniqueJobFileName(FileNames.targetName(request.customTitle.ifBlank { d.title }, d.videoId, a.outputExt))
+        val entity = DownloadEntity(
+            pageUrl = url, quality = "Звук · ${a.title}", title = d.title, videoId = d.videoId,
+            formatId = t.id, fileName = name, ext = a.outputExt, height = 0,
+            totalBytes = a.sizeBytes, thumbnailUrl = d.thumbnail, durationSec = d.durationSec,
+            createdAt = now, updatedAt = now, customTitle = request.customTitle.trim(),
+            mode = DownloadMode.PROGRESSIVE, videoTotalBytes = t.knownSize,
+            uploader = d.uploader, planVersion = 1, extractorKey = d.extractor, variantKey = a.key,
+            acodec = t.acodec, container = t.container.ifBlank { a.outputExt }, audioLang = t.language,
+            videoExact = t.filesizeExact && t.filesize > 0, videoChunk = t.chunkSize,
+            audioOnly = true, collectionId = request.collectionId, collectionPosition = request.collectionPosition,
+            queueOrder = nextQueueOrder(now),
+        )
+        val id = downloadsDao.insert(entity)
+        NoxLog.event("job-added", "id" to id, "host" to SafeUrl.host(url), "source" to d.extractor, "variant" to a.key,
+            "audioOnly" to true, "codec" to t.acodec, "size" to a.sizeBytes)
+        pump()
+        return Result.success(id)
+    }
+
+    /** «Скачать следующим»: то же задание (с его частями) поднимается в начало очереди. */
+    suspend fun playNext(id: Long) {
+        val e = downloadsDao.get(id) ?: return
+        if (e.status == DownloadStatus.COMPLETED || e.status.isActive) return
+        val top = downloadsDao.minQueueOrder() - 1
+        downloadsDao.setQueueOrder(id, top, System.currentTimeMillis())
+        NoxLog.event("job-next", "id" to id, "status" to e.status.name)
+        if (e.status == DownloadStatus.PAUSED || e.status == DownloadStatus.ERROR) resume(id) else pump()
+    }
+
+    suspend fun pauseMany(ids: Collection<Long>) { for (id in ids) pause(id) }
+    suspend fun resumeMany(ids: Collection<Long>) { for (id in ids) resume(id) }
+    suspend fun removeMany(ids: Collection<Long>) { for (id in ids) remove(id) }
+
+    /** Повторить все задания с ошибкой (части сохраняются). */
+    suspend fun retryErrors(): Int {
+        val list = downloadsDao.byStatus(DownloadStatus.ERROR)
+        for (e in list) resume(e.id)
+        return list.size
     }
 
     suspend fun enqueue(request: DownloadRequest): Result<Long> {
@@ -196,12 +317,8 @@ class DownloadCoordinator(
         if (d.videoId.isNotBlank() && downloadsDao.countLiveVariant(d.extractor, d.videoId, v.key) > 0) {
             return Result.failure(IllegalStateException("Этот вариант уже в очереди"))
         }
-        val need = requiredSpace(v)
-        val free = storage.space().freeBytes
-        if (free in 1 until need) {
-            return Result.failure(IllegalStateException(
-                "Недостаточно места: нужно ≈ ${Format.bytes(need)}, свободно ${Format.bytes(free)}"))
-        }
+        val space = checkSpace(v.sizeBytes, v.sizeKind != com.nox.offline.downloader.catalog.SizeKind.EXACT, v.needsMerge)
+        if (!space.ok) return Result.failure(IllegalStateException(space.message))
         val a = v.audio
         val now = System.currentTimeMillis()
         val name = uniqueJobFileName(FileNames.targetName(request.customTitle.ifBlank { d.title }, d.videoId, v.outputExt))
@@ -221,6 +338,9 @@ class DownloadCoordinator(
             videoExact = v.video.filesizeExact && v.video.filesize > 0,
             audioExact = a != null && a.filesizeExact && a.filesize > 0,
             videoChunk = v.video.chunkSize, audioChunk = a?.chunkSize ?: 0L,
+            subtitleRequest = com.nox.offline.downloader.catalog.SourceSubtitle.listToJson(request.subtitles),
+            collectionId = request.collectionId, collectionPosition = request.collectionPosition,
+            queueOrder = nextQueueOrder(now),
         )
         val id = downloadsDao.insert(entity)
         NoxLog.event("job-added", "id" to id, "host" to SafeUrl.host(url), "source" to d.extractor,
@@ -242,7 +362,10 @@ class DownloadCoordinator(
         downloadsDao.delete(old)
         listener?.onCleared(id)
         NoxLog.event("job-replanned", "id" to id, "variant" to request.variant.key)
-        return enqueue(request.copy(customTitle = request.customTitle.ifBlank { old.customTitle }))
+        return enqueue(request.copy(customTitle = request.customTitle.ifBlank { old.customTitle },
+            subtitles = request.subtitles.ifEmpty { com.nox.offline.downloader.catalog.SourceSubtitle.listFromJson(old.subtitleRequest) },
+            collectionId = if (request.collectionId > 0) request.collectionId else old.collectionId,
+            collectionPosition = if (request.collectionId > 0) request.collectionPosition else old.collectionPosition))
     }
 
     /** Имя итогового файла, не занятое ни файлом медиатеки, ни другим заданием. */
@@ -494,10 +617,12 @@ class DownloadCoordinator(
             if (!runnerAttached || _updateHold.value) return
             var started = 0
             val queued = downloadsDao.byStatus(DownloadStatus.QUEUED)
-            val toStart = QueuePolicy.pick(
+            val netOk = policy.network?.allowed() ?: true
+            val toStart = if (!netOk) emptyList() else QueuePolicy.pick(
                 queuedInOrder = queued.map { it.id },
                 active = active.keys.toSet(),
                 blocked = pauseRequested + cancelRequested,
+                max = policy.concurrency().coerceIn(1, MAX_CONCURRENT),
             )
             for (id in toStart) {
                 val job = scope.launch { runOne(id) }
@@ -516,7 +641,36 @@ class DownloadCoordinator(
             }
             if (started > 0) NoxLog.event("pump", "started" to started, "active" to active.size)
             if (active.isEmpty() && merging.isEmpty() && queued.isEmpty() && !hasWork()) onIdle?.invoke()
+            // Ждём сети: носитель не отпускаем — очередь стоит с причиной «network»,
+            // а вернувшаяся сеть сама позовёт pump(). UIDT-job к тому же объявляет
+            // системе нужный тип сети, и система сама перезапустит его при потере связи.
         }
+    }
+
+    /**
+     * Сеть пропала или перестала подходить («Только Wi-Fi»): идущие передачи
+     * останавливаются штатно, .part сохраняются, задания ждут в очереди с
+     * причиной «network» — это не пользовательская пауза.
+     */
+    private fun stopForNetwork() {
+        val ids = active.keys.toList()
+        if (ids.isEmpty()) return
+        NoxLog.event("network-stop", "active" to ids.size)
+        for (id in ids) {
+            networkStopping.add(id)
+            active[id]?.cancel(CancellationException(STOP_NETWORK))
+        }
+    }
+
+    /** Сбой передачи на пропавшей сети — не ошибка задания: ждать сети без траты попыток. */
+    private suspend fun requeueIfNetworkLost(id: Long): Boolean {
+        val gate = policy.network ?: return false
+        if (gate.allowed()) return false
+        val e = downloadsDao.get(id) ?: return true
+        downloadsDao.update(e.copy(status = DownloadStatus.QUEUED, downloadedBytes = partSize(e), speedBps = 0, etaSec = -1,
+            lastStopReason = STOP_NETWORK, updatedAt = System.currentTimeMillis()))
+        NoxLog.event("job-wait-network", "id" to id, "part" to partSize(e))
+        return true
     }
 
     private suspend fun afterWorkFinished() {
@@ -591,7 +745,7 @@ class DownloadCoordinator(
                 var lastWrite = 0L
                 NoxLog.event("transfer-start", "id" to id, "track" to track.name, "part" to part.length(),
                     "host" to SafeUrl.host(url), "headers" to headers.keys.joinToString(","))
-                val outcome = http.download(url, headers, part, expected, chunk) { downloaded, total ->
+                val outcome = http.download(url, headers, part, expected, chunk, policy.limiter) { downloaded, total ->
                     val now = System.currentTimeMillis()
                     if (now - lastWrite >= PROGRESS_WRITE_EVERY_MS) {
                         lastWrite = now
@@ -661,6 +815,7 @@ class DownloadCoordinator(
                                 "выберите качество заново.", "size-mismatch")
                             return
                         }
+                        if (requeueIfNetworkLost(id)) return
                         val fresh = downloadsDao.get(id) ?: return
                         val tries = fresh.retries + 1
                         NoxLog.event("transfer-failed", "id" to id, "code" to outcome.code,
@@ -703,6 +858,7 @@ class DownloadCoordinator(
             preferAudio = if (hasAudioData && e.isSplit) e.audioFormatId else "",
         )
         if (!r.ok) {
+            if (requeueIfNetworkLost(e.id)) return null
             val tries = e.resolveRetries + 1
             if (tries >= RESOLVE_RETRIES || r.kind == "no-direct-format") {
                 fail(e.id, r.error.ifBlank { "не удалось разобрать ссылку" }, r.kind)
@@ -777,6 +933,7 @@ class DownloadCoordinator(
             }
             is PlanResult.Failed -> {
                 val err = r.error
+                if (requeueIfNetworkLost(e.id)) return null
                 val tries = e.resolveRetries + 1
                 if (err.kind in FINAL_KINDS || !err.retryable || tries >= RESOLVE_RETRIES) {
                     fail(e.id, err.message + saved, err.kind)
@@ -847,7 +1004,11 @@ class DownloadCoordinator(
             else -> {
                 // Носитель остановлен системой или ставится обновление:
                 // в очередь, продолжим с .part.
-                val reason = if (updateStopping.remove(id)) STOP_UPDATE else e.lastStopReason
+                val reason = when {
+                    updateStopping.remove(id) -> STOP_UPDATE
+                    networkStopping.remove(id) -> STOP_NETWORK
+                    else -> e.lastStopReason
+                }
                 if (e.status.isActive) {
                     downloadsDao.update(e.copy(status = DownloadStatus.QUEUED, downloadedBytes = size,
                         speedBps = 0, etaSec = -1, lastStopReason = reason, updatedAt = System.currentTimeMillis()))
@@ -973,13 +1134,59 @@ class DownloadCoordinator(
                 coverPath = cover, pageUrl = e.pageUrl, videoId = e.videoId, createdAt = System.currentTimeMillis(),
                 uploader = e.uploader,
                 container = e.container.ifBlank { final.extension.lowercase() }, width = e.width, fps = e.fps,
-                codecs = codecsOf(e), variantKey = e.variantKey)
+                codecs = codecsOf(e), variantKey = e.variantKey,
+                kind = if (e.audioOnly) com.nox.offline.data.db.MediaKind.AUDIO else com.nox.offline.data.db.MediaKind.VIDEO)
         )
         downloadsDao.update(e.copy(status = DownloadStatus.COMPLETED, fileName = final.name,
             downloadedBytes = final.length(), totalBytes = final.length(), error = "",
             updatedAt = System.currentTimeMillis()))
-        NoxLog.event("library-added", "media" to mediaId, "download" to e.id, "cover" to cover.isNotEmpty())
+        NoxLog.event("library-added", "media" to mediaId, "download" to e.id, "cover" to cover.isNotEmpty(), "audio" to e.audioOnly)
+        runCatching { libraryHook?.onMediaAdded(mediaId, e) }
+            .onFailure { NoxLog.event("library-hook-error", "error" to it.javaClass.simpleName) }
+        // Субтитры — отдельный шаг: их сбой не трогает уже готовое видео.
+        if (com.nox.offline.downloader.catalog.SourceSubtitle.listFromJson(e.subtitleRequest).isNotEmpty()) {
+            scope.launch { fetchSubtitles(e.id, mediaId) }
+        }
         relocator?.let { r -> scope.launch { runCatching { r.afterDownload(mediaId) } } }
+    }
+
+    /**
+     * Скачать выбранные субтитры для уже готового видео. Ошибка записывается
+     * в задание (subtitleError) с кнопкой «Повторить субтитры»; видео при
+     * этом не удаляется и не помечается ошибочным.
+     */
+    private suspend fun fetchSubtitles(downloadId: Long, mediaId: Long) {
+        val store = subtitleStore ?: return
+        val e = downloadsDao.get(downloadId) ?: return
+        val wanted = com.nox.offline.downloader.catalog.SourceSubtitle.listFromJson(e.subtitleRequest)
+        val have = db.subtitles().forMedia(mediaId)
+        val failed = ArrayList<String>()
+        for (s in wanted) {
+            val origin = if (s.auto) "auto" else "source"
+            if (have.any { it.language == s.lang && it.origin == origin && it.label == s.label }) continue
+            when (val r = resolver.subtitle(e.pageUrl, s.key, s.auto)) {
+                is YtDlpResolver.SubtitleResult.Ok -> runCatching { store.save(mediaId, r.text, s.label, s.lang, origin) }
+                    .onFailure { failed.add("${s.label}: ${it.message ?: "файл не читается"}") }
+                is YtDlpResolver.SubtitleResult.Failed -> failed.add("${s.label}: ${r.message}")
+            }
+        }
+        val media = db.media().get(mediaId)
+        if (media != null && media.subtitleId == 0L) {
+            db.subtitles().forMedia(mediaId).firstOrNull { it.origin == "source" }?.let { db.media().setSubtitle(mediaId, it.id) }
+        }
+        val error = failed.joinToString("; ").take(400)
+        downloadsDao.get(downloadId)?.let { downloadsDao.update(it.copy(subtitleError = error, updatedAt = System.currentTimeMillis())) }
+        NoxLog.event("subtitles-done", "download" to downloadId, "media" to mediaId, "wanted" to wanted.size, "failed" to failed.size)
+    }
+
+    /** «Повторить субтитры» — только субтитры, видео не перекачивается. */
+    suspend fun retrySubtitles(downloadId: Long): Boolean {
+        val e = downloadsDao.get(downloadId) ?: return false
+        if (e.status != DownloadStatus.COMPLETED) return false
+        val media = db.media().byVideoId(e.videoId).firstOrNull { it.variantKey == e.variantKey }
+            ?: db.media().byVideoId(e.videoId).firstOrNull() ?: return false
+        fetchSubtitles(downloadId, media.id)
+        return true
     }
 
     private fun codecsOf(e: DownloadEntity): String {

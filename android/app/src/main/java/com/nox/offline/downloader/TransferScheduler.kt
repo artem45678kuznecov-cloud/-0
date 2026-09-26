@@ -58,7 +58,10 @@ object TransferScheduler {
             }
         } catch (e: Exception) { 0L }
         val builder = JobInfo.Builder(JOB_ID, ComponentName(context, TransferJobService::class.java))
-            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+            // «Только Wi-Fi»: система сама остановит и вернёт задание при смене сети.
+            .setRequiredNetworkType(
+                if (NoxApp.get(context).settings.downloads.value.wifiOnly) JobInfo.NETWORK_TYPE_UNMETERED
+                else JobInfo.NETWORK_TYPE_ANY)
         if (Build.VERSION.SDK_INT >= 34) {
             builder.setUserInitiated(true)
             val unknown = JobInfo.NETWORK_BYTES_UNKNOWN.toLong()

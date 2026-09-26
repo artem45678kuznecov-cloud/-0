@@ -227,6 +227,71 @@ class YtDlpResolver(private val context: Context) {
         return r
     }
 
+    // ------------------------------------------------------------------
+    //  0.4.0: субтитры и плейлисты
+    // ------------------------------------------------------------------
+
+    sealed class SubtitleResult {
+        data class Ok(val text: String, val ext: String) : SubtitleResult()
+        data class Failed(val message: String, val kind: String) : SubtitleResult()
+    }
+
+    /** Текст дорожки субтитров источника. Блокирующий, не из UI-потока. */
+    fun subtitle(pageUrl: String, key: String, auto: Boolean): SubtitleResult {
+        val raw = try {
+            call("subtitle", pageUrl, key, auto)
+        } catch (e: Throwable) {
+            return SubtitleResult.Failed("Внутренняя ошибка при получении субтитров.", "bridge")
+        }
+        return try {
+            val o = JSONObject(raw)
+            if (o.optBoolean("ok")) SubtitleResult.Ok(o.optString("text"), o.optString("ext", "vtt"))
+            else SubtitleResult.Failed(o.optString("error").ifBlank { "Не удалось получить субтитры." }, o.optString("kind"))
+        } catch (e: Exception) {
+            SubtitleResult.Failed("Источник вернул непонятный ответ.", "json")
+        }.also {
+            NoxLog.event("subtitle-fetch", "host" to SafeUrl.host(pageUrl), "key" to key, "auto" to auto,
+                "ok" to (it is SubtitleResult.Ok), "kind" to (it as? SubtitleResult.Failed)?.kind)
+        }
+    }
+
+    sealed class PlaylistResult {
+        data class Ok(val page: com.nox.offline.downloader.catalog.PlaylistPage) : PlaylistResult()
+        data class Failed(val error: ResolveError) : PlaylistResult()
+    }
+
+    /** Одна страница плейлиста в порядке источника. Блокирующий. */
+    fun playlist(pageUrl: String, start: Int, count: Int): PlaylistResult {
+        val started = System.currentTimeMillis()
+        val raw = try {
+            call("playlist", pageUrl, start, count)
+        } catch (e: Throwable) {
+            return PlaylistResult.Failed(ResolveError("bridge", "Внутренняя ошибка разбора ссылки.", e.javaClass.simpleName))
+        }
+        val r = try {
+            val o = JSONObject(raw)
+            if (!o.optBoolean("ok")) {
+                PlaylistResult.Failed(ResolveError(o.optString("kind"), o.optString("error").ifBlank { "Не удалось открыть список." },
+                    o.optString("detail"), o.optString("stage")))
+            } else {
+                val a = o.optJSONArray("entries") ?: org.json.JSONArray()
+                PlaylistResult.Ok(com.nox.offline.downloader.catalog.PlaylistPage(
+                    id = o.optString("id"), title = o.optString("title"), uploader = o.optString("uploader"),
+                    webpageUrl = o.optString("webpage_url"), extractor = o.optString("extractor"),
+                    count = o.optInt("count"), start = o.optInt("start", start),
+                    entries = (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let(com.nox.offline.downloader.catalog.PlaylistEntry::parse) },
+                    hasMore = o.optBoolean("has_more"),
+                ))
+            }
+        } catch (e: Exception) {
+            PlaylistResult.Failed(ResolveError("json", "Источник вернул непонятный ответ.", e.javaClass.simpleName))
+        }
+        NoxLog.event("playlist-page", "host" to SafeUrl.host(pageUrl), "start" to start,
+            "items" to (r as? PlaylistResult.Ok)?.page?.entries?.size, "kind" to (r as? PlaylistResult.Failed)?.error?.kind,
+            "ms" to (System.currentTimeMillis() - started))
+        return r
+    }
+
     /** Забыть кэш разбора этой ссылки (после отказа по адресу из кэша). */
     fun forget(pageUrl: String) {
         runCatching { call("forget", pageUrl) }

@@ -28,8 +28,12 @@ import java.util.Locale
  * Резервная копия данных NOX в папку пользователя (SAF) и восстановление.
  *
  * Всегда сохраняются: manifest.json, настройки, медиатека (записи),
- * позиции просмотра, очередь и обложки. По выбору — сами видео и
+ * позиции просмотра, очередь, обложки, а с 0.4.0 — коллекции, сериалы,
+ * главы, закладки и субтитры ([LibraryBackup]). По выбору — сами видео и
  * незавершённые .part. Большие файлы копируются потоком.
+ *
+ * В копию никогда не попадают ключ подписи, токены и cookies: их у NOX нет
+ * в настройках, а служебные ключи обновлений и прав на папки исключены.
  *
  * Честно про границы: v0.1.0 такой копии делать не умеет, поэтому для
  * уже установленной v0.1.0 этот механизм ничем не помогает. Он для
@@ -62,12 +66,19 @@ class BackupManager(
                 name != "." && name != ".." && name.length <= 150
     }
 
-    data class ImportReport(val media: Int, val skipped: Int, val positions: Int, val downloads: Int)
+    data class ImportReport(val media: Int, val skipped: Int, val positions: Int, val downloads: Int,
+                            val library: LibraryBackup.Report? = null)
 
-    suspend fun export(tree: Uri, includeMedia: Boolean, includeParts: Boolean, progress: (String, Long, Long) -> Unit): String {
+    /**
+     * [prefix] — «NOX-backup» для ручной копии, «NOX-auto» для автокопии
+     * (только записи и настройки, без видео).
+     */
+    suspend fun export(tree: Uri, includeMedia: Boolean, includeParts: Boolean, prefix: String = "NOX-backup",
+                       progress: (String, Long, Long) -> Unit): String {
         val root = DocumentFile.fromTreeUri(context, tree) ?: throw IOException("Папка недоступна")
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
-        val dir = root.createDirectory("NOX-backup-$stamp") ?: throw IOException("Не удалось создать папку копии")
+        if (!root.canWrite()) throw IOException("Нет права записи в папку — выберите её заново")
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val dir = root.createDirectory("$prefix-$stamp") ?: throw IOException("Не удалось создать папку копии")
         val media = db.media().getAll()
         val playback = db.playback().getAll()
         val downloads = db.downloads().getAll()
@@ -91,6 +102,8 @@ class BackupManager(
                 .put("imported", m.imported).put("fileName", MediaLocator.fileName(m))
                 .put("container", m.container).put("width", m.width).put("fps", m.fps)
                 .put("codecs", m.codecs).put("variantKey", m.variantKey)
+                .put("kind", m.kind).put("protectedFromCleanup", m.protectedFromCleanup)
+                .put("subtitleId", m.subtitleId).put("subtitleOffsetMs", m.subtitleOffsetMs)
             if (m.coverPath.isNotBlank() && File(m.coverPath).exists()) {
                 val cf = File(m.coverPath)
                 copyFile(cf, covers, cf.name, "image/*") { _, _ -> }
@@ -126,6 +139,10 @@ class BackupManager(
                 .put("container", d.container).put("dynamicRange", d.dynamicRange).put("audioLang", d.audioLang)
                 .put("videoExact", d.videoExact).put("audioExact", d.audioExact)
                 .put("videoChunk", d.videoChunk).put("audioChunk", d.audioChunk)
+                // 0.4.0
+                .put("audioOnly", d.audioOnly).put("subtitleRequest", d.subtitleRequest)
+                .put("collectionId", d.collectionId).put("collectionPosition", d.collectionPosition)
+                .put("queueOrder", d.queueOrder)
             if (partsDir != null) {
                 val names = JSONArray()
                 for (f in partOf(d)) if (f.exists()) {
@@ -140,20 +157,55 @@ class BackupManager(
         }
         val settingsJson = JSONObject()
         for ((k, v) in settings.exportAll()) {
-            if (k.startsWith("upd") || k == "destinationTree" || k == "destinationLabel") continue
+            if (!AppSettings.isBackupKey(k)) continue
             settingsJson.put(k, v)
         }
-        writeText(dir, "library.json", JSONObject().put("media", mediaJson).put("playback", playJson).put("downloads", dlJson).toString(2))
+        val libraryJson = exportLibrary(dir)
+        writeText(dir, "library.json", JSONObject().put("media", mediaJson).put("playback", playJson).put("downloads", dlJson)
+            .put(LibraryBackup.KEY, libraryJson).toString(2))
         writeText(dir, "settings.json", settingsJson.toString(2))
         writeText(dir, "manifest.json", JSONObject()
             .put("format", FORMAT).put("formatVersion", FORMAT_VERSION)
             .put("appVersion", BuildConfig.VERSION_NAME).put("versionCode", BuildConfig.VERSION_CODE)
             .put("schemaVersion", NoxDatabase.VERSION).put("createdAt", System.currentTimeMillis())
             .put("includesMedia", includeMedia).put("includesParts", includeParts)
-            .put("counts", JSONObject().put("media", media.size).put("playback", playback.size).put("downloads", dlJson.length()))
+            .put("counts", JSONObject().put("media", media.size).put("playback", playback.size).put("downloads", dlJson.length())
+                .put("collections", libraryJson.optJSONArray("collections")?.length() ?: 0)
+                .put("chapters", libraryJson.optJSONArray("chapters")?.length() ?: 0)
+                .put("bookmarks", libraryJson.optJSONArray("bookmarks")?.length() ?: 0)
+                .put("subtitles", libraryJson.optJSONArray("subtitles")?.length() ?: 0))
             .toString(2))
-        NoxLog.event("backup-export", "media" to media.size, "withMedia" to includeMedia, "withParts" to includeParts)
+        NoxLog.event("backup-export", "media" to media.size, "withMedia" to includeMedia, "withParts" to includeParts, "prefix" to prefix)
         return "Резервная копия сохранена: ${dir.name}"
+    }
+
+    /** Коллекции и разметка; файлы субтитров и свои обложки — рядом, в папках копии. */
+    private suspend fun exportLibrary(dir: DocumentFile): JSONObject {
+        val cols = db.collections().getAll()
+        val subs = db.subtitles().getAll()
+        val subDir = if (subs.isNotEmpty()) dir.createDirectory("subtitles") else null
+        val subFiles = ArrayList<Pair<com.nox.offline.data.db.SubtitleEntity, String>>()
+        for (s in subs) {
+            val f = File(s.filePath)
+            if (subDir == null || !f.exists()) continue
+            copyFile(f, subDir, f.name, "text/plain") { _, _ -> }
+            subFiles.add(s to f.name)
+        }
+        val coverMap = HashMap<Long, String>()
+        val ownCovers = cols.filter { it.coverPath.isNotBlank() && File(it.coverPath).exists() }
+        if (ownCovers.isNotEmpty()) {
+            val cdir = dir.findFile("covers") ?: dir.createDirectory("covers")!!
+            for (c in ownCovers) {
+                val f = File(c.coverPath)
+                copyFile(f, cdir, f.name, "image/jpeg") { _, _ -> }
+                coverMap[c.id] = f.name
+            }
+        }
+        return LibraryBackup.toJson(LibraryBackup.Snapshot(
+            collections = cols, items = db.collections().allItems(), seasons = db.collections().allSeasons(),
+            chapters = db.chapters().getAll(), progress = db.chapters().allProgress(), bookmarks = db.chapters().allBookmarks(),
+            subtitles = subFiles, covers = coverMap,
+        ))
     }
 
     suspend fun import(tree: Uri, progress: (String, Long, Long) -> Unit): ImportReport {
@@ -168,6 +220,7 @@ class BackupManager(
 
         val existing = db.media().getAll()
         val idMap = HashMap<Long, Long>()
+        val subtitleChoice = HashMap<Long, Long>()
         var imported = 0
         var skipped = 0
         val mediaArr = lib.optJSONArray("media") ?: JSONArray()
@@ -213,8 +266,12 @@ class BackupManager(
                 container = o.optString("container").ifBlank { target.extension.lowercase() },
                 width = o.optInt("width"), fps = o.optInt("fps"), codecs = o.optString("codecs"),
                 variantKey = o.optString("variantKey"),
+                kind = o.optString("kind", "video").ifBlank { "video" },
+                protectedFromCleanup = o.optBoolean("protectedFromCleanup"),
+                subtitleOffsetMs = o.optLong("subtitleOffsetMs"),
             ))
             idMap[oldId] = newId
+            subtitleChoice[newId] = o.optLong("subtitleId")
             imported++
         }
         var positions = 0
@@ -227,6 +284,18 @@ class BackupManager(
             db.playback().upsert(PlaybackEntity(newId, o.optLong("positionMs"), o.optLong("durationMs"),
                 o.optLong("updatedAt"), o.optBoolean("completed")))
             positions++
+        }
+        // 0.4.0: коллекции и разметка. Старые копии без этого раздела восстанавливаются как раньше.
+        var libReport: LibraryBackup.Report? = null
+        var colMap: Map<Long, Long> = emptyMap()
+        lib.optJSONObject(LibraryBackup.KEY)?.let { o ->
+            val restored = LibraryBackup.restore(o, idMap, RoomStore(dir.findFile("subtitles"), coversDir))
+            libReport = restored.report
+            colMap = restored.collections
+            for ((mediaId, oldSub) in subtitleChoice) {
+                val sub = restored.subtitles[oldSub] ?: continue
+                db.media().setSubtitle(mediaId, sub)
+            }
         }
         var downloads = 0
         val dlArr = lib.optJSONArray("downloads") ?: JSONArray()
@@ -252,6 +321,9 @@ class BackupManager(
                 dynamicRange = o.optString("dynamicRange"), audioLang = o.optString("audioLang"),
                 videoExact = o.optBoolean("videoExact"), audioExact = o.optBoolean("audioExact"),
                 videoChunk = o.optLong("videoChunk"), audioChunk = o.optLong("audioChunk"),
+                audioOnly = o.optBoolean("audioOnly"), subtitleRequest = o.optString("subtitleRequest", "[]").ifBlank { "[]" },
+                collectionId = colMap[o.optLong("collectionId")] ?: 0, collectionPosition = o.optLong("collectionPosition"),
+                queueOrder = o.optLong("queueOrder", now).takeIf { it > 0 } ?: now,
                 // Прямые адреса протухают: восстановленное задание стоит на паузе и разберёт ссылку заново.
                 status = DownloadStatus.PAUSED, createdAt = now, updatedAt = now,
             )
@@ -278,8 +350,43 @@ class BackupManager(
             for (k in o.keys()) map[k] = o.get(k)
             settings.importAll(map)
         }
-        NoxLog.event("backup-import", "media" to imported, "skipped" to skipped, "positions" to positions, "downloads" to downloads)
-        return ImportReport(imported, skipped, positions, downloads)
+        NoxLog.event("backup-import", "media" to imported, "skipped" to skipped, "positions" to positions, "downloads" to downloads,
+            "collections" to libReport?.collections, "chapters" to libReport?.chapters)
+        return ImportReport(imported, skipped, positions, downloads, libReport)
+    }
+
+    /** Восстановление разметки в Room; файлы субтитров и обложек копируются внутрь NOX. */
+    private inner class RoomStore(private val subDir: DocumentFile?, private val backupCovers: DocumentFile?) : LibraryBackup.Store {
+        private val c get() = db.collections()
+        private val ch get() = db.chapters()
+        override suspend fun collections() = c.getAll()
+        override suspend fun insertCollection(c: com.nox.offline.data.db.CollectionEntity) = this.c.insert(c)
+        override suspend fun insertItem(i: com.nox.offline.data.db.CollectionItemEntity) = c.insertItem(i)
+        override suspend fun seasons() = c.allSeasons()
+        override suspend fun insertSeason(s: com.nox.offline.data.db.SeasonEntity) { c.upsertSeason(s) }
+        override suspend fun chaptersFor(mediaId: Long) = ch.forMedia(mediaId)
+        override suspend fun insertChapter(c: com.nox.offline.data.db.ChapterEntity) = ch.insert(c)
+        override suspend fun progress(chapterId: Long) = ch.progress(chapterId)
+        override suspend fun upsertProgress(p: com.nox.offline.data.db.SegmentProgressEntity) = ch.upsertProgress(p)
+        override suspend fun bookmarksFor(mediaId: Long) = ch.allBookmarks().filter { it.mediaId == mediaId }
+        override suspend fun insertBookmark(b: com.nox.offline.data.db.BookmarkEntity) = ch.insertBookmark(b)
+        override suspend fun subtitlesFor(mediaId: Long) = db.subtitles().forMedia(mediaId)
+        override suspend fun insertSubtitle(s: com.nox.offline.data.db.SubtitleEntity) = db.subtitles().insert(s)
+        override suspend fun restoreSubtitleFile(name: String, mediaId: Long): Pair<String, Long>? {
+            if (!isSafeName(name) || subDir == null) return null
+            val src = subDir.findFile(name) ?: return null
+            if (src.length() > com.nox.offline.subtitles.SubtitleParser.MAX_BYTES) return null
+            val dst = FileNames.unique(storage.subtitles, name)
+            copyIn(src, dst) { _, _ -> }
+            return dst.absolutePath to dst.length()
+        }
+        override suspend fun restoreCoverFile(name: String): String {
+            if (!isSafeName(name) || backupCovers == null) return ""
+            val src = backupCovers.findFile(name) ?: return ""
+            val dst = FileNames.unique(storage.covers, name)
+            copyIn(src, dst) { _, _ -> }
+            return dst.absolutePath
+        }
     }
 
     // ------------------------------------------------------------------

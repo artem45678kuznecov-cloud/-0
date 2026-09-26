@@ -64,6 +64,32 @@ object CatalogBuilder {
         return TIERS.firstOrNull { (th, _) -> h <= th * 1.02 }?.first ?: h
     }
 
+    /**
+     * Варианты «только звук»: отдельные звуковые дорожки выбранного языка
+     * (или все, если язык один), от лучшего к худшему. Готовая проверка
+     * «видео + звук» к ним не применяется — видеодорожки в них нет.
+     */
+    fun audioVariants(analysis: Analysis, language: String = ""): List<AudioVariant> {
+        val audios = analysis.tracks.filter { it.kind == TrackKind.AUDIO && !it.drc }
+        val pool = if (language.isNotBlank()) audios.filter { it.language.startsWith(language) }.ifEmpty { audios } else audios
+        return pool.map { t ->
+            val (size, kind) = when {
+                t.filesize > 0 && t.filesizeExact -> t.filesize to SizeKind.EXACT
+                t.knownSize > 0 -> t.knownSize to SizeKind.APPROX
+                t.abr > 0 && analysis.details.durationSec > 0 ->
+                    (t.abr * 1000 / 8 * analysis.details.durationSec).toLong() to SizeKind.APPROX
+                else -> 0L to SizeKind.UNKNOWN
+            }
+            val support = when {
+                t.drm -> Support.No("Дорожка защищена DRM")
+                t.transport != Transport.HTTP -> Support.No(transportReason(t.transport))
+                else -> Support.Ok
+            }
+            AudioVariant(t, size, kind, support)
+        }.sortedWith(compareByDescending<AudioVariant> { it.support.ok }.thenByDescending { it.bitrateKbps }
+            .thenByDescending { it.sizeBytes })
+    }
+
     fun tierLabel(th: Int): String = if (th > 0) "${th}p" else "Качество не указано"
 
     fun build(analysis: Analysis, caps: DeviceCaps, language: String? = null): FormatCatalog {

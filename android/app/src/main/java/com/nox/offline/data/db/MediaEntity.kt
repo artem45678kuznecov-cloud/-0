@@ -50,8 +50,23 @@ data class MediaEntity(
     /** «VP9 + Opus» и т. п. */
     @ColumnInfo(defaultValue = "''") val codecs: String = "",
     @ColumnInfo(defaultValue = "''") val variantKey: String = "",
+
+    // ---- v4 (0.4.0) ----
+    /** video — видео со звуком; audio — только звук (скачан как аудио). */
+    @ColumnInfo(defaultValue = "'video'") val kind: String = MediaKind.VIDEO,
+    /** Не предлагать к очистке просмотренного. Не то же, что закрепление коллекции. */
+    @ColumnInfo(defaultValue = "0") val protectedFromCleanup: Boolean = false,
+    /** Выбранные субтитры (0 — выключены) и сдвиг синхронизации (+ — позже). */
+    @ColumnInfo(defaultValue = "0") val subtitleId: Long = 0,
+    @ColumnInfo(defaultValue = "0") val subtitleOffsetMs: Long = 0,
 ) {
     val isExternal: Boolean get() = contentUri.isNotBlank()
+    val isAudio: Boolean get() = kind == MediaKind.AUDIO
+}
+
+object MediaKind {
+    const val VIDEO = "video"
+    const val AUDIO = "audio"
 }
 
 /** Позиция просмотра: одна строка на видео. */
@@ -93,6 +108,18 @@ interface MediaDao {
 
     @Query("SELECT COUNT(*) FROM media WHERE videoId != '' AND videoId = :videoId AND variantKey = :variantKey")
     suspend fun countVariant(videoId: String, variantKey: String): Int
+
+    @Query("SELECT * FROM media WHERE videoId != '' AND videoId = :videoId ORDER BY createdAt DESC")
+    suspend fun byVideoId(videoId: String): List<MediaEntity>
+
+    @Query("UPDATE media SET protectedFromCleanup = :on WHERE id = :id")
+    suspend fun setProtected(id: Long, on: Boolean)
+
+    @Query("UPDATE media SET subtitleId = :subtitleId WHERE id = :id")
+    suspend fun setSubtitle(id: Long, subtitleId: Long)
+
+    @Query("UPDATE media SET subtitleOffsetMs = :offsetMs WHERE id = :id")
+    suspend fun setSubtitleOffset(id: Long, offsetMs: Long)
 
     @Insert
     suspend fun insert(entity: MediaEntity): Long

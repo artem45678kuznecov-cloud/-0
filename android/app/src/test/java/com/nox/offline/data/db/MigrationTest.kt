@@ -151,11 +151,17 @@ class MigrationTest {
     }
 
     @Test
-    fun `schema 2 is the one shipped in 0_2_x and the app is on 3`() {
+    fun `schema 2 is the one shipped in 0_2_x`() {
         // База пользователей 0.2.0/0.2.1 — ровно эта схема.
         assertEquals("fa85ca565ff4b679bfbac6d7adb705a7", schema(2).getString("identityHash"))
-        assertEquals(3, NoxDatabase.VERSION)
         assertEquals(3, schema(3).getInt("version"))
+    }
+
+    @Test
+    fun `schema 3 is the one shipped in 0_3_0 and the app is on 4`() {
+        assertEquals("6258266b98ca2510807e95a749865e26", schema(3).getString("identityHash"))
+        assertEquals(4, NoxDatabase.VERSION)
+        assertEquals(4, schema(4).getInt("version"))
     }
 
     /** Заполненная база 0.2.1: готовое видео, пауза раздельных дорожек с частями, очередь MAX, сбой. */
@@ -228,6 +234,78 @@ class MigrationTest {
                 }
             }
             assertMatchesSchema(conn, 3)
+        }
+    }
+
+    /** Заполненная база 0.3.0: задание с точным планом на паузе, очередь, готовое видео, позиции. */
+    private fun fillV3(conn: Connection) {
+        fillV2(conn)
+        conn.createStatement().use { st ->
+            for (sql in Migrations.SQL_2_3) st.execute(sql)
+            st.execute("""UPDATE downloads SET planVersion=1, extractorKey='Youtube', variantKey='v:308+a:251', container='webm',
+                videoExact=1, audioExact=1, videoChunk=10485760 WHERE id=2""")
+            st.execute("UPDATE media SET container='mp4', codecs='H.264 + AAC', variantKey='f:url480' WHERE id=10")
+        }
+    }
+
+    @Test
+    fun `migration 3 to 4 keeps 0_3_0 data and queue order`() {
+        DriverManager.getConnection("jdbc:sqlite::memory:").use { conn ->
+            create(conn, 2)
+            fillV3(conn)
+            conn.createStatement().use { st -> for (sql in Migrations.SQL_3_4) st.execute(sql) }
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT COUNT(*) FROM downloads").use { it.next(); assertEquals(4, it.getInt(1)) }
+                st.executeQuery("SELECT COUNT(*) FROM media").use { it.next(); assertEquals(2, it.getInt(1)) }
+                st.executeQuery("SELECT COUNT(*) FROM playback").use { it.next(); assertEquals(2, it.getInt(1)) }
+                // Задание 0.3.0 продолжается по сохранённым форматам, место в очереди — прежнее.
+                st.executeQuery("""SELECT status, formatId, audioFormatId, variantKey, container, videoExact, audioOnly,
+                    collectionId, queueOrder, createdAt, subtitleRequest FROM downloads WHERE id=2""").use {
+                    it.next()
+                    assertEquals("PAUSED", it.getString(1))
+                    assertEquals("136", it.getString(2))
+                    assertEquals("140", it.getString(3))
+                    assertEquals("v:308+a:251", it.getString(4))
+                    assertEquals("webm", it.getString(5))
+                    assertEquals(1, it.getInt(6))
+                    assertEquals(0, it.getInt(7))
+                    assertEquals(0, it.getInt(8))
+                    assertEquals(it.getLong(10), it.getLong(9))
+                    assertEquals("[]", it.getString(11))
+                }
+                st.executeQuery("SELECT id, kind, protectedFromCleanup, subtitleId, codecs FROM media ORDER BY id").use {
+                    it.next(); assertEquals(10L, it.getLong(1)); assertEquals("video", it.getString(2))
+                    assertEquals(0, it.getInt(3)); assertEquals(0, it.getInt(4)); assertEquals("H.264 + AAC", it.getString(5))
+                    it.next(); assertEquals(11L, it.getLong(1))
+                }
+                st.executeQuery("SELECT positionMs FROM playback WHERE mediaId=10").use { it.next(); assertEquals(50_000L, it.getLong(1)) }
+                // Новые таблицы пусты: никаких придуманных коллекций в базе пользователя.
+                for (t in listOf("collections", "collection_items", "seasons", "chapters", "segment_progress", "bookmarks", "subtitles")) {
+                    st.executeQuery("SELECT COUNT(*) FROM $t").use { it.next(); assertEquals(t, 0, it.getInt(1)) }
+                }
+                // Длинные отметки времени (больше суток) хранятся без переполнения.
+                st.execute("INSERT INTO chapters (mediaId,title,startMs,endMs,kind,origin,createdAt) VALUES (10,'День 2',90000000,180000000,'episode','user',1)")
+                st.executeQuery("SELECT endMs - startMs FROM chapters").use { it.next(); assertEquals(90_000_000L, it.getLong(1)) }
+                // Один файл в двух коллекциях, повтор связи не создаёт дубль.
+                st.execute("INSERT INTO collections (title,createdAt,updatedAt) VALUES ('А',1,1),('Б',1,1)")
+                st.execute("INSERT INTO collection_items (collectionId,mediaId,addedAt) VALUES (1,10,1),(2,10,1)")
+                st.execute("INSERT OR IGNORE INTO collection_items (collectionId,mediaId,addedAt) VALUES (1,10,2)")
+                st.executeQuery("SELECT COUNT(*) FROM collection_items WHERE mediaId=10").use { it.next(); assertEquals(2, it.getInt(1)) }
+            }
+            assertMatchesSchema(conn, 4)
+        }
+    }
+
+    @Test
+    fun `chain 1 to 4 matches schema 4`() {
+        DriverManager.getConnection("jdbc:sqlite::memory:").use { conn ->
+            createV1(conn)
+            fillV1(conn)
+            conn.createStatement().use { st ->
+                for (sql in Migrations.SQL_1_2 + Migrations.SQL_2_3 + Migrations.SQL_3_4) st.execute(sql)
+                st.executeQuery("SELECT COUNT(*) FROM downloads").use { it.next(); assertEquals(4, it.getInt(1)) }
+            }
+            assertMatchesSchema(conn, 4)
         }
     }
 

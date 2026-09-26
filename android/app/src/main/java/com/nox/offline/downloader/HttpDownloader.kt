@@ -89,6 +89,7 @@ class HttpDownloader(
         part: File,
         expectedTotal: Long = -1,
         chunkSize: Long = 0,
+        limiter: SpeedLimiter? = null,
         onProgress: (downloaded: Long, total: Long) -> Unit,
     ): Outcome {
         part.parentFile?.mkdirs()
@@ -189,6 +190,8 @@ class HttpDownloader(
                                 if (n < 0) break
                                 raf.write(buf, 0, n)
                                 written += n
+                                // Общий предел скорости: ожидание отменяемое (пауза срабатывает сразу).
+                                limiter?.acquire(n)
                                 val now = System.currentTimeMillis()
                                 if (now - lastReport >= REPORT_EVERY_MS) {
                                     lastReport = now

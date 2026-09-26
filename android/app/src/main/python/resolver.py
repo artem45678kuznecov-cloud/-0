@@ -661,6 +661,90 @@ def plan(url, video_format, audio_format='', max_age=None):
         return _error_json(str(e) or e.__class__.__name__, stage)
 
 
+SUB_MAX_BYTES = 8 * 1024 * 1024
+
+
+def subtitle(url, key, auto=False):
+    """
+    Текст одной дорожки субтитров источника (VTT или SRT) — для сохранения
+    рядом с видео. Ничего не переводит: только то, что есть у источника.
+    """
+    stage = 'subtitles'
+    try:
+        hit = _cache.get(url)
+        if hit is None:
+            stage = 'page'
+            info, _w, _s = _extract(url)
+            _cache.put(url, info)
+        else:
+            info = hit[0]
+        stage = 'subtitles'
+        found = nox_catalog.find_subtitle(nox_catalog.entry_of(info), str(key), bool(auto))
+        if found is None:
+            return _error_json('subtitle track missing', stage, kind='subtitles-gone',
+                               message='Эта дорожка субтитров больше не предлагается источником.')
+        ext, sub_url = found
+        _prepare_ssl()
+        import yt_dlp
+        with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
+            resp = ydl.urlopen(sub_url)
+            data = resp.read(SUB_MAX_BYTES + 1)
+        if len(data) > SUB_MAX_BYTES:
+            return _error_json('too large', stage, kind='subtitles-too-large', message='Файл субтитров слишком большой.')
+        return json.dumps({'ok': True, 'ext': ext, 'text': data.decode('utf-8', 'replace')}, ensure_ascii=False)
+    except Exception as e:
+        return _error_json(str(e) or e.__class__.__name__, stage)
+
+
+PLAYLIST_PAGE_MAX = 100
+
+
+def playlist(url, start=1, count=50):
+    """
+    Одна страница плейлиста в порядке источника (плоский список, без
+    разбора каждого видео — качества каждого элемента смотрятся отдельно).
+    """
+    stage = 'playlist'
+    try:
+        start = max(1, int(start))
+        count = max(1, min(int(count), PLAYLIST_PAGE_MAX))
+        _prepare_ssl()
+        import yt_dlp
+        opts = ydl_opts()
+        opts.update({
+            'noplaylist': False,
+            'extract_flat': 'in_playlist',
+            'playliststart': start,
+            'playlistend': start + count,       # на один больше: есть ли продолжение
+            'lazy_playlist': True,
+        })
+        collector = _Collector()
+        opts['logger'] = collector
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(str(url), download=False)
+        if not isinstance(info, dict) or info.get('_type') not in ('playlist', 'multi_video'):
+            return _error_json('not a playlist', stage, kind='not-playlist', message='По этой ссылке нет списка видео.')
+        raw = [e for e in (info.get('entries') or []) if isinstance(e, dict)]
+        has_more = len(raw) > count
+        entries = [nox_catalog.playlist_entry(start + i, e) for i, e in enumerate(raw[:count])]
+        total = info.get('playlist_count')
+        return json.dumps({
+            'ok': True,
+            'id': str(info.get('id') or ''),
+            'title': str(info.get('title') or 'Плейлист')[:200],
+            'uploader': str(info.get('channel') or info.get('uploader') or '')[:80],
+            'webpage_url': str(info.get('webpage_url') or url),
+            'extractor': str(info.get('extractor_key') or ''),
+            'count': int(total) if isinstance(total, int) and total > 0 else 0,
+            'start': start,
+            'entries': entries,
+            'has_more': bool(has_more),
+            'warnings': collector.warnings,
+        }, ensure_ascii=False)
+    except Exception as e:
+        return _error_json(str(e) or e.__class__.__name__, stage)
+
+
 def forget(url):
     """Убрать ссылку из кэша (например, после 403 по адресу из кэша)."""
     _cache.drop(url)

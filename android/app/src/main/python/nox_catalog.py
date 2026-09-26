@@ -275,6 +275,136 @@ def details_of(info):
         'is_live': bool(e.get('is_live')),
         'live_status': str(e.get('live_status') or ''),
         'availability': str(e.get('availability') or ''),
+        'subtitles': subtitles_of(e),
+        'chapters': chapters_of(e),
+    }
+
+
+# ---------------------------------------------------------------------
+#  0.4.0: субтитры и главы источника
+# ---------------------------------------------------------------------
+
+SUB_EXTS = ('vtt', 'srt')
+
+
+def _sub_ext(tracks):
+    """Лучший из понятных NOX форматов субтитров или ''."""
+    exts = [str(t.get('ext') or '') for t in tracks if isinstance(t, dict) and t.get('url')]
+    for x in SUB_EXTS:
+        if x in exts:
+            return x
+    return ''
+
+
+def subtitles_of(e):
+    """
+    Настоящие дорожки субтитров источника. Авторские — все, что есть.
+    Автоматические — только распознанные на языке оригинала (ключ '-orig'
+    у YouTube или единственная дорожка): машинные переводы на десятки
+    языков NOX не показывает и перевод не обещает.
+    """
+    out = []
+    subs = e.get('subtitles') if isinstance(e.get('subtitles'), dict) else {}
+    for key, tracks in subs.items():
+        if key == 'live_chat' or not isinstance(tracks, list):
+            continue
+        ext = _sub_ext(tracks)
+        if not ext:
+            continue
+        name = next((str(t.get('name') or '') for t in tracks if isinstance(t, dict) and t.get('name')), '')
+        out.append({'key': str(key), 'lang': str(key).split('-')[0], 'name': name[:60], 'auto': False, 'ext': ext})
+    auto = e.get('automatic_captions') if isinstance(e.get('automatic_captions'), dict) else {}
+    orig = [k for k in auto if str(k).endswith('-orig')]
+    if not orig and len(auto) == 1:
+        orig = list(auto)
+    for key in orig:
+        tracks = auto.get(key)
+        if not isinstance(tracks, list):
+            continue
+        ext = _sub_ext(tracks)
+        if not ext:
+            continue
+        lang = str(key)[:-5] if str(key).endswith('-orig') else str(key)
+        name = next((str(t.get('name') or '') for t in tracks if isinstance(t, dict) and t.get('name')), '')
+        out.append({'key': str(key), 'lang': lang.split('-')[0], 'name': name[:60], 'auto': True, 'ext': ext})
+    return out[:40]
+
+
+def chapters_of(e):
+    """Главы, которые передал источник: [{'title', 'start_ms', 'end_ms'}]."""
+    out = []
+    raw = e.get('chapters')
+    if not isinstance(raw, list):
+        return out
+    for c in raw[:500]:
+        if not isinstance(c, dict):
+            continue
+        start = _num(c.get('start_time'))
+        end = _num(c.get('end_time'))
+        if end <= start:
+            continue
+        out.append({'title': str(c.get('title') or '')[:120], 'start_ms': int(start * 1000), 'end_ms': int(end * 1000)})
+    return out
+
+
+def find_subtitle(e, key, auto):
+    """(ext, url) дорожки субтитров по ключу языка или None."""
+    pool = e.get('automatic_captions') if auto else e.get('subtitles')
+    if not isinstance(pool, dict):
+        return None
+    tracks = pool.get(key)
+    if not isinstance(tracks, list):
+        return None
+    ext = _sub_ext(tracks)
+    for t in tracks:
+        if isinstance(t, dict) and str(t.get('ext') or '') == ext and t.get('url'):
+            return ext, str(t['url'])
+    return None
+
+
+# ---------------------------------------------------------------------
+#  0.4.0: плейлист по одной ссылке
+# ---------------------------------------------------------------------
+
+_UNAVAILABLE_TITLES = {
+    '[private video]': 'Закрытое видео',
+    '[deleted video]': 'Видео удалено',
+    '[unavailable video]': 'Видео недоступно',
+}
+
+
+def playlist_entry(index, e):
+    """Элемент плоского списка yt-dlp -> запись для NOX (без адресов файлов)."""
+    title = str(e.get('title') or '')
+    reason = _UNAVAILABLE_TITLES.get(title.strip().lower(), '')
+    avail = str(e.get('availability') or '')
+    if not reason and avail in ('private', 'needs_auth', 'subscriber_only', 'premium_only'):
+        reason = {'private': 'Закрытое видео', 'needs_auth': 'Нужен вход в аккаунт',
+                  'subscriber_only': 'Только для спонсоров канала', 'premium_only': 'Только для Premium'}[avail]
+    vid = str(e.get('id') or '')
+    url = str(e.get('url') or e.get('webpage_url') or '')
+    ie = str(e.get('ie_key') or e.get('extractor_key') or '')
+    if url and not url.startswith('http') and vid and ie.lower().startswith('youtube'):
+        url = 'https://www.youtube.com/watch?v=' + vid
+    if not url.startswith('http'):
+        url = ''
+    if not url and not reason:
+        reason = 'Нет ссылки на видео'
+    duration = _num(e.get('duration'))
+    thumb = ''
+    thumbs = e.get('thumbnails')
+    if isinstance(thumbs, list) and thumbs and isinstance(thumbs[-1], dict):
+        thumb = str(thumbs[-1].get('url') or '')
+    return {
+        'index': int(index),
+        'id': vid,
+        'extractor': ie,
+        'url': url,
+        'title': title[:200] or 'Без названия',
+        'uploader': str(e.get('channel') or e.get('uploader') or '')[:80],
+        'duration': int(duration) if duration > 0 else 0,
+        'thumbnail': thumb if thumb.startswith('http') else '',
+        'unavailable': reason,
     }
 
 

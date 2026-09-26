@@ -15,6 +15,7 @@ import java.io.File
  *   Media/      готовые видео
  *   Covers/     обложки
  *   Metadata/   журнал и служебные файлы
+ *   Subtitles/  дорожки субтитров
  */
 class Storage(context: Context) {
     val root: File = (context.getExternalFilesDir(null) ?: context.filesDir).let { File(it, "NOX") }
@@ -22,6 +23,8 @@ class Storage(context: Context) {
     val media: File get() = ensure(File(root, "Media"))
     val covers: File get() = ensure(File(root, "Covers"))
     val metadata: File get() = ensure(File(root, "Metadata"))
+    /** Субтитры (скачанные и свои) — внутри NOX, чтобы не зависеть от прав на папки. */
+    val subtitles: File get() = ensure(File(root, "Subtitles"))
 
     private fun ensure(dir: File): File {
         if (!dir.isDirectory) dir.mkdirs()

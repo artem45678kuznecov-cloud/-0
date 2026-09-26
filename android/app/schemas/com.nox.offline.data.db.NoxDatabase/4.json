@@ -1,0 +1,1172 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 4,
+    "identityHash": "f4c0d076bc02947eb0da7131e997261a",
+    "entities": [
+      {
+        "tableName": "downloads",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `pageUrl` TEXT NOT NULL, `quality` TEXT NOT NULL, `title` TEXT NOT NULL, `videoId` TEXT NOT NULL, `formatId` TEXT NOT NULL, `resolvedUrl` TEXT NOT NULL, `headersJson` TEXT NOT NULL, `fileName` TEXT NOT NULL, `ext` TEXT NOT NULL, `height` INTEGER NOT NULL, `totalBytes` INTEGER NOT NULL, `downloadedBytes` INTEGER NOT NULL, `status` TEXT NOT NULL, `error` TEXT NOT NULL, `speedBps` INTEGER NOT NULL, `etaSec` INTEGER NOT NULL, `retries` INTEGER NOT NULL, `resolveRetries` INTEGER NOT NULL, `thumbnailUrl` TEXT NOT NULL, `durationSec` INTEGER NOT NULL, `lastStopReason` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `customTitle` TEXT NOT NULL DEFAULT '', `mode` TEXT NOT NULL DEFAULT 'progressive', `audioUrl` TEXT NOT NULL DEFAULT '', `audioHeadersJson` TEXT NOT NULL DEFAULT '{}', `audioFormatId` TEXT NOT NULL DEFAULT '', `videoTotalBytes` INTEGER NOT NULL DEFAULT 0, `audioTotalBytes` INTEGER NOT NULL DEFAULT 0, `videoDone` INTEGER NOT NULL DEFAULT 0, `audioDone` INTEGER NOT NULL DEFAULT 0, `uploader` TEXT NOT NULL DEFAULT '', `allowSplit` INTEGER NOT NULL DEFAULT 0, `planVersion` INTEGER NOT NULL DEFAULT 0, `extractorKey` TEXT NOT NULL DEFAULT '', `variantKey` TEXT NOT NULL DEFAULT '', `width` INTEGER NOT NULL DEFAULT 0, `fps` INTEGER NOT NULL DEFAULT 0, `vcodec` TEXT NOT NULL DEFAULT '', `acodec` TEXT NOT NULL DEFAULT '', `container` TEXT NOT NULL DEFAULT '', `dynamicRange` TEXT NOT NULL DEFAULT '', `audioLang` TEXT NOT NULL DEFAULT '', `videoExact` INTEGER NOT NULL DEFAULT 0, `audioExact` INTEGER NOT NULL DEFAULT 0, `videoChunk` INTEGER NOT NULL DEFAULT 0, `audioChunk` INTEGER NOT NULL DEFAULT 0, `errorKind` TEXT NOT NULL DEFAULT '', `stage` TEXT NOT NULL DEFAULT '', `audioOnly` INTEGER NOT NULL DEFAULT 0, `subtitleRequest` TEXT NOT NULL DEFAULT '[]', `subtitleError` TEXT NOT NULL DEFAULT '', `collectionId` INTEGER NOT NULL DEFAULT 0, `collectionPosition` INTEGER NOT NULL DEFAULT 0, `queueOrder` INTEGER NOT NULL DEFAULT 0)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pageUrl",
+            "columnName": "pageUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "quality",
+            "columnName": "quality",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoId",
+            "columnName": "videoId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "formatId",
+            "columnName": "formatId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resolvedUrl",
+            "columnName": "resolvedUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "headersJson",
+            "columnName": "headersJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileName",
+            "columnName": "fileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ext",
+            "columnName": "ext",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalBytes",
+            "columnName": "totalBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "downloadedBytes",
+            "columnName": "downloadedBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "error",
+            "columnName": "error",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "speedBps",
+            "columnName": "speedBps",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "etaSec",
+            "columnName": "etaSec",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retries",
+            "columnName": "retries",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resolveRetries",
+            "columnName": "resolveRetries",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "thumbnailUrl",
+            "columnName": "thumbnailUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationSec",
+            "columnName": "durationSec",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastStopReason",
+            "columnName": "lastStopReason",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "customTitle",
+            "columnName": "customTitle",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "mode",
+            "columnName": "mode",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'progressive'"
+          },
+          {
+            "fieldPath": "audioUrl",
+            "columnName": "audioUrl",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "audioHeadersJson",
+            "columnName": "audioHeadersJson",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'{}'"
+          },
+          {
+            "fieldPath": "audioFormatId",
+            "columnName": "audioFormatId",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "videoTotalBytes",
+            "columnName": "videoTotalBytes",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "audioTotalBytes",
+            "columnName": "audioTotalBytes",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "videoDone",
+            "columnName": "videoDone",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "audioDone",
+            "columnName": "audioDone",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "uploader",
+            "columnName": "uploader",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "allowSplit",
+            "columnName": "allowSplit",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "planVersion",
+            "columnName": "planVersion",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "extractorKey",
+            "columnName": "extractorKey",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "variantKey",
+            "columnName": "variantKey",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "fps",
+            "columnName": "fps",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "vcodec",
+            "columnName": "vcodec",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "acodec",
+            "columnName": "acodec",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "container",
+            "columnName": "container",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "dynamicRange",
+            "columnName": "dynamicRange",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "audioLang",
+            "columnName": "audioLang",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "videoExact",
+            "columnName": "videoExact",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "audioExact",
+            "columnName": "audioExact",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "videoChunk",
+            "columnName": "videoChunk",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "audioChunk",
+            "columnName": "audioChunk",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "errorKind",
+            "columnName": "errorKind",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "stage",
+            "columnName": "stage",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "audioOnly",
+            "columnName": "audioOnly",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "subtitleRequest",
+            "columnName": "subtitleRequest",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'[]'"
+          },
+          {
+            "fieldPath": "subtitleError",
+            "columnName": "subtitleError",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "collectionId",
+            "columnName": "collectionId",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "collectionPosition",
+            "columnName": "collectionPosition",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "queueOrder",
+            "columnName": "queueOrder",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "media",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `filePath` TEXT NOT NULL, `sizeBytes` INTEGER NOT NULL, `quality` TEXT NOT NULL, `height` INTEGER NOT NULL, `durationSec` INTEGER NOT NULL, `coverPath` TEXT NOT NULL, `pageUrl` TEXT NOT NULL, `videoId` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `contentUri` TEXT NOT NULL DEFAULT '', `uploader` TEXT NOT NULL DEFAULT '', `imported` INTEGER NOT NULL DEFAULT 0, `moveState` TEXT NOT NULL DEFAULT '', `container` TEXT NOT NULL DEFAULT '', `width` INTEGER NOT NULL DEFAULT 0, `fps` INTEGER NOT NULL DEFAULT 0, `codecs` TEXT NOT NULL DEFAULT '', `variantKey` TEXT NOT NULL DEFAULT '', `kind` TEXT NOT NULL DEFAULT 'video', `protectedFromCleanup` INTEGER NOT NULL DEFAULT 0, `subtitleId` INTEGER NOT NULL DEFAULT 0, `subtitleOffsetMs` INTEGER NOT NULL DEFAULT 0)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "sizeBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "quality",
+            "columnName": "quality",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationSec",
+            "columnName": "durationSec",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "coverPath",
+            "columnName": "coverPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pageUrl",
+            "columnName": "pageUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoId",
+            "columnName": "videoId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentUri",
+            "columnName": "contentUri",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "uploader",
+            "columnName": "uploader",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "imported",
+            "columnName": "imported",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "moveState",
+            "columnName": "moveState",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "container",
+            "columnName": "container",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "fps",
+            "columnName": "fps",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "codecs",
+            "columnName": "codecs",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "variantKey",
+            "columnName": "variantKey",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'video'"
+          },
+          {
+            "fieldPath": "protectedFromCleanup",
+            "columnName": "protectedFromCleanup",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "subtitleId",
+            "columnName": "subtitleId",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "subtitleOffsetMs",
+            "columnName": "subtitleOffsetMs",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "playback",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`mediaId` INTEGER NOT NULL, `positionMs` INTEGER NOT NULL, `durationMs` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `completed` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`mediaId`))",
+        "fields": [
+          {
+            "fieldPath": "mediaId",
+            "columnName": "mediaId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "positionMs",
+            "columnName": "positionMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completed",
+            "columnName": "completed",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "mediaId"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "collections",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `description` TEXT NOT NULL DEFAULT '', `type` TEXT NOT NULL DEFAULT 'album', `coverMediaId` INTEGER NOT NULL DEFAULT 0, `coverPath` TEXT NOT NULL DEFAULT '', `pinned` INTEGER NOT NULL DEFAULT 0, `sortOrder` INTEGER NOT NULL DEFAULT 0, `tags` TEXT NOT NULL DEFAULT '', `sourceUrl` TEXT NOT NULL DEFAULT '', `systemKey` TEXT NOT NULL DEFAULT '', `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "description",
+            "columnName": "description",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "type",
+            "columnName": "type",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'album'"
+          },
+          {
+            "fieldPath": "coverMediaId",
+            "columnName": "coverMediaId",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "coverPath",
+            "columnName": "coverPath",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "pinned",
+            "columnName": "pinned",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "sortOrder",
+            "columnName": "sortOrder",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "tags",
+            "columnName": "tags",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "sourceUrl",
+            "columnName": "sourceUrl",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "systemKey",
+            "columnName": "systemKey",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_collections_type",
+            "unique": false,
+            "columnNames": [
+              "type"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_collections_type` ON `${TABLE_NAME}` (`type`)"
+          },
+          {
+            "name": "index_collections_pinned",
+            "unique": false,
+            "columnNames": [
+              "pinned"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_collections_pinned` ON `${TABLE_NAME}` (`pinned`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "collection_items",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `collectionId` INTEGER NOT NULL, `mediaId` INTEGER NOT NULL DEFAULT 0, `chapterId` INTEGER NOT NULL DEFAULT 0, `position` INTEGER NOT NULL DEFAULT 0, `season` INTEGER NOT NULL DEFAULT 0, `episode` INTEGER NOT NULL DEFAULT 0, `title` TEXT NOT NULL DEFAULT '', `sourceUrl` TEXT NOT NULL DEFAULT '', `sourceKey` TEXT NOT NULL DEFAULT '', `unavailableReason` TEXT NOT NULL DEFAULT '', `addedAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "collectionId",
+            "columnName": "collectionId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaId",
+            "columnName": "mediaId",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "chapterId",
+            "columnName": "chapterId",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "position",
+            "columnName": "position",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "season",
+            "columnName": "season",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "episode",
+            "columnName": "episode",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "sourceUrl",
+            "columnName": "sourceUrl",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "sourceKey",
+            "columnName": "sourceKey",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "unavailableReason",
+            "columnName": "unavailableReason",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "addedAt",
+            "columnName": "addedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_collection_items_collectionId",
+            "unique": false,
+            "columnNames": [
+              "collectionId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_collection_items_collectionId` ON `${TABLE_NAME}` (`collectionId`)"
+          },
+          {
+            "name": "index_collection_items_mediaId",
+            "unique": false,
+            "columnNames": [
+              "mediaId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_collection_items_mediaId` ON `${TABLE_NAME}` (`mediaId`)"
+          },
+          {
+            "name": "index_collection_items_collectionId_mediaId_chapterId_sourceKey",
+            "unique": true,
+            "columnNames": [
+              "collectionId",
+              "mediaId",
+              "chapterId",
+              "sourceKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_collection_items_collectionId_mediaId_chapterId_sourceKey` ON `${TABLE_NAME}` (`collectionId`, `mediaId`, `chapterId`, `sourceKey`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "seasons",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `collectionId` INTEGER NOT NULL, `number` INTEGER NOT NULL, `title` TEXT NOT NULL DEFAULT '')",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "collectionId",
+            "columnName": "collectionId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "number",
+            "columnName": "number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_seasons_collectionId_number",
+            "unique": true,
+            "columnNames": [
+              "collectionId",
+              "number"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_seasons_collectionId_number` ON `${TABLE_NAME}` (`collectionId`, `number`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "chapters",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `mediaId` INTEGER NOT NULL, `title` TEXT NOT NULL, `startMs` INTEGER NOT NULL, `endMs` INTEGER NOT NULL DEFAULT -1, `kind` TEXT NOT NULL DEFAULT 'chapter', `origin` TEXT NOT NULL DEFAULT 'user', `createdAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaId",
+            "columnName": "mediaId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startMs",
+            "columnName": "startMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endMs",
+            "columnName": "endMs",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "-1"
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'chapter'"
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'user'"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_chapters_mediaId",
+            "unique": false,
+            "columnNames": [
+              "mediaId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_chapters_mediaId` ON `${TABLE_NAME}` (`mediaId`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "segment_progress",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`chapterId` INTEGER NOT NULL, `positionMs` INTEGER NOT NULL, `completed` INTEGER NOT NULL DEFAULT 0, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`chapterId`))",
+        "fields": [
+          {
+            "fieldPath": "chapterId",
+            "columnName": "chapterId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "positionMs",
+            "columnName": "positionMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completed",
+            "columnName": "completed",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "chapterId"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "bookmarks",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `mediaId` INTEGER NOT NULL, `positionMs` INTEGER NOT NULL, `title` TEXT NOT NULL DEFAULT '', `note` TEXT NOT NULL DEFAULT '', `createdAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaId",
+            "columnName": "mediaId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "positionMs",
+            "columnName": "positionMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "note",
+            "columnName": "note",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_bookmarks_mediaId",
+            "unique": false,
+            "columnNames": [
+              "mediaId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_bookmarks_mediaId` ON `${TABLE_NAME}` (`mediaId`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "subtitles",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `mediaId` INTEGER NOT NULL, `language` TEXT NOT NULL DEFAULT '', `label` TEXT NOT NULL, `origin` TEXT NOT NULL DEFAULT 'user', `format` TEXT NOT NULL, `filePath` TEXT NOT NULL, `sizeBytes` INTEGER NOT NULL DEFAULT 0, `createdAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaId",
+            "columnName": "mediaId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "language",
+            "columnName": "language",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "label",
+            "columnName": "label",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'user'"
+          },
+          {
+            "fieldPath": "format",
+            "columnName": "format",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "sizeBytes",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_subtitles_mediaId",
+            "unique": false,
+            "columnNames": [
+              "mediaId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_subtitles_mediaId` ON `${TABLE_NAME}` (`mediaId`)"
+          }
+        ],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'f4c0d076bc02947eb0da7131e997261a')"
+    ]
+  }
+}

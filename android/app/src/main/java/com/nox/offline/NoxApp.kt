@@ -54,6 +54,16 @@ class NoxApp : Application() {
         private set
     lateinit var updates: UpdateRepository
         private set
+    /** 0.4.0: коллекции и сериалы. */
+    lateinit var library: com.nox.offline.library.LibraryRepository
+        private set
+    /** 0.4.0: главы, виртуальные серии, закладки. */
+    lateinit var markup: com.nox.offline.library.MarkupRepository
+        private set
+    lateinit var subtitles: com.nox.offline.subtitles.SubtitleRepository
+        private set
+    lateinit var network: com.nox.offline.downloader.NetworkGate
+        private set
 
     /** Версия Android и декодеры телефона — для каталога вариантов качества. */
     val deviceCaps: com.nox.offline.downloader.catalog.DeviceCaps by lazy { com.nox.offline.downloader.catalog.AndroidDeviceCaps() }
@@ -72,13 +82,33 @@ class NoxApp : Application() {
         resolver = YtDlpResolver(this)
         relocator = MediaRelocator(db, saf, settings)
         val client = HttpDownloader.defaultClient()
+        library = com.nox.offline.library.LibraryRepository(db, java.io.File(storage.covers, "Collections"),
+            getSharedPreferences("nox_library", MODE_PRIVATE))
+        markup = com.nox.offline.library.MarkupRepository(db)
+        subtitles = com.nox.offline.subtitles.SubtitleRepository(db, storage.subtitles)
+        network = com.nox.offline.downloader.NetworkGate(this) { settings.downloads.value.wifiOnly }
+        val limiter = com.nox.offline.downloader.SpeedLimiter { settings.downloads.value.speedLimitKbps * 1024L }
         coordinator = DownloadCoordinator(
             db = db, storage = storage, resolver = resolver,
             http = HttpDownloader(client) { line -> NoxLog.event("http", "msg" to line) },
             client = client,
             relocator = relocator,
             splitDefault = { settings.downloads.value.splitTracks },
+            policy = DownloadCoordinator.Policy(
+                concurrency = { settings.downloads.value.concurrency },
+                network = network,
+                limiter = limiter,
+                externalTarget = { settings.downloads.value.destinationTree.isNotBlank() },
+                externalFree = { settings.downloads.value.destinationTree.let { if (it.isBlank()) -1L else saf.freeBytes(it) } },
+            ),
         )
+        coordinator.subtitleStore = subtitles
+        coordinator.libraryHook = object : DownloadCoordinator.LibraryHook {
+            override suspend fun onMediaAdded(mediaId: Long, e: com.nox.offline.data.db.DownloadEntity) {
+                library.onDownloaded(mediaId, e.sourceKey, e.collectionId, e.collectionPosition)
+            }
+        }
+        network.start()
         notifications = DownloadNotifications(this).also { it.ensureChannel() }
         coordinator.listener = object : DownloadCoordinator.Listener {
             override fun onPaused(e: com.nox.offline.data.db.DownloadEntity) = notifications.showPaused(e)
@@ -94,6 +124,7 @@ class NoxApp : Application() {
         updates.onAppStart()
         // Восстановление после гибели процесса или обновления: всё «в работе» -> в очередь.
         appScope.launch { coordinator.recover() }
+        appScope.launch { runCatching { library.ensureDefaults() } }
     }
 
     companion object {

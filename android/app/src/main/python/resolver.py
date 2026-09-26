@@ -584,8 +584,8 @@ def analyze(url, fresh=False):
         return _error_json(str(e) or e.__class__.__name__, stage)
 
 
-def _component(fmt):
-    t = nox_catalog.normalize_track(fmt)
+def _component(fmt, direct=False):
+    t = nox_catalog.normalize_track(fmt, direct)
     size = t['filesize'] if t else 0
     return {
         'format_id': str(fmt.get('format_id') or ''),
@@ -641,7 +641,8 @@ def plan(url, video_format, audio_format='', max_age=None):
                 'stage': stage,
             })
             return json.dumps(payload, ensure_ascii=False)
-        comps = [_component(v)] + ([_component(a)] if a is not None else [])
+        direct = bool(nox_catalog.entry_of(info).get('direct'))
+        comps = [_component(v, direct)] + ([_component(a, direct)] if a is not None else [])
         bad = [c['format_id'] for c in comps if c['transport'] != 'http' or not c['url']]
         if bad:
             return _error_json('transport ' + ','.join(bad), stage, warnings, js, 'unsupported-transport',

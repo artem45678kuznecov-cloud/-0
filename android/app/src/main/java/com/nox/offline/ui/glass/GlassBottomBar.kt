@@ -100,7 +100,7 @@ fun GlassBottomBar(
     var rootOffset by remember { mutableStateOf(Offset.Unspecified) }
 
     Box(modifier = modifier.fillMaxWidth().height(height).glass(shape, GlassStyles.BarAmber)) {
-        BoxWithConstraints(Modifier.fillMaxSize().padding(5.dp)) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(6.dp)) {
             val density = LocalDensity.current
             val slotPx = with(density) { (maxWidth / items.size).toPx() }
             val heightPx = with(density) { maxHeight.toPx() }

@@ -7,7 +7,6 @@ import com.nox.offline.data.db.ChapterKind
 import com.nox.offline.data.db.CollectionType
 import com.nox.offline.data.db.MediaEntity
 import com.nox.offline.data.db.PlaybackEntity
-import com.nox.offline.downloader.Quality
 import com.nox.offline.downloader.TransferScheduler
 import kotlinx.coroutines.runBlocking
 import org.junit.Assume.assumeTrue
@@ -126,16 +125,36 @@ class DemoLibrarySeed {
         }
         app.markup.addBookmark(ep5, 30_000, "Начало тренировки", "Демо-закладка")
 
-        // Очередь: настоящие передачи со стенда (медленный локальный сервер).
+        seedQueue()
+    }
+
+    /**
+     * Очередь: настоящие передачи со стенда (медленный локальный сервер),
+     * поставленные тем же путём, что «Найти видео» → «Скачать».
+     */
+    @Test fun seedQueue(): Unit = runBlocking {
+        assumeTrue("только отладочная сборка", BuildConfig.DEBUG)
+        val src = File(ctx.getExternalFilesDir(null), "demo-seed")
+        assumeTrue(src.isDirectory)
+        val db = app.db
         val co = app.coordinator
-        val a = co.enqueue("http://10.0.2.2:8766/queue/ep9.mp4", Quality.fromKey("720"), customTitle = "Клинки рассвета — 2 сезон, 9 серия")
-        val b = co.enqueue("http://10.0.2.2:8766/queue/film.mp4", Quality.fromKey("720"), customTitle = "Бегущий по крышам 2")
-        val p = co.enqueue("http://10.0.2.2:8766/queue/knight.mp4", Quality.fromKey("720"), customTitle = "Рыцарь-скелет, 2 серия")
-        val done = co.enqueue("http://10.0.2.2:8766/queue/clip.mp4", Quality.fromKey("720"), customTitle = "Вечерний клип")
-        for ((id, name) in listOf(a to "fire_red", b to "cyber", p to "dark_helmet", done to "heart_lake")) {
-            id.getOrNull()?.let { jid -> db.downloads().get(jid)?.let { d -> db.downloads().update(d.copy(thumbnailUrl = cover(name))) } }
+        co.cancelMany(db.downloads().getAll().map { it.id })
+        suspend fun add(name: String, title: String, cover: String): Long? {
+            val r = app.resolver.analyze("http://10.0.2.2:8766/queue/$name")
+            val a = (r as? com.nox.offline.downloader.catalog.AnalyzeResult.Ok)?.analysis ?: error("анализ $name: $r")
+            val cat = com.nox.offline.downloader.catalog.CatalogBuilder.build(a, app.deviceCaps)
+            val v = cat.preselect(0) ?: cat.variants.firstOrNull { it.support.ok } ?: error("нет варианта $name")
+            val id = co.enqueue(com.nox.offline.downloader.DownloadCoordinator.DownloadRequest(cat.details, v, customTitle = title)).getOrThrow()
+            val f = File(src, "cover_$cover.jpg")
+            val out = File(app.storage.covers, "demo-q-$cover.jpg").also { f.copyTo(it, overwrite = true) }
+            db.downloads().get(id)?.let { db.downloads().update(it.copy(thumbnailUrl = out.absolutePath)) }
+            return id
         }
-        p.getOrNull()?.let { co.pause(it) }
+        add("ep9.mp4", "Клинки рассвета — 2 сезон, 9 серия", "fire_red")
+        add("film.mp4", "Бегущий по крышам 2", "cyber")
+        val p = add("knight.mp4", "Рыцарь-скелет, 2 серия", "dark_helmet")
+        add("clip.mp4", "Вечерний клип", "heart_lake")
+        p?.let { co.pause(it) }
         runCatching { TransferScheduler.ensureRunning(ctx) }
     }
 

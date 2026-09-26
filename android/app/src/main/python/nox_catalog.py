@@ -111,7 +111,10 @@ def is_vk_direct(fmt):
     return bool(VK_DIRECT_RE.fullmatch(fid)) and transport_of(fmt) == 'http'
 
 
-def track_kind(fmt):
+DIRECT_VIDEO_EXT = ('mp4', 'm4v', 'webm', 'mov', 'mkv')
+
+
+def track_kind(fmt, direct=False):
     """'av' | 'video' | 'audio' | '' (не медиадорожка или непонятно что)."""
     ext = str(fmt.get('ext') or '').lower()
     if ext in SKIP_EXT:
@@ -134,6 +137,10 @@ def track_kind(fmt):
         return 'audio'
     if v == 'none' and not a and (_num(fmt.get('abr')) or ext in ('m4a', 'mp3', 'opus', 'weba', 'ogg')):
         return 'audio'
+    # Прямая ссылка на цельный файл (yt-dlp: direct): файл берётся как есть,
+    # целиком — как прямые файлы VK. Кодеки не выдумываются: они неизвестны.
+    if direct and not v and not a and ext in DIRECT_VIDEO_EXT:
+        return 'av'
     # Кодеки неизвестны: не угадываем, есть ли звук.
     return ''
 
@@ -171,14 +178,14 @@ def _audio_role(fmt):
     return ''
 
 
-def normalize_track(fmt):
+def normalize_track(fmt, direct=False):
     """Словарь дорожки для Kotlin или None, если это не медиадорожка."""
     if not isinstance(fmt, dict):
         return None
     fid = str(fmt.get('format_id') or '').strip()
     if not fid:
         return None
-    kind = track_kind(fmt)
+    kind = track_kind(fmt, direct)
     if not kind:
         return None
     w, h = dims(fmt)
@@ -251,8 +258,10 @@ def tracks_of(info):
     """Нормализованные дорожки без повторов format_id (в порядке yt-dlp)."""
     seen = set()
     out = []
-    for fmt in formats_of(entry_of(info)):
-        t = normalize_track(fmt)
+    e = entry_of(info)
+    direct = bool(e.get('direct'))
+    for fmt in formats_of(e):
+        t = normalize_track(fmt, direct)
         if t is None or t['id'] in seen:
             continue
         seen.add(t['id'])

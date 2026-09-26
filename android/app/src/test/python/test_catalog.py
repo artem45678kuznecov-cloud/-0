@@ -286,6 +286,16 @@ class PlanTest(Base):
         self.assertTrue(data['video']['filesize_exact'])
         self.assertEqual(data['video']['filesize'], 473363704)
 
+    def test_plan_for_direct_whole_file(self):
+        self.use({'id': 'clip', 'title': 'clip', 'direct': True, 'extractor_key': 'Generic',
+                  'formats': [{'format_id': 'mp4', 'url': 'http://10.0.2.2:8766/clip.mp4', 'ext': 'mp4', 'vcodec': None}]})
+        cat = json.loads(resolver.analyze('d'))
+        self.assertTrue(cat['ok'])
+        self.assertEqual([t['kind'] for t in cat['tracks']], ['av'])
+        data = json.loads(resolver.plan('d', 'mp4', ''))
+        self.assertTrue(data['ok'], data)
+        self.assertEqual(data['video']['transport'], 'http')
+
     def test_signed_url_is_passed_whole(self):
         self.use(YT)
         data = json.loads(resolver.plan('u', '308', '251'))

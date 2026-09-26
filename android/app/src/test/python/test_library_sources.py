@@ -99,5 +99,21 @@ class PlaylistEntryTest(unittest.TestCase):
         self.assertEqual(nox_catalog.playlist_entry(4, {'title': 'no link'})['unavailable'], 'Нет ссылки на видео')
 
 
+class DirectFileTest(unittest.TestCase):
+    def test_direct_whole_file_is_one_av_track(self):
+        info = {'id': 'clip', 'title': 'clip', 'direct': True, 'extractor_key': 'Generic',
+                'formats': [{'format_id': 'mp4', 'url': 'http://10.0.2.2/clip.mp4', 'ext': 'mp4', 'vcodec': None,
+                             'protocol': 'http'}]}
+        tracks = nox_catalog.tracks_of(info)
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0]['kind'], 'av')
+        self.assertEqual(tracks[0]['vcodec'], '')
+        self.assertEqual(tracks[0]['acodec'], '')
+
+    def test_unknown_codecs_without_direct_are_still_skipped(self):
+        info = {'id': 'x', 'formats': [{'format_id': 'a', 'url': 'http://x/a.mp4', 'ext': 'mp4', 'protocol': 'http'}]}
+        self.assertEqual(nox_catalog.tracks_of(info), [])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -112,9 +112,13 @@ class Base(unittest.TestCase):
     def setUp(self):
         resolver._cache.clear()
         self._orig = resolver._extract
+        self._orig_head = resolver._head_size
+        # Тесты не ходят в сеть: размер цельного файла «не отвечает».
+        resolver._head_size = lambda fmt: None
 
     def tearDown(self):
         resolver._extract = self._orig
+        resolver._head_size = self._orig_head
         resolver._cache.clear()
         resolver._cache.clock = __import__('time').time
 
@@ -295,6 +299,50 @@ class PlanTest(Base):
         data = json.loads(resolver.plan('d', 'mp4', ''))
         self.assertTrue(data['ok'], data)
         self.assertEqual(data['video']['transport'], 'http')
+
+    def test_html5_page_whole_files_are_videos(self):
+        # Обычная страница с <video><source …>: цельные MP4 разных качеств без кодеков.
+        base = 'http://10.0.2.2:8766/queue/roofs_'
+        self.use({'id': 'roofs', 'title': 'Бегущий по крышам (1)', 'extractor_key': 'HTML5MediaEmbed', 'formats': [
+            {'format_id': f'{h}p', 'url': f'{base}{h}.mp4', 'ext': 'mp4', 'height': h, 'protocol': 'http'}
+            for h in (360, 720, 1080)] + [
+            {'format_id': 'hls', 'url': 'http://10.0.2.2:8766/queue/roofs.m3u8', 'ext': 'mp4', 'protocol': 'm3u8_native'}]})
+        cat = json.loads(resolver.analyze('p'))
+        self.assertTrue(cat['ok'], cat)
+        kinds = {t['id']: t['kind'] for t in cat['tracks']}
+        self.assertEqual([kinds[f'{h}p'] for h in (360, 720, 1080)], ['av', 'av', 'av'])
+        self.assertEqual(kinds.get('hls', ''), '')  # потоковый вариант не выдаётся за цельный файл
+        self.assertEqual(cat['details']['title'], 'Бегущий по крышам')
+        data = json.loads(resolver.plan('p', '1080p', ''))
+        self.assertTrue(data['ok'], data)
+        self.assertEqual(data['video']['height'], 1080)
+
+    def test_whole_file_sizes_come_from_headers_and_are_bounded(self):
+        asked = []
+        resolver._head_size = lambda fmt: asked.append(fmt['format_id']) or {'720p': 5_000_000}.get(fmt['format_id'])
+        fmts = [{'format_id': f'{h}p', 'url': f'http://h/{h}.mp4', 'ext': 'mp4', 'height': h, 'protocol': 'http'}
+                for h in (144, 240, 360, 480, 720, 1080, 1440, 2160, 4320)]
+        fmts.append({'format_id': 'known', 'url': 'http://h/k.mp4', 'ext': 'mp4', 'height': 100, 'protocol': 'http', 'filesize': 7})
+        self.use({'id': 'p', 'title': 'p', 'extractor_key': 'HTML5MediaEmbed', 'formats': fmts})
+        cat = json.loads(resolver.analyze('p'))
+        sizes = {t['id']: (t['filesize'], t['filesize_exact']) for t in cat['tracks']}
+        self.assertEqual(sizes['720p'], (5_000_000, True))
+        self.assertEqual(sizes['360p'][0], 0)  # не ответил — размер неизвестен, не выдуман
+        self.assertEqual(len(asked), resolver.SIZE_PROBE_MAX)
+        self.assertNotIn('known', asked)
+
+    def test_sizes_are_not_probed_for_named_sites(self):
+        asked = []
+        resolver._head_size = lambda fmt: asked.append(1)
+        self.use(YT)
+        resolver.analyze('u')
+        self.assertEqual(asked, [])
+
+    def test_unknown_codecs_on_named_extractor_are_not_guessed(self):
+        self.use({'id': 'x', 'title': 't', 'extractor_key': 'SomeSite', 'formats': [
+            {'format_id': 'a', 'url': 'http://h/a.mp4', 'ext': 'mp4', 'height': 720, 'protocol': 'http'}]})
+        data = json.loads(resolver.analyze('x'))
+        self.assertFalse(data.get('ok') and any(t['kind'] == 'av' for t in data.get('tracks', [])))
 
     def test_signed_url_is_passed_whole(self):
         self.use(YT)

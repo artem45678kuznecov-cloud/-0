@@ -114,6 +114,21 @@ def is_vk_direct(fmt):
 DIRECT_VIDEO_EXT = ('mp4', 'm4v', 'webm', 'mov', 'mkv')
 
 
+# Универсальный извлекатель и его разбор <video>/<audio> на обычной странице.
+WHOLE_FILE_EXTRACTORS = ('generic', 'html5mediaembed')
+
+
+def whole_file_entry(entry):
+    """Источник отдаёт цельные файлы: прямая ссылка или обычная страница с
+    HTML5-видео (универсальный извлекатель yt-dlp). Такой файл скачивается как
+    есть, поэтому и без сведений о кодеках он — готовое видео, а не дорожка."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get('direct'):
+        return True
+    return str(entry.get('extractor_key') or entry.get('extractor') or '').lower() in WHOLE_FILE_EXTRACTORS
+
+
 def track_kind(fmt, direct=False):
     """'av' | 'video' | 'audio' | '' (не медиадорожка или непонятно что)."""
     ext = str(fmt.get('ext') or '').lower()
@@ -139,7 +154,7 @@ def track_kind(fmt, direct=False):
         return 'audio'
     # Прямая ссылка на цельный файл (yt-dlp: direct): файл берётся как есть,
     # целиком — как прямые файлы VK. Кодеки не выдумываются: они неизвестны.
-    if direct and not v and not a and ext in DIRECT_VIDEO_EXT:
+    if direct and not v and not a and ext in DIRECT_VIDEO_EXT and transport_of(fmt) == 'http':
         return 'av'
     # Кодеки неизвестны: не угадываем, есть ли звук.
     return ''
@@ -259,7 +274,7 @@ def tracks_of(info):
     seen = set()
     out = []
     e = entry_of(info)
-    direct = bool(e.get('direct'))
+    direct = whole_file_entry(e)
     for fmt in formats_of(e):
         t = normalize_track(fmt, direct)
         if t is None or t['id'] in seen:
@@ -269,6 +284,15 @@ def tracks_of(info):
     return out
 
 
+def _page_title(e):
+    title = str(e.get('title') or e.get('fulltitle') or 'Видео')
+    # Разбор <video> на странице нумерует ролики: «Заголовок (1)». Номер —
+    # не часть названия; первый (обычно единственный) ролик — это сама страница.
+    if str(e.get('extractor_key') or '').lower() == 'html5mediaembed':
+        title = re.sub(r' \(1\)$', '', title) or title
+    return title
+
+
 def details_of(info):
     e = entry_of(info)
     duration = _num(e.get('duration'))
@@ -276,7 +300,7 @@ def details_of(info):
         'extractor': str(e.get('extractor_key') or e.get('ie_key') or e.get('extractor') or ''),
         'extractor_name': str(e.get('extractor') or ''),
         'video_id': str(e.get('id') or ''),
-        'title': str(e.get('title') or e.get('fulltitle') or 'Видео'),
+        'title': _page_title(e),
         'uploader': str(e.get('channel') or e.get('uploader') or e.get('uploader_id') or ''),
         'duration': int(duration) if duration > 0 else 0,
         'thumbnail': str(e.get('thumbnail') or ''),

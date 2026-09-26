@@ -4,6 +4,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -221,6 +223,7 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FeaturedCard(c: CollectionCard, reason: String, onOpen: () -> Unit) {
     Tile(Modifier.fillMaxWidth().height(86.dp), onClick = onOpen) {
@@ -236,8 +239,9 @@ private fun FeaturedCard(c: CollectionCard, reason: String, onOpen: () -> Unit) 
                 val tags = c.summary.entity.tagList
                 if (tags.isNotEmpty()) {
                     Spacer(Modifier.weight(1f))
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        for (t in tags.take(3)) Chip(t, height = 17.dp, textSize = 9.sp)
+                    // Только метки, которые помещаются целиком: лишние не сжимаются, а не показываются.
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), maxLines = 1) {
+                        for (t in tags.take(3)) Chip(t, height = 18.dp, textSize = 9.5.sp, sidePadding = 8.dp)
                     }
                 }
             }

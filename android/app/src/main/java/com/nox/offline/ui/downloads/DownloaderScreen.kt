@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -133,34 +134,34 @@ fun DownloaderScreen(vm: MainViewModel, nav: Nav, padding: PaddingValues, onBatc
             SectionGap()
         }
         item {
-            Section(null, contentPadding = PaddingValues(12.dp)) {
+            Section(null, contentPadding = PaddingValues(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.Link, null, tint = Color(0xFFDCE0FF), modifier = Modifier.size(24.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Text("Ссылка на видео", color = Nox.TextPrimary, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                    Icon(Icons.Rounded.Link, null, tint = Color(0xFFDCE0FF), modifier = Modifier.size(19.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Ссылка на видео", color = Nox.TextPrimary, fontSize = 12.5.sp, maxLines = 1, modifier = Modifier.weight(1f))
                     Row(
                         Modifier.clip(RoundedCornerShape(14.dp)).border(1.dp, Color(0xFF8F9BFF).copy(alpha = 0.4f), RoundedCornerShape(14.dp))
-                            .clickable { supportedSheet(sheets) }.padding(horizontal = 10.dp, vertical = 5.dp),
+                            .clickable { supportedSheet(sheets) }.padding(horizontal = 8.dp, vertical = 3.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("Поддерживаются: YouTube, VK и др.", color = Color(0xFFD5D9FF), fontSize = 11.sp, maxLines = 1)
-                        Icon(Icons.Rounded.ExpandMore, null, tint = Color(0xFFD5D9FF), modifier = Modifier.size(18.dp))
+                        Text("Поддерживаются: YouTube, VK и др.", color = Color(0xFFD5D9FF), fontSize = 9.5.sp, maxLines = 1)
+                        Icon(Icons.Rounded.ExpandMore, null, tint = Color(0xFFD5D9FF), modifier = Modifier.size(15.dp))
                     }
                 }
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
                 KitField(url, vm::setUrl, "https://www.youtube.com/watch?v=…", imeAction = ImeAction.Search, onIme = { search() },
-                    label = "Ссылка на видео",
+                    label = "Ссылка на видео", minHeight = 38.dp, textSize = 12.5.sp,
                     trailing = {
                         if (url.isNotEmpty()) Icon(Icons.Rounded.Cancel, "Очистить ссылку", tint = Color(0xFFB9BFE6),
-                            modifier = Modifier.size(34.dp).clip(CircleShape).clickable { vm.setUrl(""); vm.finder.cancel() }.padding(5.dp))
+                            modifier = Modifier.size(30.dp).clip(CircleShape).clickable { vm.setUrl(""); vm.finder.cancel() }.padding(5.dp))
                         else Icon(Icons.Rounded.ContentPaste, "Вставить из буфера", tint = Color(0xFFB9BFE6),
-                            modifier = Modifier.size(34.dp).clip(CircleShape)
+                            modifier = Modifier.size(30.dp).clip(CircleShape)
                                 .clickable { clipboard.getText()?.text?.let(vm::setUrl) }.padding(5.dp))
                     })
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(9.dp))
                 val searching = state is FinderState.Searching
                 AmberButton(if (searching) "Ищем видео…" else "Найти видео", { if (searching) vm.finder.cancel() else search() },
-                    icon = Icons.Rounded.Search, height = 52.dp)
+                    icon = Icons.Rounded.Search, height = 38.dp, textSize = 13.5.sp)
                 if (searching) InlineNote("Разбираем страницу источника. Нажмите ещё раз, чтобы отменить.")
                 if (message.isNotBlank()) InlineNote(message, danger = true)
                 if (PlaylistLinks.isVideoInPlaylist(SafeUrl.extract(url) ?: url)) {
@@ -206,12 +207,13 @@ fun DownloaderScreen(vm: MainViewModel, nav: Nav, padding: PaddingValues, onBatc
         }
         item {
             Section("Массовая загрузка", icon = Icons.AutoMirrored.Rounded.List, subtitle = "Скачивай сразу несколько видео",
-                onTrailing = { onBatch(batchText) }, onTitleClick = { onBatch(batchText) }, contentPadding = PaddingValues(12.dp)) {
+                onTrailing = { onBatch(batchText) }, onTitleClick = { onBatch(batchText) },
+                contentPadding = PaddingValues(start = 10.dp, end = 10.dp, bottom = 10.dp, top = 2.dp)) {
                 KitField(batchText, { batchText = it }, "Вставьте ссылки (по одной в строке)\nhttps://www.youtube.com/watch?v=…\nhttps://vk.com/video-…",
-                    singleLine = false, minHeight = 96.dp, imeAction = ImeAction.Default, label = "Список ссылок")
-                Spacer(Modifier.height(10.dp))
+                    singleLine = false, minHeight = 60.dp, imeAction = ImeAction.Default, label = "Список ссылок", textSize = 11.sp)
+                Spacer(Modifier.height(8.dp))
                 TileButton("Разобрать ссылки", { onBatch(batchText) }, Modifier.fillMaxWidth(), icon = Icons.AutoMirrored.Rounded.PlaylistAdd,
-                    chevron = true, height = 48.dp)
+                    chevron = true, height = 34.dp, textSize = 12.sp)
             }
         }
     }
@@ -222,33 +224,33 @@ private fun ResultCard(s: FinderState.Ready, vm: MainViewModel, sheets: SheetCon
     val d = s.catalog.details
     val guess = remember(d.title) { SeriesNumbering.guess(d.title) }
     val context = LocalContext.current
-    Section(null, contentPadding = PaddingValues(10.dp)) {
+    Section(null, contentPadding = PaddingValues(9.dp)) {
         Row {
             Box {
-                Cover(d.thumbnail, Modifier.width(150.dp).height(78.dp), RoundedCornerShape(10.dp))
-                Box(Modifier.align(Alignment.BottomStart).padding(6.dp).size(32.dp).clip(CircleShape)
+                Cover(d.thumbnail, Modifier.width(147.dp).height(75.dp), RoundedCornerShape(10.dp))
+                Box(Modifier.align(Alignment.BottomStart).padding(5.dp).size(28.dp).clip(CircleShape)
                     .border(1.5.dp, nox().accent, CircleShape), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.size(18.dp))
                 }
                 if (d.durationSec > 0) DurationBadge(Format.clock(d.durationSec), Modifier.align(Alignment.BottomEnd).padding(5.dp))
             }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(d.title, color = Nox.TextPrimary, fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 2,
-                    overflow = TextOverflow.Ellipsis, lineHeight = 19.sp)
+                Text(d.title, color = Nox.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2,
+                    overflow = TextOverflow.Ellipsis, lineHeight = 16.sp)
                 if (guess != null) {
                     Text(listOfNotNull(guess.season.takeIf { it > 0 }?.let { "$it сезон" }, "${guess.episode} серия").joinToString(" • "),
-                        color = LavenderText, fontSize = 13.sp)
+                        color = LavenderText, fontSize = 11.sp)
                 }
                 Spacer(Modifier.height(3.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(d.sourceLabel, color = Nox.TextPrimary, fontSize = 13.sp)
-                    if (d.uploader.isNotBlank()) Text("  •  ${d.uploader}", color = LavenderText, fontSize = 13.sp, maxLines = 1,
+                    Text(d.sourceLabel, color = Nox.TextPrimary, fontSize = 11.sp)
+                    if (d.uploader.isNotBlank()) Text("  •  ${d.uploader}", color = LavenderText, fontSize = 11.sp, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
                 }
             }
             Icon(Icons.Rounded.MoreVert, "Действия", tint = Color(0xFFD5D9FF),
-                modifier = Modifier.size(34.dp).clip(CircleShape).clickable {
+                modifier = Modifier.size(30.dp).clip(CircleShape).clickable {
                     sheets.actions(d.title, d.sourceLabel, listOf(
                         SheetAction(if (s.audioOnly) "Скачать видео" else "Скачать только звук", Icons.Rounded.MusicNote) {
                             vm.finder.setAudioOnly(!s.audioOnly)
@@ -291,8 +293,8 @@ private fun QualitySection(s: FinderState.Ready, vm: MainViewModel, sheets: Shee
     Section(if (s.audioOnly) "Только звук" else "Качество видео", icon = if (s.audioOnly) Icons.Rounded.MusicNote else Icons.Rounded.Hd,
         trailing = "Доступно ${variantsWord(count)}") {
         ChoiceRow(listOf(false to "Видео со звуком", true to "Только звук"), s.audioOnly, { vm.finder.setAudioOnly(it) },
-            height = 34.dp, textSize = 13.sp)
-        Spacer(Modifier.height(8.dp))
+            height = 28.dp, textSize = 11.5.sp)
+        Spacer(Modifier.height(6.dp))
         if (!s.audioOnly) {
             for (v in cat.main) {
                 val alternatives = cat.alternatives(v)
@@ -317,7 +319,7 @@ private fun QualitySection(s: FinderState.Ready, vm: MainViewModel, sheets: Shee
             InlineNote("Звук сохраняется как есть — ${s.selectedAudio?.formatLabel ?: "в исходном формате"}, без перекодирования " +
                 "и без переименования в MP3.")
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val lang = cat.languages.firstOrNull { it.code == cat.language }
             PickerTile(Icons.AutoMirrored.Rounded.VolumeUp, "Аудиодорожка",
@@ -330,7 +332,7 @@ private fun QualitySection(s: FinderState.Ready, vm: MainViewModel, sheets: Shee
                     for (l in cat.languages) {
                         Tile(Modifier.fillMaxWidth().padding(bottom = 6.dp), selected = l.code == cat.language,
                             onClick = { vm.finder.setLanguage(l.code); close() }) {
-                            Text(l.label + if (l.original) " · оригинал" else "", color = Nox.TextPrimary, fontSize = 15.sp,
+                            Text(l.label + if (l.original) " · оригинал" else "", color = Nox.TextPrimary, fontSize = 14.sp,
                                 modifier = Modifier.padding(14.dp))
                         }
                     }
@@ -347,12 +349,12 @@ private fun QualitySection(s: FinderState.Ready, vm: MainViewModel, sheets: Shee
                 subtitlesSheet(sheets, vm)
             }
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
         val size = if (s.audioOnly) s.selectedAudio?.let { sizeLabel(it.sizeBytes, it.sizeKind) } else s.selected?.let { sizeText(it) }
         val canDownload = if (s.audioOnly) s.selectedAudio != null else s.selected != null
         AmberButton(if (vm.finder.replanId != null) "Скачать заново" else "Скачать", {
             vm.downloadSelected { nav.back() }
-        }, icon = Icons.Rounded.Download, trailing = size, enabled = canDownload, height = 56.dp)
+        }, icon = Icons.Rounded.Download, trailing = size, enabled = canDownload, height = 40.dp, textSize = 14.sp)
         if (vm.finder.replanId != null) InlineNote("Прежний вариант недоступен: его скачанные части удалятся, когда вы подтвердите новый выбор.")
     }
 }
@@ -372,34 +374,34 @@ private fun QualityRow(v: Variant, selected: Boolean, onClick: () -> Unit, compa
                        onMore: () -> Unit = {}) {
     val p = nox()
     val enabled = v.support.ok
-    Tile(Modifier.fillMaxWidth().padding(bottom = 6.dp, start = if (compact) 18.dp else 0.dp).heightIn(min = 44.dp)
+    Tile(Modifier.fillMaxWidth().padding(bottom = 4.dp, start = if (compact) 18.dp else 0.dp).heightIn(min = 30.dp)
         .semantics { this.selected = selected; role = Role.RadioButton },
         onClick = if (enabled) onClick else null, selected = selected) {
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(24.dp).clip(CircleShape).border(2.dp, if (selected) p.accent else Color(0xFFB8BEE6).copy(alpha = if (enabled) 1f else 0.3f),
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(18.dp).clip(CircleShape).border(1.5.dp, if (selected) p.accent else Color(0xFFB8BEE6).copy(alpha = if (enabled) 1f else 0.3f),
                 CircleShape), contentAlignment = Alignment.Center) {
-                if (selected) Box(Modifier.size(12.dp).clip(CircleShape).background(p.accentLight))
+                if (selected) Box(Modifier.size(9.dp).clip(CircleShape).background(p.accentLight))
             }
-            Spacer(Modifier.width(18.dp))
+            Spacer(Modifier.width(22.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(v.title, color = if (enabled) Nox.TextPrimary else Nox.TextMuted, fontSize = if (compact) 14.sp else 16.sp,
-                        fontWeight = FontWeight.Medium)
+                    Text(v.title, color = if (enabled) Nox.TextPrimary else Nox.TextMuted, fontSize = if (compact) 11.5.sp else 12.5.sp,
+                        fontWeight = FontWeight.Medium, modifier = Modifier.widthIn(min = 42.dp))
                     tierBadge(v.tierHeight)?.let { Spacer(Modifier.width(10.dp)); Badge(it, amber = selected) }
                     if (v.hdr) { Spacer(Modifier.width(6.dp)); Badge("HDR", amber = selected) }
                     if (compact || v.needsMerge.not()) {
                         Spacer(Modifier.width(6.dp))
-                        Text(CodecNames.container(v.outputContainer), color = LavenderText, fontSize = 11.sp)
+                        Text(CodecNames.container(v.outputContainer), color = LavenderText, fontSize = 9.5.sp)
                     }
                 }
                 if (!enabled) Text((v.support as? com.nox.offline.downloader.catalog.Support.No)?.reason.orEmpty(), color = Nox.TextMuted,
-                    fontSize = 11.5.sp, maxLines = 2)
-                else if (compact) Text(techLine(v), color = LavenderText, fontSize = 11.5.sp, maxLines = 1)
+                    fontSize = 10.sp, maxLines = 2)
+                else if (compact) Text(techLine(v), color = LavenderText, fontSize = 10.sp, maxLines = 1)
             }
-            Text(sizeText(v), color = Color(0xFFE3E6FA), fontSize = 14.sp)
+            Text(sizeText(v), color = Color(0xFFE3E6FA), fontSize = 11.5.sp)
             if (more > 0) {
                 Icon(Icons.Rounded.ExpandMore, "Другие кодеки этой ступени: $more", tint = LavenderText,
-                    modifier = Modifier.padding(start = 4.dp).size(28.dp).clip(CircleShape).clickable(onClick = onMore).padding(3.dp))
+                    modifier = Modifier.padding(start = 4.dp).size(24.dp).clip(CircleShape).clickable(onClick = onMore).padding(3.dp))
             }
         }
     }
@@ -408,25 +410,25 @@ private fun QualityRow(v: Variant, selected: Boolean, onClick: () -> Unit, compa
 @Composable
 private fun AudioRow(a: AudioVariant, selected: Boolean, onClick: () -> Unit) {
     val enabled = a.support.ok
-    Tile(Modifier.fillMaxWidth().padding(bottom = 6.dp).semantics { this.selected = selected; role = Role.RadioButton },
+    Tile(Modifier.fillMaxWidth().padding(bottom = 4.dp).heightIn(min = 30.dp).semantics { this.selected = selected; role = Role.RadioButton },
         onClick = if (enabled) onClick else null, selected = selected) {
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(24.dp).clip(CircleShape).border(2.dp, if (selected) nox().accent else Color(0xFFB8BEE6), CircleShape),
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(18.dp).clip(CircleShape).border(1.5.dp, if (selected) nox().accent else Color(0xFFB8BEE6), CircleShape),
                 contentAlignment = Alignment.Center) {
-                if (selected) Box(Modifier.size(12.dp).clip(CircleShape).background(nox().accentLight))
+                if (selected) Box(Modifier.size(9.dp).clip(CircleShape).background(nox().accentLight))
             }
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(22.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(a.title.ifBlank { a.codecLabel }, color = Nox.TextPrimary, fontSize = 15.sp)
+                    Text(a.title.ifBlank { a.codecLabel }, color = Nox.TextPrimary, fontSize = 12.5.sp)
                     Spacer(Modifier.width(8.dp))
                     Badge(a.outputExt.uppercase(), amber = selected)
                 }
                 val lang = a.track.language.takeIf { it.isNotBlank() }?.let { CatalogBuilder.languageName(it) }
                 if (lang != null || !enabled) Text(listOfNotNull(lang, (a.support as? com.nox.offline.downloader.catalog.Support.No)?.reason)
-                    .joinToString(" · "), color = LavenderText, fontSize = 11.5.sp)
+                    .joinToString(" · "), color = LavenderText, fontSize = 10.sp)
             }
-            Text(sizeLabel(a.sizeBytes, a.sizeKind), color = Color(0xFFE3E6FA), fontSize = 14.sp)
+            Text(sizeLabel(a.sizeBytes, a.sizeKind), color = Color(0xFFE3E6FA), fontSize = 11.5.sp)
         }
     }
 }
@@ -434,25 +436,26 @@ private fun AudioRow(a: AudioVariant, selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun Badge(text: String, amber: Boolean) {
     val p = nox()
-    Box(Modifier.clip(RoundedCornerShape(8.dp)).border(1.dp, if (amber) p.accent else Color(0xFF8F9BFF).copy(alpha = 0.45f),
-        RoundedCornerShape(8.dp)).padding(horizontal = 7.dp, vertical = 2.dp)) {
-        Text(text, color = if (amber) p.accentLight else Color(0xFFD5D9FF), fontSize = 11.sp, fontWeight = FontWeight.Medium)
+    Box(Modifier.clip(RoundedCornerShape(7.dp)).background(if (amber) p.accentDeep.copy(alpha = 0.25f) else Color(0xFF1A1F3A).copy(alpha = 0.6f))
+        .border(1.dp, if (amber) p.accent else Color(0xFF8F9BFF).copy(alpha = 0.45f), RoundedCornerShape(7.dp))
+        .padding(horizontal = 6.dp, vertical = 1.dp)) {
+        Text(text, color = if (amber) p.accentLight else Color(0xFFD5D9FF), fontSize = 9.sp, fontWeight = FontWeight.Medium)
     }
 }
 
 @Composable
 private fun PickerTile(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, value: String, modifier: Modifier,
                        enabled: Boolean, onClick: () -> Unit) {
-    Tile(modifier.heightIn(min = 58.dp), onClick = if (enabled) onClick else null, radius = 14.dp) {
-        Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, tint = Color(0xFFDCE0FF), modifier = Modifier.size(26.dp))
-            Spacer(Modifier.width(10.dp))
+    Tile(modifier.heightIn(min = 38.dp), onClick = if (enabled) onClick else null, radius = 12.dp) {
+        Row(Modifier.padding(horizontal = 10.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, tint = Color(0xFFDCE0FF), modifier = Modifier.size(19.dp))
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, color = Nox.TextPrimary, fontSize = 12.5.sp)
-                Text(value, color = if (enabled) Color(0xFFE6E8FF) else LavenderText, fontSize = 13.5.sp, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis)
+                Text(title, color = Nox.TextPrimary, fontSize = 9.5.sp, lineHeight = 12.sp)
+                Text(value, color = if (enabled) Color(0xFFE6E8FF) else LavenderText, fontSize = 11.sp, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, lineHeight = 14.sp)
             }
-            if (enabled) Icon(Icons.Rounded.ExpandMore, null, tint = Color(0xFFD5D9FF))
+            if (enabled) Icon(Icons.Rounded.ExpandMore, null, tint = Color(0xFFD5D9FF), modifier = Modifier.size(18.dp))
         }
     }
 }

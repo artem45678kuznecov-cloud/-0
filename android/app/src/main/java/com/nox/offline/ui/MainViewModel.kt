@@ -64,7 +64,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------- данные ----------------
 
-    val downloads: StateFlow<List<DownloadEntity>> = nox.db.downloads().observeAll()
+    /** null — список ещё не прочитан из базы: очередь не показывает «пусто» раньше времени. */
+    val downloadsLoaded: StateFlow<List<DownloadEntity>?> = nox.db.downloads().observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val downloads: StateFlow<List<DownloadEntity>> = downloadsLoaded.map { it.orEmpty() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val items: StateFlow<List<LibraryItem>> = combine(nox.db.media().observeAll(), nox.db.playback().observeAll()) { media, playback ->

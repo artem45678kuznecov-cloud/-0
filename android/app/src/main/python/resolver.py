@@ -509,6 +509,53 @@ def _extract(url):
     return info, collector.warnings, stats
 
 
+SIZE_PROBE_MAX = 8
+SIZE_PROBE_TIMEOUT = 5
+
+
+def _head_size(fmt):
+    """Размер цельного файла из заголовков ответа (HEAD, иначе GET первого байта).
+    Тело не скачивается. Любая ошибка — None: размер остаётся неизвестным."""
+    import urllib.request
+    url = str(fmt.get('url') or '')
+    headers = {str(k): str(v) for k, v in (fmt.get('http_headers') or {}).items()}
+    try:
+        req = urllib.request.Request(url, headers=headers, method='HEAD')
+        with urllib.request.urlopen(req, timeout=SIZE_PROBE_TIMEOUT) as r:
+            n = int(r.headers.get('Content-Length') or 0)
+            if r.status == 200 and n > 0:
+                return n
+    except Exception:
+        pass
+    try:
+        req = urllib.request.Request(url, headers=dict(headers, Range='bytes=0-0'))
+        with urllib.request.urlopen(req, timeout=SIZE_PROBE_TIMEOUT) as r:
+            m = re.search(r'/(\d+)$', str(r.headers.get('Content-Range') or ''))
+            if r.status == 206 and m:
+                return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _probe_sizes(info):
+    """Цельные файлы «других сайтов» обычно приходят без размера. Узнаём его
+    заголовками — не больше SIZE_PROBE_MAX вариантов, параллельно и с пределом времени."""
+    e = nox_catalog.entry_of(info)
+    if not nox_catalog.whole_file_entry(e):
+        return
+    todo = [f for f in nox_catalog.formats_of(e)
+            if nox_catalog.transport_of(f) == 'http' and not f.get('filesize') and not f.get('filesize_approx')
+            and nox_catalog.track_kind(f, True)][:SIZE_PROBE_MAX]
+    if not todo:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(4, len(todo))) as pool:
+        for f, n in zip(todo, pool.map(_head_size, todo)):
+            if n:
+                f['filesize'] = n
+
+
 def _versions():
     ejs = ''
     try:
@@ -577,6 +624,7 @@ def analyze(url, fresh=False):
                 return _error_json(text, 'js', warnings, js, 'js-runtime',
                                    'Не удалось выполнить проверку YouTube во встроенном JS-движке.')
             return _error_json(text, stage, warnings, js, 'no-formats', 'Источник не отдал ни одного формата видео.')
+        _probe_sizes(info)
         now = time.time()
         _cache.put(url, info)
         return json.dumps(_catalog_json(info, warnings, js, now, False), ensure_ascii=False)
@@ -641,7 +689,7 @@ def plan(url, video_format, audio_format='', max_age=None):
                 'stage': stage,
             })
             return json.dumps(payload, ensure_ascii=False)
-        direct = bool(nox_catalog.entry_of(info).get('direct'))
+        direct = nox_catalog.whole_file_entry(nox_catalog.entry_of(info))
         comps = [_component(v, direct)] + ([_component(a, direct)] if a is not None else [])
         bad = [c['format_id'] for c in comps if c['transport'] != 'http' or not c['url']]
         if bad:

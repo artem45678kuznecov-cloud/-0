@@ -33,6 +33,7 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -53,6 +54,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -269,15 +271,15 @@ fun AmberButton(
         contentAlignment = Alignment.Center) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (icon != null) {
-                Icon(icon, null, tint = Color.White.copy(alpha = if (enabled) 1f else 0.4f), modifier = Modifier.size(26.dp))
-                Spacer(Modifier.width(16.dp))
+                Icon(icon, null, tint = Color.White.copy(alpha = if (enabled) 1f else 0.4f), modifier = Modifier.size((textSize.value * 1.45f).dp))
+                Spacer(Modifier.width((textSize.value * 0.9f).dp))
             }
             Text(text, color = Color.White.copy(alpha = if (enabled) 1f else 0.45f), fontSize = textSize, fontWeight = FontWeight.SemiBold)
             if (trailing != null) {
-                Spacer(Modifier.width(22.dp))
-                Box(Modifier.width(1.dp).height(26.dp).background(p.accentLight.copy(alpha = 0.45f)))
-                Spacer(Modifier.width(22.dp))
-                Text(trailing, color = Color.White.copy(alpha = 0.9f), fontSize = 15.sp)
+                Spacer(Modifier.width((textSize.value * 1.2f).dp))
+                Box(Modifier.width(1.dp).height((textSize.value * 1.45f).dp).background(p.accentLight.copy(alpha = 0.45f)))
+                Spacer(Modifier.width((textSize.value * 1.2f).dp))
+                Text(trailing, color = Color.White.copy(alpha = 0.9f), fontSize = textSize * 0.84f)
             }
         }
     }
@@ -293,12 +295,13 @@ fun TileButton(
     chevron: Boolean = false,
     height: Dp = 46.dp,
     enabled: Boolean = true,
+    textSize: TextUnit = 13.5.sp,
 ) {
     Tile(modifier.height(height), onClick = if (enabled) onClick else null, radius = 14.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).align(Alignment.Center), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center) {
             if (icon != null) { Icon(icon, null, tint = Color(0xFFE6E9FF), modifier = Modifier.size(20.dp)); Spacer(Modifier.width(10.dp)) }
-            Text(text, color = Nox.TextPrimary.copy(alpha = if (enabled) 1f else 0.45f), fontSize = 13.5.sp, maxLines = 1,
+            Text(text, color = Nox.TextPrimary.copy(alpha = if (enabled) 1f else 0.45f), fontSize = textSize, maxLines = 1,
                 modifier = if (chevron) Modifier.weight(1f, fill = false) else Modifier)
             if (chevron) {
                 Spacer(Modifier.weight(1f))
@@ -339,6 +342,7 @@ fun Chip(
     onClick: (() -> Unit)? = null,
     textSize: TextUnit = 12.5.sp,
     height: Dp = 28.dp,
+    sidePadding: Dp = 11.dp,
 ) {
     val p = nox()
     Row(
@@ -346,11 +350,12 @@ fun Chip(
             .background(if (amber) p.accentDeep.copy(alpha = 0.28f) else Color(0xFF12162C).copy(alpha = 0.72f))
             .border(1.dp, if (amber) p.accent.copy(alpha = 0.9f) else Lavender.copy(alpha = 0.38f), RoundedCornerShape(height / 2))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick, role = Role.Button) else Modifier)
-            .padding(horizontal = 11.dp),
+            .padding(horizontal = sidePadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) { Icon(icon, null, tint = if (amber) p.accentLight else Color(0xFFDDE1FF), modifier = Modifier.size(15.dp)); Spacer(Modifier.width(6.dp)) }
-        Text(text, color = if (amber) p.accentLight else Color(0xFFDDE1FF), fontSize = textSize, maxLines = 1)
+        Text(text, color = if (amber) p.accentLight else Color(0xFFDDE1FF), fontSize = textSize, maxLines = 1,
+            lineHeight = textSize, style = LocalTextStyle.current.copy(platformStyle = PlatformTextStyle(includeFontPadding = false)))
     }
 }
 
@@ -457,21 +462,24 @@ fun KitField(
     imeAction: ImeAction = ImeAction.Done,
     onIme: (() -> Unit)? = null,
     label: String = placeholder,
+    textSize: TextUnit = 14.5.sp,
 ) {
     val p = nox()
+    val radius = if (singleLine) minHeight / 2.8f else 12.dp
     Row(
-        modifier.fillMaxWidth().heightIn(min = minHeight).clip(RoundedCornerShape(16.dp))
+        modifier.fillMaxWidth().heightIn(min = minHeight).clip(RoundedCornerShape(radius))
             .background(Color(0xFF0B0F20).copy(alpha = 0.78f))
-            .border(1.dp, Lavender.copy(alpha = 0.34f), RoundedCornerShape(16.dp))
-            .padding(horizontal = 14.dp, vertical = if (singleLine) 0.dp else 10.dp),
+            .border(1.dp, Lavender.copy(alpha = 0.34f), RoundedCornerShape(radius))
+            .padding(horizontal = 12.dp, vertical = if (singleLine) 0.dp else 8.dp),
         verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top,
     ) {
         if (leading != null) { Icon(leading, null, tint = Color(0xFFBFC6FF), modifier = Modifier.size(24.dp)); Spacer(Modifier.width(12.dp)) }
-        Box(Modifier.weight(1f).padding(vertical = if (singleLine) 9.dp else 0.dp)) {
-            if (value.isEmpty()) Text(placeholder, color = Color(0xFF8A90B8), fontSize = 14.5.sp, lineHeight = 20.sp)
+        val line = textSize * 1.38f
+        Box(Modifier.weight(1f).padding(vertical = if (singleLine) 6.dp else 0.dp)) {
+            if (value.isEmpty()) Text(placeholder, color = Color(0xFF8A90B8), fontSize = textSize, lineHeight = line)
             BasicTextField(
                 value = value, onValueChange = onChange, singleLine = singleLine,
-                textStyle = TextStyle(color = Nox.TextPrimary, fontSize = 14.5.sp, lineHeight = 20.sp),
+                textStyle = TextStyle(color = Nox.TextPrimary, fontSize = textSize, lineHeight = line),
                 cursorBrush = SolidColor(p.accent),
                 keyboardOptions = KeyboardOptions(imeAction = imeAction),
                 keyboardActions = KeyboardActions(onAny = { onIme?.invoke() }),
@@ -516,6 +524,6 @@ fun SectionGap() = Spacer(Modifier.height(Kit.SectionGap))
 /** Подсказка-ошибка внутри секции. */
 @Composable
 fun InlineNote(text: String, modifier: Modifier = Modifier, danger: Boolean = false) {
-    Text(text, color = if (danger) Nox.Danger else LavenderText, fontSize = 13.sp, lineHeight = 17.sp,
+    Text(text, color = if (danger) Nox.Danger else LavenderText, fontSize = 11.5.sp, lineHeight = 15.sp,
         modifier = modifier.padding(horizontal = 4.dp, vertical = 4.dp))
 }

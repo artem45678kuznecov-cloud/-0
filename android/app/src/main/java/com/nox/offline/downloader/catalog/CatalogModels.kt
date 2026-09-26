@@ -117,8 +117,13 @@ data class VideoDetails(
             isYouTube -> "YouTube"
             extractor.equals("VK", true) || extractor.startsWith("VK", true) -> "VK Видео"
             extractor.isBlank() -> "Сайт"
+            // Универсальный разбор страницы: имя извлекателя ничего не скажет, покажем сайт.
+            extractor.equals("Generic", true) || extractor.equals("HTML5MediaEmbed", true) -> siteHost(webpageUrl.ifBlank { pageUrl })
             else -> extractor
         }
+
+    private fun siteHost(url: String): String =
+        runCatching { java.net.URI(url).host }.getOrNull()?.removePrefix("www.")?.takeIf { it.isNotBlank() } ?: "Сайт"
 
     companion object {
         fun parse(pageUrl: String, o: JSONObject) = VideoDetails(

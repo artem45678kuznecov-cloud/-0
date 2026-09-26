@@ -87,7 +87,8 @@ fun elements(n: Int): String {
 @Composable
 fun QueueScreen(vm: MainViewModel, nav: Nav, padding: PaddingValues, onDownloadMenu: (DownloadEntity) -> Unit,
                 onConfirmCancel: (DownloadEntity) -> Unit, onOpenCompleted: (DownloadEntity) -> Unit) {
-    val list by vm.downloads.collectAsState()
+    val loaded by vm.downloadsLoaded.collectAsState()
+    val list = loaded.orEmpty()
     val space by vm.space.collectAsState()
     val net by vm.networkState.collectAsState()
     val prefs by vm.downloadPrefs.collectAsState()
@@ -159,7 +160,7 @@ fun QueueScreen(vm: MainViewModel, nav: Nav, padding: PaddingValues, onDownloadM
                 SectionGap()
             }
         }
-        if (list.isEmpty()) {
+        if (loaded != null && list.isEmpty()) {
             item {
                 Section(null) {
                     EmptyBlock(Icons.Rounded.Download, "Загрузок пока нет",

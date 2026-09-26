@@ -125,8 +125,10 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
                                 else -> "Проверка — по кнопке или в фоне"
                             }, color = LavenderText, fontSize = 9.5.sp, maxLines = 2, lineHeight = 12.sp)
                         }
-                        TileButton("Проверить ещё раз", { vm.checkUpdates() }, Modifier.width(128.dp), icon = Icons.Rounded.Sync, height = 30.dp,
-                            textSize = 10.5.sp)
+                        // «Ещё раз» — только когда проверка уже была и сказала, что версия последняя.
+                        TileButton(if (update is UpdateState.UpToDate) "Проверить ещё раз" else "Проверить", { vm.checkUpdates() },
+                            Modifier.width(if (update is UpdateState.UpToDate) 160.dp else 124.dp), icon = Icons.Rounded.Sync, height = 30.dp,
+                            textSize = 10.sp)
                     }
                 }
                 if (update is UpdateState.Available || update is UpdateState.Downloading || update is UpdateState.NeedsPermission ||

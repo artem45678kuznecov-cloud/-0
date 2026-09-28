@@ -54,7 +54,38 @@ class FileRepairDeviceTest {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
-    /** Склейка MediaMuxer (moov в конце, stco) → тот же ролик поперёк 4 ГБ со смещениями по модулю 2^32. */
+    /**
+     * moov, где индекс кадров переписан 32-битным stco (co64 → stco), а каждое
+     * смещение — через [map]: так пишет MP4-писатель без 64-битных смещений.
+     */
+    private fun to32(moov: ByteArray, map: (Long) -> Long): ByteArray {
+        val m = Bytes(moov)
+        val containers = setOf("moov", "trak", "mdia", "minf", "stbl")
+        fun box(type: String, body: ByteArray): ByteArray {
+            val o = java.io.ByteArrayOutputStream()
+            java.io.DataOutputStream(o).apply { writeInt(8 + body.size); writeBytes(type); write(body) }
+            return o.toByteArray()
+        }
+        fun walk(b: Bytes.Box): ByteArray = when (b.type) {
+            in containers -> box(b.type, m.children(b.dataStart, b.end).map { walk(it) }.fold(ByteArray(0)) { a, c -> a + c })
+            "stco", "co64" -> {
+                val n = m.u32(b.dataStart + 4).toInt()
+                val o = java.io.ByteArrayOutputStream()
+                java.io.DataOutputStream(o).apply {
+                    writeInt(0); writeInt(n)
+                    for (i in 0 until n) {
+                        val v = if (b.type == "co64") m.u64(b.dataStart + 8 + 8 * i) else m.u32(b.dataStart + 8 + 4 * i)
+                        writeInt(map(v).toInt())
+                    }
+                }
+                box("stco", o.toByteArray())
+            }
+            else -> moov.copyOfRange(b.pos, b.end)
+        }
+        return walk(m.children(0, moov.size).single { it.type == "moov" })
+    }
+
+    /** Склейка MediaMuxer (moov в конце) → тот же ролик поперёк 4 ГБ со смещениями по модулю 2^32. */
     private fun bigWrapped(dir: File): File {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         fun asset(name: String) = File(dir, name).also { f -> assets.open("media/$name").use { i -> f.outputStream().use { i.copyTo(it) } } }
@@ -70,17 +101,7 @@ class FileRepairDeviceTest {
         val ftypBytes = ByteArray(ftyp.size.toInt()).also { src.read(ftyp.pos, it) }
         src.close()
         val x = four - payload.size / 2
-        val moov = idx.moovBytes.copyOf()
-        val m = Bytes(moov)
-        for (t in idx.tracks) {
-            assertFalse("склейка малого ролика должна дать stco", t.co64)
-            val box = t.chunkBoxOffsetInMoov
-            val count = m.u32(box + 12).toInt()
-            for (i in 0 until count) {
-                val v = (m.u32(box + 16 + 4 * i) - region.first + x) and 0xFFFFFFFFL
-                for (k in 0 until 4) moov[box + 16 + 4 * i + k] = (v shr (24 - 8 * k)).toByte()
-            }
-        }
+        val moov = to32(idx.moovBytes) { v -> (v - region.first + x) and 0xFFFFFFFFL }
         val out = File(dir, "Большой фильм [t4g].mp4").apply { delete() }
         RandomAccessFile(out, "rw").use { f ->
             f.write(ftypBytes)

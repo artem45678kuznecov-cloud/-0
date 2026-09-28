@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+
 package com.nox.offline
 
 import android.media.MediaExtractor
@@ -10,6 +12,11 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.nox.offline.downloader.MediaMerger
+import com.nox.offline.media.ChannelByteSource
+import com.nox.offline.media.CheckControl
+import com.nox.offline.media.ContainerCheck
+import com.nox.offline.media.FileCheck
+import com.nox.offline.media.Media3Probe
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -179,5 +186,38 @@ class MediaMergerDeviceTest {
         var pos = 0L
         instr.runOnMainSync { pos = player!!.currentPosition; player!!.release() }
         assertTrue("позиция $pos", pos in 1_500L..2_600L)
+    }
+
+    private fun nox(file: File): Pair<FileCheck, Media3Probe.Result> {
+        val c = ChannelByteSource.of(file).use { ContainerCheck.check(it) }
+        val kind = ChannelByteSource.of(file).use { ContainerCheck.kindOf(it) }
+        val p = Media3Probe.run(ctx, android.net.Uri.fromFile(file), kind, 0, CheckControl.NONE)
+        return c to p
+    }
+
+    /**
+     * «Проверить файл» на настоящих результатах склейки MediaMuxer: без ложных
+     * тревог (MP4 H.264, WebM VP9 1440p, MP4 AV1), а обрезанный файл — «неполный».
+     */
+    @Test fun fileCheckAcceptsMuxerOutputAndCatchesTruncation(): Unit = runBlocking {
+        val cases = mutableListOf(Triple("video_only.mp4", "audio_only.m4a", MediaMerger.CONTAINER_MP4))
+        if (Build.VERSION.SDK_INT >= 29) cases += Triple("vp9_1440_video.webm", "opus_audio.webm", MediaMerger.CONTAINER_WEBM)
+        if (Build.VERSION.SDK_INT >= 34) cases += Triple("av1_video.mp4", "audio_only.m4a", MediaMerger.CONTAINER_MP4)
+        for ((v, a, container) in cases) {
+            val out = File(ctx.cacheDir, "merge-test/check-$v.$container").apply { delete() }
+            MediaMerger.merge(asset(v), asset(a), out, container)
+            val before = out.readBytes()
+            val (c, p) = nox(out)
+            assertEquals("$v: ${c.report()}", FileCheck.Verdict.READABLE, c.verdict)
+            assertEquals(FileCheck.Repair.NONE, c.repair)
+            assertTrue("$v: разборщик плеера ${p.failure} ${p.lines}", p.ok)
+
+            assertArrayEquals("проверка не меняет файл", before, out.readBytes())
+            val cut = File(ctx.cacheDir, "merge-test/cut-$v.$container")
+            cut.writeBytes(before.copyOf(before.size * 2 / 3))
+            val (cc, _) = nox(cut)
+            assertTrue("$v обрезан: ${cc.verdict} ${cc.summary}",
+                cc.verdict == FileCheck.Verdict.INCOMPLETE || cc.verdict == FileCheck.Verdict.STRUCTURE)
+        }
     }
 }

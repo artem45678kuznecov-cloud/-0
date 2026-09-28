@@ -136,6 +136,9 @@ class LargeContainerDeviceTest {
                     written += s.data.size
                 }
                 loop++
+                // Писатель WebM копит кадры в очереди, пока диск не успевает: ждём, пока файл догонит.
+                val until = System.currentTimeMillis() + 120_000
+                while (written - out.length() > 128L * 1024 * 1024 && System.currentTimeMillis() < until) Thread.sleep(200)
             }
         } catch (t: Throwable) {
             error = "${t.javaClass.simpleName}: ${t.message} (на $written байтах)"

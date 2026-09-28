@@ -37,7 +37,7 @@ import java.nio.ByteBuffer
  * Эксперимент с большими контейнерами: настоящие кадры 2160p многократно
  * пишутся системным MediaMuxer (им NOX склеивает дорожки) за границу 4 ГБ,
  * затем файл читают системный MediaExtractor и экстракторы Media3 (плеер NOX)
- * в начале и после перемотки к концу.
+ * в начале и после перемотки к 95 % и 99 % (последняя — за границей 4 ГиБ).
  *
  * Тяжёлый: запускается только с аргументом `nox.large=1` и исходниками в
  * `files/bigsrc/` приложения (v264.mp4, a.m4a, v9.webm, a.webm).
@@ -233,14 +233,14 @@ class LargeContainerDeviceTest {
             drive(300, "начало")
             val sm = out.seekMap
             say("Media3 SeekMap: seekable=${sm?.isSeekable} длительность=${sm?.durationUs?.div(1_000_000)} с")
-            if (sm != null && sm.isSeekable && sm.durationUs > 0) {
-                val t = sm.durationUs * 95 / 100
+            if (sm != null && sm.isSeekable && sm.durationUs > 0) for (pct in listOf(95, 99)) {
+                val t = sm.durationUs * pct / 100
                 val sp = sm.getSeekPoints(t).first
                 say("Media3 перемотка к ${t / 1_000_000} с -> смещение ${sp.position} (${if (sp.position > 0xFFFFFFFFL) "за 4 ГБ" else "до 4 ГБ"})")
                 ex.seek(sp.position, sp.timeUs)
                 ds.close()
                 val n = open(sp.position); ds = n.first; input = n.second
-                drive(300, "после перемотки")
+                drive(300, "после перемотки к $pct %")
             }
         } catch (t: Throwable) {
             val chain = generateSequence(t) { it.cause }.take(4).joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message}" }

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.rounded.CropFree
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.FactCheck
 import androidx.compose.material.icons.rounded.Timelapse
 import androidx.compose.material.icons.rounded.Toc
 import androidx.compose.material.icons.rounded.Tune
@@ -97,6 +98,7 @@ fun playerMenu(sheets: SheetController, hub: PlaybackHub, lib: LibraryViewModel,
             vm.setProtected(m, !m.protectedFromCleanup)
         },
         SheetAction("Таймер сна", Icons.Rounded.Timelapse) { sleepSheet(sheets, hub) },
+        SheetAction("Проверить файл", Icons.Rounded.FactCheck, hint = "Только чтение, на телефоне") { fileCheckSheet(sheets, vm, m, context) },
         SheetAction("Настройки плеера", Icons.Rounded.Tune, hint = "Автопереход, «картинка в картинке»") {
             com.nox.offline.ui.settings.playerSettingsSheet(sheets, vm)
         },

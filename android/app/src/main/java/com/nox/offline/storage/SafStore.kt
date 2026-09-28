@@ -115,6 +115,40 @@ class SafStore(private val context: Context) {
         }
     }
 
+    /**
+     * Новый документ, который пишет [write] (например, восстановленное видео).
+     * Порядок: временное имя → запись → сверка размера → [verify] временного
+     * документа (только чтение) → переименование. Любой сбой или отмена
+     * удаляют только временный документ; другие файлы папки не трогаются.
+     */
+    suspend fun writeNew(tree: String, displayName: String, mime: String, expectedSize: Long,
+                         write: suspend (java.io.OutputStream) -> Unit, verify: suspend (Uri) -> String?): Uri {
+        val dir = DocumentFile.fromTreeUri(context, Uri.parse(tree)) ?: throw IOException("Папка недоступна")
+        if (!dir.canWrite()) throw IOException("Нет доступа на запись в папку")
+        FileOps.requireSpace(expectedSize, freeBytes(tree))
+        val finalName = uniqueName(dir, displayName)
+        val tmpName = "$finalName.noxtmp"
+        dir.findFile(tmpName)?.delete()
+        val tmp = dir.createFile("application/octet-stream", tmpName) ?: throw IOException("Не удалось создать файл в папке")
+        var keep = false
+        try {
+            (resolver.openOutputStream(tmp.uri, "w") ?: throw IOException("Нет потока записи")).buffered(1 shl 20).use { write(it) }
+            val written = DocumentFile.fromSingleUri(context, tmp.uri)?.length() ?: -1
+            if (written != expectedSize) throw IOException("Размер записанного не совпал: $written из $expectedSize")
+            verify(tmp.uri)?.let { throw IOException("Проверка результата не пройдена: $it") }
+            val renamed = try { DocumentsContract.renameDocument(resolver, tmp.uri, finalName) } catch (_: Exception) { null }
+            // Провайдер без переименования: результат остаётся под временным именем, но он
+            // уже проверен — возвращаем его, а не пишем гигабайты второй раз.
+            keep = true
+            return renamed ?: tmp.uri
+        } catch (t: Throwable) {
+            NoxLog.event("saf-write-error", "error" to "${t.javaClass.simpleName}: ${t.message?.take(80)}")
+            throw t
+        } finally {
+            if (!keep) try { tmp.delete() } catch (_: Exception) { }
+        }
+    }
+
     fun exists(uri: String): Boolean = try {
         DocumentFile.fromSingleUri(context, Uri.parse(uri))?.exists() == true
     } catch (_: Exception) {

@@ -90,6 +90,8 @@ class HttpDownloader(
         expectedTotal: Long = -1,
         chunkSize: Long = 0,
         limiter: SpeedLimiter? = null,
+        /** Полный размер файла по ответу сервера (Content-Range / Content-Length), как только он известен. */
+        onTotalKnown: (total: Long) -> Unit = {},
         onProgress: (downloaded: Long, total: Long) -> Unit,
     ): Outcome {
         part.parentFile?.mkdirs()
@@ -154,6 +156,7 @@ class HttpDownloader(
                             return mismatch(expectedTotal, cr.total)
                         }
                         total = if (cr.total > 0) cr.total else expectedTotal
+                        if (cr.total > 0) onTotalKnown(cr.total)
                         chunkEnd = cr.end
                     }
                     code == 200 -> {
@@ -169,7 +172,7 @@ class HttpDownloader(
                             truncate(part)
                             offset = 0
                         }
-                        if (len > 0) total = len else if (expectedTotal > 0) total = expectedTotal
+                        if (len > 0) { total = len; onTotalKnown(len) } else if (expectedTotal > 0) total = expectedTotal
                     }
                     else -> {
                         log("http-status code=$code")

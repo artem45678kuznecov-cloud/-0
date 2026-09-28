@@ -44,8 +44,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.FactCheck
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Home
@@ -387,6 +389,12 @@ private fun mediaMenu(item: LibraryItem, vm: MainViewModel, sheets: SheetControl
             sheets.show("Переименовать") { close ->
                 RenameSheet(m.title, allowFile = true) { title, renameFile -> vm.renameMedia(m, title, renameFile); close() }
             }
+        },
+        SheetAction("Проверить файл", Icons.Rounded.FactCheck, hint = "Только чтение, на телефоне") {
+            com.nox.offline.ui.player.fileCheckSheet(sheets, vm, m, vm.getApplication<android.app.Application>())
+        },
+        SheetAction("Открыть в другом плеере", Icons.AutoMirrored.Rounded.OpenInNew, hint = "Без копирования файла") {
+            try { start(vm.otherPlayerIntent(m)) } catch (e: Exception) { AppEvents.notice("На телефоне нет другого видеоплеера") }
         },
         SheetAction("Экспортировать", Icons.Rounded.SaveAlt, hint = "Копия в выбранную папку") { actions.pickExportFor(listOf(item)) },
         SheetAction("Поделиться файлом", Icons.Rounded.IosShare) {

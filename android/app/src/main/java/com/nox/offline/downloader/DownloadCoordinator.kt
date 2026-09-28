@@ -99,6 +99,9 @@ class DownloadCoordinator(
     @Volatile
     var subtitleStore: com.nox.offline.subtitles.SubtitleRepository? = null
 
+    /** Куда записать итог проверки готового файла (для «Проверить файл» и диагностики). */
+    var checkStore: ((mediaId: Long, check: com.nox.offline.media.FileCheck) -> Unit)? = null
+
     companion object {
         const val MAX_CONCURRENT = 3
         const val HTTP_RETRIES = 8
@@ -745,7 +748,9 @@ class DownloadCoordinator(
                 var lastWrite = 0L
                 NoxLog.event("transfer-start", "id" to id, "track" to track.name, "part" to part.length(),
                     "host" to SafeUrl.host(url), "headers" to headers.keys.joinToString(","))
-                val outcome = http.download(url, headers, part, expected, chunk, policy.limiter) { downloaded, total ->
+                var observedTotal = -1L
+                val outcome = http.download(url, headers, part, expected, chunk, policy.limiter,
+                    onTotalKnown = { observedTotal = it }) { downloaded, total ->
                     val now = System.currentTimeMillis()
                     if (now - lastWrite >= PROGRESS_WRITE_EVERY_MS) {
                         lastWrite = now
@@ -761,6 +766,10 @@ class DownloadCoordinator(
                         scope.launch { downloadsDao.updateProgress(id, overall, t, speed, eta, now) }
                     }
                 }
+
+                // Размер, который назвал сам сервер, — точный размер этого файла. Запоминаем его:
+                // докачка после обрыва или смены ссылки не допишет к части другой файл.
+                if (expected <= 0 && observedTotal > 0) withContext(NonCancellable) { rememberServerSize(id, track, observedTotal) }
 
                 // 3) Итог.
                 when (outcome) {
@@ -960,15 +969,19 @@ class DownloadCoordinator(
                         "format-changed")
                     return null
                 }
+                // Точный размер, уже названный сервером для скачанной части, не заменяется
+                // приблизительным из нового разбора: иначе докачка не заметила бы другой файл.
+                val vKeep = vData && e.videoExact && e.videoTotalBytes > 0 && !(v.filesizeExact && v.filesize > 0)
+                val aKeep = aData && e.audioExact && e.audioTotalBytes > 0 && !(a != null && a.filesizeExact && a.filesize > 0)
                 val vTotal = when {
-                    e.videoDone -> e.videoTotalBytes
+                    e.videoDone || vKeep -> e.videoTotalBytes
                     v.filesize > 0 -> v.filesize
                     v.filesizeApprox > 0 -> v.filesizeApprox
                     else -> e.videoTotalBytes
                 }
                 val aTotal = when {
                     a == null -> 0L
-                    e.audioDone -> e.audioTotalBytes
+                    e.audioDone || aKeep -> e.audioTotalBytes
                     a.filesize > 0 -> a.filesize
                     a.filesizeApprox > 0 -> a.filesizeApprox
                     else -> e.audioTotalBytes
@@ -977,8 +990,8 @@ class DownloadCoordinator(
                     resolvedUrl = v.url, headersJson = JSONObject(v.headers).toString(),
                     audioUrl = a?.url.orEmpty(), audioHeadersJson = JSONObject(a?.headers ?: emptyMap<String, String>()).toString(),
                     videoTotalBytes = vTotal, audioTotalBytes = aTotal,
-                    videoExact = if (e.videoDone) e.videoExact else v.filesizeExact && v.filesize > 0,
-                    audioExact = if (e.audioDone) e.audioExact else a != null && a.filesizeExact && a.filesize > 0,
+                    videoExact = if (e.videoDone || vKeep) e.videoExact else v.filesizeExact && v.filesize > 0,
+                    audioExact = if (e.audioDone || aKeep) e.audioExact else a != null && a.filesizeExact && a.filesize > 0,
                     videoChunk = v.chunkSize, audioChunk = a?.chunkSize ?: 0L,
                     totalBytes = vTotal + aTotal,
                     title = r.details?.title?.takeIf { it.isNotBlank() } ?: e.title,
@@ -1019,6 +1032,17 @@ class DownloadCoordinator(
         if (part == null) Unit
     }
 
+    private suspend fun rememberServerSize(id: Long, track: Track, total: Long) {
+        val f = downloadsDao.get(id) ?: return
+        val next = when (track) {
+            Track.AUDIO -> f.copy(audioTotalBytes = total, audioExact = true)
+            Track.VIDEO -> f.copy(videoTotalBytes = total, videoExact = true)
+            Track.PROGRESSIVE -> f.copy(videoTotalBytes = total, videoExact = true, totalBytes = total)
+        }
+        downloadsDao.update(next.copy(updatedAt = System.currentTimeMillis()))
+        NoxLog.event("server-size", "id" to id, "track" to track.name, "total" to total)
+    }
+
     private suspend fun fail(id: Long, message: String, kind: String = "") {
         val e = downloadsDao.get(id) ?: return
         downloadsDao.update(e.copy(status = DownloadStatus.ERROR, error = message.take(400), errorKind = kind,
@@ -1040,10 +1064,30 @@ class DownloadCoordinator(
         }
         downloadsDao.update(e.copy(status = DownloadStatus.PROCESSING, downloadedBytes = part.length(),
             totalBytes = part.length(), speedBps = 0, etaSec = -1, updatedAt = System.currentTimeMillis()))
+        // «Передача завершена» ещё не значит «файл цел»: проверяем структуру контейнера.
+        val check = structureCheck(part, if (e.videoExact) e.videoTotalBytes else -1)
+        if (check?.verdict == com.nox.offline.media.FileCheck.Verdict.INCOMPLETE) {
+            NoxLog.event("download-verify-incomplete", "id" to id, "summary" to check.summary.take(120))
+            fail(id, "Источник отдал файл полностью по размеру, но в нём не хватает данных: ${check.summary} " +
+                "Скачанное сохранено как часть и не удалено.", "verify")
+            return
+        }
         val final = FileNames.unique(storage.media, finalNameOf(e))
         if (!moveInto(part, final)) { fail(id, "не удалось переименовать файл"); return }
         NoxLog.event("transfer-complete", "id" to id, "size" to final.length(), "file" to final.name)
-        finishIntoLibrary(e.copy(fileName = final.name), final)
+        finishIntoLibrary(e.copy(fileName = final.name), final, check)
+    }
+
+    /**
+     * Структурная проверка готового файла (только чтение). null — проверить не удалось
+     * (контейнер не MP4/WebM или ошибка чтения): тогда файл не блокируется.
+     */
+    private fun structureCheck(file: File, exact: Long): com.nox.offline.media.FileCheck? = try {
+        com.nox.offline.media.ChannelByteSource.of(file).use { com.nox.offline.media.ContainerCheck.check(it, exact) }
+            .takeIf { it.verdict != com.nox.offline.media.FileCheck.Verdict.UNKNOWN }
+    } catch (t: Throwable) {
+        NoxLog.event("verify-skipped", "error" to "${t.javaClass.simpleName}: ${t.message?.take(80)}")
+        null
     }
 
     private fun moveInto(src: File, dst: File): Boolean {
@@ -1094,6 +1138,7 @@ class DownloadCoordinator(
         try {
             MediaMerger.merge(v, a, tmp, container)
             val problem = MediaMerger.verify(tmp, v, a)
+                ?: structureCheck(tmp, -1)?.takeIf { it.verdict != com.nox.offline.media.FileCheck.Verdict.READABLE }?.summary
             val probe = MediaMerger.probe(tmp)
             if (problem != null) {
                 tmp.delete()
@@ -1126,7 +1171,7 @@ class DownloadCoordinator(
     //  Медиатека
     // ------------------------------------------------------------------
 
-    private suspend fun finishIntoLibrary(e: DownloadEntity, final: File) {
+    private suspend fun finishIntoLibrary(e: DownloadEntity, final: File, check: com.nox.offline.media.FileCheck? = null) {
         val cover = fetchCover(e, final)
         val mediaId = db.media().insert(
             MediaEntity(title = e.displayTitle.ifBlank { final.nameWithoutExtension }, filePath = final.absolutePath,
@@ -1141,6 +1186,14 @@ class DownloadCoordinator(
             downloadedBytes = final.length(), totalBytes = final.length(), error = "",
             updatedAt = System.currentTimeMillis()))
         NoxLog.event("library-added", "media" to mediaId, "download" to e.id, "cover" to cover.isNotEmpty(), "audio" to e.audioOnly)
+        if (check != null) {
+            checkStore?.invoke(mediaId, check)
+            if (check.verdict == com.nox.offline.media.FileCheck.Verdict.STRUCTURE) {
+                NoxLog.event("download-verify-structure", "media" to mediaId, "summary" to check.summary.take(120))
+                com.nox.offline.core.AppEvents.notice("«${e.displayTitle}» скачано, но проверка нашла нарушение структуры файла. " +
+                    "Подробности и восстановление — «Проверить файл» в меню видео.")
+            }
+        }
         runCatching { libraryHook?.onMediaAdded(mediaId, e) }
             .onFailure { NoxLog.event("library-hook-error", "error" to it.javaClass.simpleName) }
         // Субтитры — отдельный шаг: их сбой не трогает уже готовое видео.

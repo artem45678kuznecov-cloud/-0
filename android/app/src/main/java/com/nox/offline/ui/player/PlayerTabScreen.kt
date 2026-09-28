@@ -188,7 +188,18 @@ fun PlayerTabScreen(vm: MainViewModel, lib: LibraryViewModel, nav: Nav, padding:
             return@LazyColumn
         }
         item {
-            VideoSurface(hub, st, prefs.subtitleScale, prefs.subtitleBackground)
+            VideoSurface(hub, st, prefs.subtitleScale, prefs.subtitleBackground,
+                onCheck = { fileCheckSheet(sheets, vm, now.media, context) },
+                onOther = {
+                    runCatching { context.startActivity(vm.otherPlayerIntent(now.media).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                        .onFailure { com.nox.offline.core.AppEvents.notice("На телефоне нет другого видеоплеера") }
+                },
+                onCopy = {
+                    (context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                        .setPrimaryClip(android.content.ClipData.newPlainText("NOX: ошибка воспроизведения", hub.lastErrorReport.ifBlank { st.error }))
+                    com.nox.offline.core.AppEvents.notice("Отчёт скопирован")
+                })
+            if (st.note.isNotBlank()) InlineNote(st.note, Modifier.padding(horizontal = 16.dp))
             SectionGap()
         }
         item {
@@ -249,7 +260,8 @@ fun PlayerTabScreen(vm: MainViewModel, lib: LibraryViewModel, nav: Nav, padding:
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun VideoSurface(hub: PlaybackHub, st: PlaybackHub.State, subtitleScale: Float, subtitleBg: Int) {
+private fun VideoSurface(hub: PlaybackHub, st: PlaybackHub.State, subtitleScale: Float, subtitleBg: Int,
+                         onCheck: () -> Unit, onOther: () -> Unit, onCopy: () -> Unit) {
     val context = LocalContext.current
     val p = nox()
     var controls by remember { mutableStateOf(true) }
@@ -349,8 +361,18 @@ private fun VideoSurface(hub: PlaybackHub, st: PlaybackHub.State, subtitleScale:
             }
         }
         if (st.error.isNotBlank()) {
-            Tile(Modifier.align(Alignment.Center).padding(16.dp)) {
-                Text(st.error, color = Nox.Danger, fontSize = 13.5.sp, modifier = Modifier.padding(12.dp))
+            // Ошибка: сохранённая позиция не затирается; дальше — проверка файла на телефоне.
+            Tile(Modifier.align(Alignment.Center).padding(12.dp)) {
+                Column(Modifier.padding(10.dp)) {
+                    Text(st.error, color = Nox.Danger, fontSize = 12.5.sp, lineHeight = 16.sp)
+                    if (st.errorCode.isNotBlank()) {
+                        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Chip("Проверить файл", amber = true, onClick = onCheck, height = 28.dp, textSize = 11.sp, sidePadding = 9.dp)
+                            Chip("Другой плеер", onClick = onOther, height = 28.dp, textSize = 11.sp, sidePadding = 9.dp)
+                            Chip("Отчёт", onClick = onCopy, height = 28.dp, textSize = 11.sp, sidePadding = 9.dp)
+                        }
+                    }
+                }
             }
         }
     }

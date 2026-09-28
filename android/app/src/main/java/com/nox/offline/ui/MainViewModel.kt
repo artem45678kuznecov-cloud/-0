@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+
 package com.nox.offline.ui
 
 import android.app.Application
@@ -12,6 +14,7 @@ import com.nox.offline.core.FileNames
 import com.nox.offline.core.Format
 import com.nox.offline.core.LinkParser
 import com.nox.offline.core.MediaTypes
+import com.nox.offline.core.AppEvents
 import com.nox.offline.core.NoxLog
 import com.nox.offline.core.SafeUrl
 import com.nox.offline.core.Storage
@@ -676,6 +679,108 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearMessage() { message.value = "" }
 
+    // ---------------- 0.4.2: проверка и восстановление файла ----------------
+
+    enum class CheckPhase { CHECKING, DONE, REPAIRING, REPAIRED, FAILED }
+
+    data class FileCheckUi(
+        val mediaId: Long,
+        val title: String,
+        val phase: CheckPhase,
+        val progress: Float = 0f,
+        val result: com.nox.offline.media.FileCheck? = null,
+        val message: String = "",
+        val originalName: String = "",
+        val repairDetails: List<String> = emptyList(),
+    )
+
+    val fileCheck = MutableStateFlow<FileCheckUi?>(null)
+    @Volatile private var checkCancel = false
+    private var checkJob: kotlinx.coroutines.Job? = null
+
+    private fun control(onProgress: (Float) -> Unit) = object : com.nox.offline.media.CheckControl {
+        private var last = 0L
+        override fun check() { if (checkCancel) throw com.nox.offline.media.CheckCancelled() }
+        override fun progress(fraction: Float) {
+            val now = System.currentTimeMillis()
+            if (now - last > 250 || fraction >= 1f) { last = now; onProgress(fraction) }
+        }
+    }
+
+    /** «Проверить файл»: только чтение, на телефоне, без пересылки файла. */
+    fun startFileCheck(m: MediaEntity) {
+        val cur = fileCheck.value
+        if (cur != null && cur.mediaId == m.id && (cur.phase == CheckPhase.CHECKING || cur.phase == CheckPhase.REPAIRING)) return
+        checkCancel = false
+        fileCheck.value = FileCheckUi(m.id, m.title, CheckPhase.CHECKING)
+        checkJob = viewModelScope.launch(Dispatchers.IO) {
+            val fresh = nox.db.media().get(m.id) ?: m
+            try {
+                val r = com.nox.offline.media.FileChecks.check(nox, fresh, control { f ->
+                    fileCheck.value = fileCheck.value?.copy(progress = f)
+                })
+                fileCheck.value = FileCheckUi(m.id, m.title, CheckPhase.DONE, 1f, r)
+            } catch (c: com.nox.offline.media.CheckCancelled) {
+                fileCheck.value = FileCheckUi(m.id, m.title, CheckPhase.FAILED, message = "Проверка отменена. Файл не менялся.")
+            } catch (t: Throwable) {
+                NoxLog.event("file-check-error", "media" to m.id, "error" to "${t.javaClass.simpleName}: ${t.message?.take(100)}")
+                fileCheck.value = FileCheckUi(m.id, m.title, CheckPhase.FAILED,
+                    message = "Проверка не удалась: ${t.message ?: t.javaClass.simpleName}. Файл не менялся.")
+            }
+        }
+    }
+
+    fun cancelFileWork() { checkCancel = true }
+
+    /** Восстановление в новый файл; перед ним видео закрывается в плеере (позиция сохранится). */
+    fun startRepair(m: MediaEntity) {
+        checkCancel = false
+        viewModelScope.launch {
+            if (nox.playback.state.value.now?.media?.id == m.id) nox.playback.close()
+            fileCheck.value = fileCheck.value?.copy(phase = CheckPhase.REPAIRING, progress = 0f, message = "")
+            val out = withContext(Dispatchers.IO) {
+                val fresh = nox.db.media().get(m.id) ?: m
+                com.nox.offline.media.FileRepair(nox).rebuildMp4(fresh, control { f ->
+                    fileCheck.value = fileCheck.value?.copy(progress = f)
+                })
+            }
+            fileCheck.value = when (out) {
+                is com.nox.offline.media.FileRepair.Outcome.Done -> fileCheck.value?.copy(phase = CheckPhase.REPAIRED, progress = 1f,
+                    message = "Готово: «${out.newName}». Медиатека открывает новый файл; позиция, коллекции и главы на месте. " +
+                        "Оригинал «${out.original}» не удалён.", originalName = out.original, repairDetails = out.details)
+                is com.nox.offline.media.FileRepair.Outcome.Failed -> fileCheck.value?.copy(phase = CheckPhase.FAILED,
+                    message = "Восстановить не удалось: ${out.reason}. Оригинал не менялся.")
+            }
+        }
+    }
+
+    /** Оценка размера результата восстановления — для подтверждения до начала. */
+    suspend fun repairSize(m: MediaEntity): Long = withContext(Dispatchers.IO) {
+        runCatching {
+            com.nox.offline.media.FileChecks.open(nox, m).use { s ->
+                val insp = com.nox.offline.media.Mp4Inspector(com.nox.offline.media.CachedReader(s), com.nox.offline.media.CheckControl.NONE)
+                insp.inspect(-1)
+                insp.lastIndex?.let { com.nox.offline.media.Mp4Rebuild(s, it).outputSize() } ?: -1L
+            }
+        }.getOrDefault(-1L)
+    }
+
+    fun deleteRepairOriginal(m: MediaEntity) = viewModelScope.launch {
+        val ok = com.nox.offline.media.FileRepair(nox).deleteOriginal(m)
+        AppEvents.notice(if (ok) "Исходный файл удалён" else "Исходный файл не удалён")
+        fileCheck.value = fileCheck.value?.copy(originalName = if (ok) "" else fileCheck.value?.originalName.orEmpty())
+    }
+
+    /** «Открыть в другом плеере»: временное право на чтение, без копирования файла. */
+    fun otherPlayerIntent(m: MediaEntity): Intent {
+        val uri = MediaLocator.shareUri(getApplication(), m)
+        val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, com.nox.offline.core.MediaTypes.mimeForName(MediaLocator.fileName(m)))
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        return Intent.createChooser(view, "Открыть в другом плеере").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
+    suspend fun mediaById(id: Long): MediaEntity? = withContext(Dispatchers.IO) { nox.db.media().get(id) }
+
     /** Текст для кнопки «Скопировать диагностику». Без секретов. */
     suspend fun diagnostics(): String = withContext(Dispatchers.IO) {
         val sb = StringBuilder()
@@ -704,6 +809,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "host=${SafeUrl.host(d.resolvedUrl)} retries=${d.retries}/${d.resolveRetries} " +
                 "stop=${d.lastStopReason.ifBlank { "-" }} kind=${d.errorKind.ifBlank { "-" }} err=${d.error.take(80).ifBlank { "-" }}")
         }
+        sb.appendLine()
+        nox.playback.lastErrorReport.takeIf { it.isNotBlank() }?.let { sb.appendLine("Последняя ошибка воспроизведения:"); sb.appendLine(it) }
+            ?: runCatching { File(nox.filesDir, "playback-error.txt").takeIf { it.exists() }?.readText() }.getOrNull()?.let {
+                sb.appendLine("Последняя ошибка воспроизведения (сохранённая):"); sb.appendLine(it)
+            }
+        fileCheck.value?.result?.let { sb.appendLine("Последняя проверка файла (видео №${fileCheck.value?.mediaId}):"); sb.appendLine(it.report()) }
         sb.appendLine()
         sb.appendLine("Журнал:")
         for (line in NoxLog.dump().takeLast(200)) sb.appendLine("  $line")

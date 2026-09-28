@@ -90,6 +90,31 @@ class HttpDownloaderTest {
     }
 
     @Test
+    fun `server-reported total is reported and a different file is not appended on resume`() = runBlocking {
+        server.dispatcher = rangeDispatcher()
+        val part = File(dir, "v.mp4.part")
+        part.writeBytes(body.copyOfRange(0, 300 * 1024))
+        var told = -1L
+        // Каталог размера не знал (expectedTotal = -1): размер назвал сервер.
+        downloader.download(url(), emptyMap(), part, onTotalKnown = { told = it }) { _, _ -> }
+        assertEquals(body.size.toLong(), told)
+        // После обрыва и смены ссылки источник отдаёт другой файл: запомненный размер его отсекает.
+        part.writeBytes(body.copyOfRange(0, 300 * 1024))
+        val other = body + ByteArray(1000)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val start = request.getHeader("Range")!!.removePrefix("bytes=").removeSuffix("-").toInt()
+                val slice = other.copyOfRange(start, other.size)
+                return MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes $start-${other.size - 1}/${other.size}")
+                    .setHeader("Content-Length", slice.size.toString()).setBody(Buffer().write(slice))
+            }
+        }
+        val out = downloader.download(url(), emptyMap(), part, expectedTotal = told) { _, _ -> }
+        assertTrue(out is HttpDownloader.Outcome.Failed && out.isSizeMismatch)
+        assertEquals("чужие байты не дописаны", 300L * 1024, part.length())
+    }
+
+    @Test
     fun `resume sends Range from part size and appends`() = runBlocking {
         server.dispatcher = rangeDispatcher()
         val part = File(dir, "v.mp4.part")

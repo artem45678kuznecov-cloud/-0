@@ -100,6 +100,10 @@ class PlaybackHub(private val app: NoxApp) {
         val audioTracks: List<AudioTrack> = emptyList(),
         /** Масштаб в окне: false — вписать, true — заполнить с обрезкой. */
         val zoom: Boolean = false,
+        /** Имя кода ошибки плеера (например, ERROR_CODE_PARSING_CONTAINER_MALFORMED) или "". */
+        val errorCode: String = "",
+        /** Пояснение, если видео открыто обходным путём (например, без индекса перемотки). */
+        val note: String = "",
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -119,6 +123,17 @@ class PlaybackHub(private val app: NoxApp) {
     private var hideJob: Job? = null
     private var offerJob: Job? = null
     private var restoreVolume = false
+
+    /** Дошёл ли плеер до готовности для текущего видео — этап ошибки в отчёте. */
+    private var readyForItem = false
+    private var requestedStartMs = 0L
+    /** Повтор без индекса перемотки (Matroska) уже пробовали для этого видео. */
+    private var lenientTried = false
+
+    /** Последний подробный отчёт об ошибке воспроизведения (для «Скопировать диагностику»). */
+    @Volatile
+    var lastErrorReport: String = ""
+        private set
 
     private val settings get() = app.settings
 
@@ -152,21 +167,11 @@ class PlaybackHub(private val app: NoxApp) {
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             _state.value = _state.value.copy(buffering = playbackState == Player.STATE_BUFFERING)
-            if (playbackState == Player.STATE_READY) onReady()
+            if (playbackState == Player.STATE_READY) { readyForItem = true; onReady() }
             if (playbackState == Player.STATE_ENDED) onEnded()
         }
 
-        override fun onPlayerError(error: PlaybackException) {
-            val m = _state.value.now?.media
-            val gone = m != null && !MediaLocator.exists(app, app.saf, m)
-            val msg = when {
-                gone && m?.isExternal == true -> "Нет доступа к файлу в папке. Откройте «Настройки → Папка для видео» и выберите папку заново — запись в медиатеке сохранена."
-                gone -> "Файл недоступен: его удалили или перенесли. Запись в медиатеке сохранена."
-                else -> "Не удалось воспроизвести: ${error.errorCodeName}"
-            }
-            NoxLog.event("player-error", "code" to error.errorCodeName, "media" to m?.id, "gone" to gone)
-            _state.value = _state.value.copy(error = msg, isPlaying = false)
-        }
+        override fun onPlayerError(error: PlaybackException) = handleError(error)
 
         override fun onVideoSizeChanged(videoSize: VideoSize) {
             if (videoSize.width > 0 && videoSize.height > 0) {
@@ -237,6 +242,9 @@ class PlaybackHub(private val app: NoxApp) {
             val p = player()
             val listenMode = listen ?: _state.value.listen
             val item = mediaItem(m, seg, duration)
+            readyForItem = false
+            lenientTried = false
+            requestedStartMs = if (fromStart) 0 else startAt
             p.setMediaItem(item, if (fromStart) 0 else startAt)
             applyListen(p, listenMode || m.isAudio)
             p.prepare()
@@ -247,7 +255,7 @@ class PlaybackHub(private val app: NoxApp) {
                 ?: _state.value.now?.context?.takeIf { it.items.contains(Playable(m.id, seg?.id ?: 0)) }?.moveTo(Playable(m.id, seg?.id ?: 0))
                 ?: seg?.let { PlayContext.ofSegments(m.title, m.id, segs, Playable(m.id, it.id)) }
             _state.value = _state.value.copy(
-                now = Now(m, seg, segs, ctx, duration), error = "", ended = false, offer = null,
+                now = Now(m, seg, segs, ctx, duration), error = "", errorCode = "", note = "", ended = false, offer = null,
                 listen = listenMode || m.isAudio, hasVideo = !m.isAudio, positionMs = if (fromStart) 0 else startAt,
                 durationMs = seg?.lengthMs ?: duration, absoluteMs = (seg?.startMs ?: 0) + (if (fromStart) 0 else startAt),
             )
@@ -308,6 +316,69 @@ class PlaybackHub(private val app: NoxApp) {
         _state.value = _state.value.copy(now = now.copy(segment = null, context = null), durationMs = now.durationMs,
             positionMs = abs, offer = null, ended = false)
         NoxLog.event("player-whole-file", "media" to now.media.id)
+    }
+
+    // ------------------------------------------------------------------
+    //  Ошибки
+    // ------------------------------------------------------------------
+
+    private fun handleError(error: PlaybackException) {
+        val p = exo
+        val now = _state.value.now
+        val m = now?.media
+        val moment = PlaybackDiagnostics.Moment(
+            stage = if (readyForItem) "после готовности (во время просмотра или перемотки)" else "подготовка (до первого кадра)",
+            requestedStartMs = requestedStartMs,
+            positionMs = p?.currentPosition ?: -1,
+            bufferedMs = p?.bufferedPosition ?: -1,
+            playerDurationMs = p?.duration?.takeIf { it != C.TIME_UNSET } ?: -1,
+            playWhenReady = p?.playWhenReady == true,
+            listen = _state.value.listen,
+            segmentStartMs = now?.segment?.startMs ?: -1,
+            segmentEndMs = now?.segment?.endMs ?: -1,
+            attempt = if (lenientTried) "повтор без индекса перемотки (Cues)" else "обычная",
+        )
+        val resumeAt = if (readyForItem) (p?.currentPosition ?: requestedStartMs) else requestedStartMs
+        _state.value = _state.value.copy(isPlaying = false, error = "Не удалось воспроизвести: ${error.errorCodeName}",
+            errorCode = error.errorCodeName)
+        scope.launch {
+            val gone = m != null && withContext(Dispatchers.IO) { !MediaLocator.exists(app, app.saf, m) }
+            val report = withContext(Dispatchers.IO) {
+                runCatching { PlaybackDiagnostics.build(app, error, m, moment, m?.let { com.nox.offline.media.FileChecks.lastSummary(app, it.id) }.orEmpty()) }
+                    .getOrElse { "Отчёт не собран: ${it.javaClass.simpleName}: ${it.message}" }
+            }
+            lastErrorReport = report
+            withContext(Dispatchers.IO) {
+                runCatching { File(app.filesDir, "playback-error.txt").writeText(report) }
+            }
+            NoxLog.event("player-error", "code" to error.errorCodeName, "media" to m?.id, "gone" to gone,
+                "stage" to (if (readyForItem) "ready" else "prepare"), "cause" to generateSequence(error as Throwable) { it.cause }
+                    .last().let { "${it.javaClass.simpleName}: ${it.message?.take(80)}" })
+            if (gone) {
+                _state.value = _state.value.copy(error = if (m?.isExternal == true)
+                    "Нет доступа к файлу в папке. Откройте «Настройки → Папка для видео» и выберите папку заново — запись в медиатеке сохранена."
+                else "Файл недоступен: его удалили или перенесли. Запись в медиатеке сохранена.")
+                return@launch
+            }
+            // WebM/Matroska: одна повторная попытка без перехода к индексу перемотки (Cues).
+            // Помогает, только если повреждён сам индекс; кадры и файл не меняются.
+            if (m != null && !lenientTried && error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED &&
+                withContext(Dispatchers.IO) { com.nox.offline.media.FileChecks.isMatroska(app, m) } && _state.value.now?.media?.id == m.id) {
+                lenientTried = true
+                NoxLog.event("player-retry-no-cues", "media" to m.id)
+                val item = mediaItem(m, now?.segment, now?.durationMs ?: 0)
+                val source = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
+                    androidx.media3.datasource.DefaultDataSource.Factory(app),
+                    androidx.media3.extractor.DefaultExtractorsFactory()
+                        .setMatroskaExtractorFlags(androidx.media3.extractor.mkv.MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES),
+                ).createMediaSource(item)
+                readyForItem = false
+                player().setMediaSource(source, resumeAt)
+                player().prepare()
+                _state.value = _state.value.copy(error = "", errorCode = "",
+                    note = "Видео открыто без индекса перемотки: он в файле не читается. Перемотка может быть неточной.")
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -646,6 +717,8 @@ class PlaybackHub(private val app: NoxApp) {
     /** Сохранить позицию сейчас (пауза, переход, уход). */
     fun save() {
         lastSaveAt = SystemClock.elapsedRealtime()
+        // Плеер в ошибке: его позиция ничего не значит — полезную сохранённую не затираем.
+        if (exo?.playerError != null || _state.value.error.isNotEmpty()) return
         val snap = snapshot() ?: return
         app.appScopeLaunch { persist(snap) }
     }

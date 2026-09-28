@@ -115,6 +115,7 @@ class NoxApp : Application() {
             ),
         )
         coordinator.subtitleStore = subtitles
+        coordinator.checkStore = { mediaId, check -> com.nox.offline.media.FileChecks.store(this, mediaId, check) }
         coordinator.libraryHook = object : DownloadCoordinator.LibraryHook {
             override suspend fun onMediaAdded(mediaId: Long, e: com.nox.offline.data.db.DownloadEntity) {
                 library.onDownloaded(mediaId, e.sourceKey, e.collectionId, e.collectionPosition, e.pageUrl)

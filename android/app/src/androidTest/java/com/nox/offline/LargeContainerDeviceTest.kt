@@ -77,6 +77,8 @@ class LargeContainerDeviceTest {
         say("запись: ${written.first} байт сэмплов, файл ${out.length()} байт, ошибка: ${written.second ?: "нет"}, " +
             "${(System.currentTimeMillis() - t0) / 1000} с")
         if (out.exists() && out.length() > 0) {
+            val c = com.nox.offline.media.ChannelByteSource.of(out).use { com.nox.offline.media.ContainerCheck.check(it) }
+            say("проверка NOX: ${c.verdict} — ${c.summary} | ${c.details.take(4).joinToString("; ")} | ${c.tracks.joinToString("; ")}")
             inspectPlatform(out)
             inspectMedia3(out, extractor)
             if (arg("nox.keep") != "1") out.delete()

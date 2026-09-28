@@ -64,7 +64,8 @@ class ChannelByteSource private constructor(private val stream: FileInputStream)
  * Чтение мелких полей с кэшем окна: заголовки боксов и элементов читаются
  * тысячами, и каждый из них не должен быть отдельным системным вызовом.
  */
-class CachedReader(private val src: ByteSource, private val window: Int = 64 * 1024) {
+class CachedReader(val source: ByteSource, private val window: Int = 4096) {
+    private val src get() = source
     val size get() = src.size
     private val cache = ByteArray(window)
     private var cacheStart = -1L

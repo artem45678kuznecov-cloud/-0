@@ -65,6 +65,8 @@ class Mp4Inspector(private val r: CachedReader, private val ctl: CheckControl) {
 
     private val size = r.size
     private val details = ArrayList<String>()
+    /** Длины NAL читаются в начале каждого кадра: маленькими порциями, а не окнами по килобайтам. */
+    private val nal = CachedReader(r.source, 512)
 
     fun inspect(exactSize: Long): FileCheck {
         val limits = listOf("кадры не декодировались — проверена структура, а не изображение")
@@ -403,7 +405,7 @@ class Mp4Inspector(private val r: CachedReader, private val ctl: CheckControl) {
         var n = 0
         while (p < end) {
             if (p + fieldLength > end) return "поле длины NAL выходит за границу кадра"
-            val len = r.uint(p, fieldLength)
+            val len = nal.uint(p, fieldLength)
             if (len < 1) return "длина NAL №${n + 1} равна $len (Invalid NAL length)"
             val next = p + fieldLength + len
             if (next > end) return "NAL №${n + 1} длиной $len выходит за границу кадра на ${next - end} байт"

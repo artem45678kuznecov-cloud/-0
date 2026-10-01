@@ -19,7 +19,6 @@ import com.nox.offline.data.db.PlaybackEntity
 import com.nox.offline.data.db.SeasonEntity
 import com.nox.offline.data.db.SegmentProgressEntity
 import com.nox.offline.data.db.SubtitleEntity
-import com.nox.offline.library.LibraryRules
 import com.nox.offline.library.Segments
 import com.nox.offline.player.PlayContext
 import com.nox.offline.player.Playable
@@ -65,8 +64,6 @@ fun videosLabel(n: Int): String = "$n видео"
 
 /** Всё, что показывает главный экран. */
 data class HomeData(
-    val featured: CollectionCard?,
-    val featuredReason: String,
     val categories: List<CollectionCard>,
     val pinned: List<CollectionCard>,
     val albums: List<CollectionCard>,
@@ -178,10 +175,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 CollectionFilter.Sort.SIZE -> list.sortedByDescending { it.local }
             }
         }
-        val featured = LibraryRules.featured(sums, items, pbMap)
         HomeData(
-            featured = featured?.let { fx -> sums.firstOrNull { it.id == fx.collectionId }?.let(::card) },
-            featuredReason = featured?.reason.orEmpty(),
             categories = visible.filter { it.type == CollectionType.CATEGORY || it.type in CollectionType.system }
                 .sortedBy { if (it.type in CollectionType.system) 1 else 0 }.map(::card),
             pinned = visible.filter { it.pinned && it.type != CollectionType.CATEGORY && it.type !in CollectionType.system }.map(::card),

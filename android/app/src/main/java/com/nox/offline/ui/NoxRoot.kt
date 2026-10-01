@@ -296,6 +296,7 @@ private fun RootContent(
                         ),
                         selected = nav.tab.ordinal,
                         onSelect = { i -> nav.select(Tab.entries[i]) },
+                        onReselect = { i -> nav.reselect(Tab.entries[i]) },
                         height = barHeight,
                     )
                 }

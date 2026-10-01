@@ -49,7 +49,9 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
@@ -61,9 +63,9 @@ import androidx.compose.ui.unit.sp
 import com.nox.offline.ui.theme.LocalGlassConfig
 import com.nox.offline.ui.theme.Nox
 import com.nox.offline.ui.theme.nox
+import kotlin.math.abs
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 
 data class BarItem(val label: String, val icon: ImageVector)
 
@@ -74,8 +76,12 @@ data class BarItem(val label: String, val icon: ImageVector)
  * - Касание панели и ведение пальцем: линза непрерывно идёт за пальцем,
  *   вкладка под ней подсвечивается, реальный экран переключается один
  *   раз — при отпускании.
+ * - Два быстрых нажатия на одну вкладку — «В начало раздела» ([onReselect]):
+ *   первое нажатие выбирает вкладку сразу, как обычно; одиночное повторное
+ *   нажатие на выбранную вкладку ничего не сбрасывает.
  * - Каждая вкладка остаётся отдельным доступным элементом (TalkBack,
- *   клавиатура): ведение пальцем — дополнительный способ, а не замена.
+ *   клавиатура): ведение пальцем — дополнительный способ, а не замена;
+ *   «В начало раздела» доступно и как отдельное действие вкладки.
  *
  * Жест живёт только внутри панели и не мешает прокрутке экранов.
  */
@@ -85,6 +91,8 @@ fun GlassBottomBar(
     selected: Int,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
+    /** Двойное нажатие на вкладку (или действие доступности «В начало раздела»). */
+    onReselect: (Int) -> Unit = {},
     state: LiquidBarState = rememberLiquidBarState(),
     height: androidx.compose.ui.unit.Dp = 62.dp,
 ) {
@@ -110,6 +118,7 @@ fun GlassBottomBar(
             val currentMath by rememberUpdatedState(math)
             val currentSelected by rememberUpdatedState(selected)
             val currentOnSelect by rememberUpdatedState(onSelect)
+            val currentOnReselect by rememberUpdatedState(onReselect)
             val currentHeight by rememberUpdatedState(heightPx)
             val currentCfg by rememberUpdatedState(cfg)
             val select: (Int) -> Unit = { i -> if (i != currentSelected) currentOnSelect(i) }
@@ -132,6 +141,10 @@ fun GlassBottomBar(
                         }
                     }
                     .pointerInput(Unit) {
+                        // Живёт между жестами: смена выбранной вкладки после первого
+                        // нажатия и перерисовки панели серию не обрывают.
+                        val taps = TabDoubleTap(viewConfiguration.doubleTapTimeoutMillis,
+                            viewConfiguration.doubleTapMinTimeMillis, viewConfiguration.longPressTimeoutMillis)
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             // Все события этого пальца панель забирает себе: так отмену
@@ -153,13 +166,18 @@ fun GlassBottomBar(
                             var abandoned = false
                             var exited = false
                             var cancelled = false
+                            var multiTouch = false
                             var upX = down.position.x
+                            var upTime = down.uptimeMillis
                             while (true) {
                                 val ev = awaitPointerEvent()
+                                // Второй палец на панели: это уже не нажатие для двойного.
+                                if (ev.changes.any { it.id != pointerId && it.pressed }) multiTouch = true
                                 val c = ev.changes.firstOrNull { it.id == pointerId } ?: continue
                                 if (!c.pressed) {
                                     if (isSystemCancel(c)) cancelled = true
                                     upX = c.position.x
+                                    upTime = c.uptimeMillis
                                     c.consume()
                                     break
                                 }
@@ -206,16 +224,24 @@ fun GlassBottomBar(
 
                             when {
                                 cancelled -> {
+                                    taps.reset()
                                     state.preview = -1
                                     settle(scope, state, m.centerOf(currentSelected), reduce)
                                 }
                                 dragging && !exited -> {
+                                    taps.reset()
                                     val target = state.preview.takeIf { it >= 0 } ?: m.indexAt(state.dragCenter)
                                     state.preview = -1
                                     settle(scope, state, m.centerOf(target), reduce)
                                     select(target)
                                 }
-                                !dragging && !abandoned -> select(m.indexAt(upX))
+                                !dragging && !abandoned -> {
+                                    val index = m.indexAt(upX)
+                                    select(index)
+                                    if (multiTouch) taps.reset()
+                                    else if (taps.onTap(index, down.uptimeMillis, upTime)) currentOnReselect(index)
+                                }
+                                else -> taps.reset()
                             }
                             if (!state.dragging) scope.launch { state.lift.animateTo(0f, spring(stiffness = 600f)) }
                         }
@@ -238,6 +264,9 @@ fun GlassBottomBar(
                                 role = Role.Tab
                                 this.selected = active
                                 onClick(label = item.label) { select(i); true }
+                                customActions = listOf(CustomAccessibilityAction("В начало раздела «${item.label}»") {
+                                    select(i); onReselect(i); true
+                                })
                             }
                             .onFocusChanged { focused = it.isFocused }
                             .focusable()

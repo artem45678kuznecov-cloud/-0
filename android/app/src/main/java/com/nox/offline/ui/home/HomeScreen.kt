@@ -4,13 +4,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -22,10 +19,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.CollectionsBookmark
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.LocalMovies
 import androidx.compose.material.icons.rounded.MoreVert
@@ -49,7 +44,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -57,11 +51,10 @@ import com.nox.offline.data.db.CollectionType
 import com.nox.offline.ui.Nav
 import com.nox.offline.ui.Page
 import com.nox.offline.ui.Tab
+import com.nox.offline.ui.TopOnReselect
 import com.nox.offline.ui.components.Cover
 import com.nox.offline.ui.components.LocalSheets
-import com.nox.offline.ui.kit.ActionCircle
 import com.nox.offline.ui.kit.BrandHeader
-import com.nox.offline.ui.kit.Chip
 import com.nox.offline.ui.kit.EmptyBlock
 import com.nox.offline.ui.kit.KitField
 import com.nox.offline.ui.kit.LavenderText
@@ -78,7 +71,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Главная (макет 01): логотип и фон → «Коллекции» → поиск и фильтры →
- * рекомендуемая коллекция → категории → закреплённые → альбомы.
+ * все видео → категории → закреплённые → альбомы.
  * Всё — из базы пользователя; пустая медиатека остаётся пустой и
  * предлагает создать первую коллекцию.
  */
@@ -92,6 +85,7 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
     val scope = rememberCoroutineScope()
     val searchFocus = androidx.compose.runtime.remember { FocusRequester() }
     val actions = collectionActions(lib, nav, sheets)
+    TopOnReselect(nav, Tab.HOME, listState)
 
     LazyColumn(state = listState, contentPadding = padding, modifier = Modifier.fillMaxWidth()) {
         item {
@@ -141,40 +135,15 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
         }
 
         // ---------- все видео ----------
-        // Видео медиатеки видны на главной всегда, даже без единой коллекции (например, сразу после
-        // обновления с 0.3.0). Без коллекций этот ряд стоит первым, иначе — после рекомендуемой.
-        val videosRow: () -> Unit = {
-            if (d.totalMedia > 0 && query.isBlank()) item(key = "all-videos") {
-                Section("Все видео", trailing = "${d.totalMedia}", onTrailing = { nav.open(Page.AllVideos) }) {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(d.recent, key = { it.media.id }) { v -> RecentTile(v) { onPlayMedia(v.media.id) } }
-                    }
+        // Видео медиатеки видны на главной всегда, даже без единой коллекции.
+        if (d.totalMedia > 0 && query.isBlank()) item(key = "all-videos") {
+            Section("Все видео", trailing = "${d.totalMedia}", onTrailing = { nav.open(Page.AllVideos) }) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(d.recent, key = { it.media.id }) { v -> RecentTile(v) { onPlayMedia(v.media.id) } }
                 }
-                SectionGap()
-            }
-        }
-        if (d.featured == null) videosRow()
-
-        // ---------- рекомендуемая ----------
-        item {
-            Section("Рекомендуемая коллекция", trailing = "Смотреть все", onTrailing = { nav.open(Page.Collections("all")) }) {
-                val f = d.featured
-                if (f == null) {
-                    EmptyBlock(Icons.Rounded.CollectionsBookmark,
-                        if (d.totalMedia == 0) "Медиатека пока пуста" else "Коллекций пока нет",
-                        if (d.totalMedia == 0) "Скачайте или импортируйте видео, а потом соберите их в коллекции: сериалы, подборки, категории."
-                        else "Соберите свои видео в коллекцию — здесь появится та, к которой вы вернётесь чаще всего.",
-                        action = if (d.totalMedia == 0) "Открыть загрузчик" else "Создать коллекцию",
-                        onAction = {
-                            if (d.totalMedia == 0) { nav.open(Page.Downloader, Tab.DOWNLOADS) }
-                            else createCollectionSheet(sheets, lib) { id -> nav.open(Page.Collection(id)) }
-                        })
-                } else FeaturedCard(f, d.featuredReason) { nav.open(Page.Collection(f.id)) }
             }
             SectionGap()
         }
-
-        if (d.featured != null) videosRow()
 
         // ---------- категории ----------
         item {
@@ -238,35 +207,6 @@ fun HomeScreen(lib: LibraryViewModel, nav: Nav, padding: PaddingValues, onPlayMe
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun FeaturedCard(c: CollectionCard, reason: String, onOpen: () -> Unit) {
-    Tile(Modifier.fillMaxWidth().height(86.dp), onClick = onOpen) {
-        Row(Modifier.fillMaxHeight()) {
-            Cover(c.cover, Modifier.fillMaxHeight().aspectRatio(1.95f), RoundedCornerShape(topStart = 10.dp, bottomStart = 10.dp))
-            Column(Modifier.weight(1f).padding(start = 8.dp, top = 5.dp, end = 2.dp, bottom = 5.dp)) {
-                Text(c.title, color = Nox.TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, lineHeight = 15.sp)
-                Text(com.nox.offline.ui.library.videosLabel(c.summary.local), color = LavenderText, fontSize = 11.sp, lineHeight = 13.sp)
-                Text(c.summary.description.ifBlank { reason }, color = LavenderText, fontSize = 10.sp,
-                    maxLines = if (c.summary.entity.tagList.isEmpty()) 2 else 1,
-                    overflow = TextOverflow.Ellipsis, lineHeight = 12.sp)
-                val tags = c.summary.entity.tagList
-                if (tags.isNotEmpty()) {
-                    Spacer(Modifier.weight(1f))
-                    // Только метки, которые помещаются целиком: лишние не сжимаются, а не показываются.
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), maxLines = 1) {
-                        for (t in tags.take(3)) Chip(t, height = 18.dp, textSize = 9.5.sp, sidePadding = 8.dp)
-                    }
-                }
-            }
-            Box(Modifier.fillMaxHeight().padding(end = 6.dp), contentAlignment = Alignment.Center) {
-                ActionCircle(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Открыть «${c.title}»", onOpen, size = 30.dp)
             }
         }
     }

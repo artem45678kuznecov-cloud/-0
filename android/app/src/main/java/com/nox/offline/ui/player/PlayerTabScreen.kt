@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -91,6 +92,7 @@ import com.nox.offline.ui.MainViewModel
 import com.nox.offline.ui.Nav
 import com.nox.offline.ui.Page
 import com.nox.offline.ui.Tab
+import com.nox.offline.ui.TopOnReselect
 import com.nox.offline.ui.components.Cover
 import com.nox.offline.ui.components.LocalSheets
 import com.nox.offline.ui.components.LibraryItem
@@ -147,7 +149,9 @@ fun PlayerTabScreen(vm: MainViewModel, lib: LibraryViewModel, nav: Nav, padding:
     val detailFlow = remember(contextCollection) { contextCollection?.let { lib.detail(it) } ?: kotlinx.coroutines.flow.flowOf(null) }
     val detail by detailFlow.collectAsState(initial = null)
 
-    LazyColumn(contentPadding = padding) {
+    val list = rememberLazyListState()
+    TopOnReselect(nav, Tab.PLAYER, list)
+    LazyColumn(state = list, contentPadding = padding) {
         item {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 RoundButton(Icons.AutoMirrored.Rounded.ArrowBack, "Назад", { nav.back() }, size = 34.dp)

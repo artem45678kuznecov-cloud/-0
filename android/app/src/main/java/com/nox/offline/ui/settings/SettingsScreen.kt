@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -57,6 +58,8 @@ import com.nox.offline.ui.MainViewModel
 import com.nox.offline.ui.Nav
 import com.nox.offline.ui.NoxActions
 import com.nox.offline.ui.Page
+import com.nox.offline.ui.Tab
+import com.nox.offline.ui.TopOnReselect
 import com.nox.offline.ui.components.LocalSheets
 import com.nox.offline.ui.glass.LocalWallpaperFrame
 import com.nox.offline.ui.kit.AmberSwitch
@@ -90,7 +93,9 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
     val sheets = LocalSheets.current
     val version = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
 
-    LazyColumn(contentPadding = padding) {
+    val list = rememberLazyListState()
+    TopOnReselect(nav, Tab.SETTINGS, list)
+    LazyColumn(state = list, contentPadding = padding) {
         item {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 16.dp, top = 8.dp), verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {

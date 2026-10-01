@@ -1,6 +1,7 @@
 package com.nox.offline.ui.downloads
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,11 +9,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -52,6 +53,7 @@ import com.nox.offline.ui.MainViewModel
 import com.nox.offline.ui.Nav
 import com.nox.offline.ui.Page
 import com.nox.offline.ui.Tab
+import com.nox.offline.ui.TopOnReselect
 import com.nox.offline.ui.components.Cover
 import com.nox.offline.ui.components.statusLabel
 import com.nox.offline.ui.kit.ActionCircle
@@ -104,7 +106,9 @@ fun QueueScreen(vm: MainViewModel, nav: Nav, padding: PaddingValues, onDownloadM
 
     fun toggleSel(d: DownloadEntity) { selected = if (d.id in selected) selected - d.id else selected + d.id }
 
-    LazyColumn(contentPadding = padding) {
+    val listState = rememberLazyListState()
+    TopOnReselect(nav, Tab.DOWNLOADS, listState)
+    LazyColumn(state = listState, contentPadding = padding) {
         item {
             BrandHeader(onSearch = { nav.open(Page.Downloader) }, onSettings = { nav.select(Tab.SETTINGS) },
                 searchLabel = "Загрузчик: найти видео по ссылке")

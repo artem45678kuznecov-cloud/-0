@@ -2,9 +2,6 @@ package com.nox.offline.library
 
 import com.nox.offline.data.db.ChapterEntity
 import com.nox.offline.data.db.ChapterKind
-import com.nox.offline.data.db.CollectionItemEntity
-import com.nox.offline.data.db.CollectionSummary
-import com.nox.offline.data.db.CollectionType
 import com.nox.offline.data.db.MediaEntity
 import com.nox.offline.data.db.PlaybackEntity
 import com.nox.offline.subtitles.SubtitleParser
@@ -107,22 +104,6 @@ class LibraryLogicTest {
     @Test fun `broken subtitle lines are skipped, not crashing`() {
         val bad = "1\n00:00:05,000 --> 00:00:01,000\nназад\n\nмусор\n--> -->\n\n2\n00:00:06,000 --> 00:00:07,000\nнорма\n"
         assertEquals(listOf("норма"), SubtitleParser.parse(bad).map { it.text })
-    }
-
-    private fun summary(id: Long, pinned: Boolean = false, local: Int = 2, type: String = CollectionType.ALBUM, updated: Long = 0) =
-        CollectionSummary(id, "c$id", "", type, 0, "", pinned, 0, "", "", "", 0, updated, local, local, 0)
-
-    @Test fun `featured comes from the user's own unfinished collection`() {
-        val items = listOf(
-            CollectionItemEntity(1, collectionId = 1, mediaId = 10, addedAt = 0),
-            CollectionItemEntity(2, collectionId = 2, mediaId = 20, addedAt = 0),
-        )
-        val pb = mapOf(20L to PlaybackEntity(20, 60_000, 600_000, 500))
-        val f = LibraryRules.featured(listOf(summary(1, updated = 900), summary(2, updated = 100)), items, pb)
-        assertEquals(2L, f!!.collectionId)
-        assertNull(LibraryRules.featured(emptyList(), emptyList(), emptyMap()))
-        // Пустые категории не рекомендуются.
-        assertNull(LibraryRules.featured(listOf(summary(3, local = 0, type = CollectionType.CATEGORY)), emptyList(), emptyMap()))
     }
 
     private fun media(id: Long, size: Long, protected: Boolean = false) = MediaEntity(id = id, title = "m$id", filePath = "/x",

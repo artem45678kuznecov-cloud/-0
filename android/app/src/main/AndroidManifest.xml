@@ -87,6 +87,19 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- 0.4.3: скачивание APK обновления. Android 14+: своё UIDT-задание. -->
+        <service
+            android:name=".updates.UpdateJobService"
+            android:exported="true"
+            tools:targetApi="34"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!-- 0.4.3: скачивание APK обновления. Android 13 и ниже: foreground service dataSync. -->
+        <service
+            android:name=".updates.UpdateDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <receiver
             android:name=".downloader.NotificationActionReceiver"
             android:exported="false" />

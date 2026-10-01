@@ -8,6 +8,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlaybackException
 import com.nox.offline.core.MediaTypes
+import com.nox.offline.core.NoxLog
 import com.nox.offline.core.SafeUrl
 import com.nox.offline.data.db.MediaEntity
 import com.nox.offline.media.ChannelByteSource
@@ -48,6 +49,9 @@ object PlaybackDiagnostics {
         sb.appendLine("Ошибка воспроизведения, ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).format(Date())}")
         sb.appendLine("Код: ${error.errorCode} ${error.errorCodeName}")
         sb.appendLine("Вид: ${kind(error.errorCode)}")
+        if (isOutOfMemory(error)) {
+            sb.appendLine("Причина — нехватка памяти процесса (OutOfMemoryError) при разборе, а не повреждение файла.")
+        }
         (error as? ExoPlaybackException)?.let { e ->
             sb.appendLine("Тип ExoPlayer: ${when (e.type) {
                 ExoPlaybackException.TYPE_SOURCE -> "источник (чтение/разбор файла)"
@@ -86,6 +90,10 @@ object PlaybackDiagnostics {
         if (media != null) source(context, media, sb)
         sb.appendLine("Внешние субтитры NOX рисует сам, в разборе файла плеером они не участвуют.")
         if (lastCheck.isNotBlank()) sb.appendLine("Последняя проверка файла: $lastCheck")
+        val rt = Runtime.getRuntime()
+        sb.appendLine("Память сейчас: лимит Java-кучи ${rt.maxMemory() / 1_048_576} МиБ, занято ${(rt.totalMemory() - rt.freeMemory()) / 1_048_576} МиБ, " +
+            "нативно ${android.os.Debug.getNativeHeapAllocatedSize() / 1_048_576} МиБ")
+        NoxLog.dump().lastOrNull { it.contains(" mp4-large") }?.let { sb.appendLine("Разбор MP4: $it") }
         sb.appendLine("Media3 ${MediaLibraryInfo.VERSION}; Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}); " +
             "${Build.MANUFACTURER} ${Build.MODEL}; ABI ${Build.SUPPORTED_ABIS.joinToString()}")
         return if (sb.length > MAX_CHARS) sb.substring(0, MAX_CHARS) + "\n…(обрезано)" else sb.toString()
@@ -124,6 +132,9 @@ object PlaybackDiagnostics {
     }
 
     private fun hex(b: ByteArray, n: Int) = b.take(n).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+
+    /** В цепочке причин есть OutOfMemoryError (Media3 заворачивает её в UnexpectedLoaderException). */
+    fun isOutOfMemory(error: Throwable): Boolean = generateSequence(error) { it.cause }.take(8).any { it is OutOfMemoryError }
 
     private fun kind(code: Int): String = when (code) {
         PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "разбор контейнера: структура файла не совпала с ожидаемой (не декодер и не устройство)"

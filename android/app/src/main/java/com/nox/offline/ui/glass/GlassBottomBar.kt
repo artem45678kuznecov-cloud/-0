@@ -91,10 +91,10 @@ fun GlassBottomBar(
     selected: Int,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
-    /** Двойное нажатие на вкладку (или действие доступности «В начало раздела»). */
-    onReselect: (Int) -> Unit = {},
     state: LiquidBarState = rememberLiquidBarState(),
     height: androidx.compose.ui.unit.Dp = 62.dp,
+    /** Двойное нажатие на вкладку (или действие доступности «В начало раздела»). */
+    onReselect: (Int) -> Unit = {},
 ) {
     val palette = nox()
     val cfg = LocalGlassConfig.current

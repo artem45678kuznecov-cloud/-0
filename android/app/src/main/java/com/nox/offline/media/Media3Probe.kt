@@ -36,7 +36,8 @@ object Media3Probe {
     fun run(context: Context, uri: Uri, kind: ContainerCheck.Kind, savedPositionMs: Long, ctl: CheckControl): Result {
         val lines = ArrayList<String>()
         val make: () -> Extractor = when (kind) {
-            ContainerCheck.Kind.MP4 -> { { Mp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0) } }
+            // Тот же выбор, что у плеера: MP4 с огромным индексом — без таблиц в куче.
+            ContainerCheck.Kind.MP4 -> { { NoxExtractorsFactory.largeMp4(context, uri) ?: Mp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0) } }
             ContainerCheck.Kind.WEBM -> { { MatroskaExtractor(SubtitleParser.Factory.UNSUPPORTED, 0) } }
             ContainerCheck.Kind.UNKNOWN -> return Result(false, listOf("разборщик плеера: контейнер не MP4 и не WebM — не проверялся"))
         }

@@ -22,15 +22,9 @@ object FileChecks {
     private fun dir(context: Context) = File(context.filesDir, "file-checks").apply { mkdirs() }
 
     /** Открыть файл видео только на чтение: и внутри NOX, и документ SAF. */
-    fun open(context: Context, m: MediaEntity): ByteSource {
-        if (!m.isExternal) return ChannelByteSource.of(File(m.filePath))
-        val pfd = context.contentResolver.openFileDescriptor(Uri.parse(m.contentUri), "r")
-            ?: throw java.io.IOException("провайдер не открыл документ")
-        val src = try { ChannelByteSource.of(pfd.fileDescriptor) } catch (t: Throwable) { pfd.close(); throw t }
-        return object : ByteSource by src {
-            override fun close() { src.close(); pfd.close() }
-        }
-    }
+    fun open(context: Context, m: MediaEntity): ByteSource =
+        if (!m.isExternal) ChannelByteSource.of(File(m.filePath))
+        else NoxExtractorsFactory.openReadOnly(context, Uri.parse(m.contentUri))
 
     fun isMatroska(context: Context, m: MediaEntity): Boolean =
         runCatching { open(context, m).use { ContainerCheck.kindOf(it) == ContainerCheck.Kind.WEBM } }.getOrDefault(false)

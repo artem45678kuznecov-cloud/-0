@@ -145,6 +145,9 @@ class PlaybackHub(private val app: NoxApp) {
     fun player(): ExoPlayer {
         exo?.let { return it }
         val p = ExoPlayer.Builder(app)
+            // MP4 с огромным индексом (многочасовые фильмы) читается без таблиц в куче — см. NoxExtractorsFactory.
+            .setMediaSourceFactory(androidx.media3.exoplayer.source.DefaultMediaSourceFactory(app,
+                com.nox.offline.media.NoxExtractorsFactory(app)))
             .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
                 /* handleAudioFocus = */ true)
             // Наушники отключили — пауза (ACTION_AUDIO_BECOMING_NOISY).
@@ -339,8 +342,10 @@ class PlaybackHub(private val app: NoxApp) {
             attempt = if (lenientTried) "повтор без индекса перемотки (Cues)" else "обычная",
         )
         val resumeAt = if (readyForItem) (p?.currentPosition ?: requestedStartMs) else requestedStartMs
-        _state.value = _state.value.copy(isPlaying = false, error = "Не удалось воспроизвести: ${error.errorCodeName}",
-            errorCode = error.errorCodeName)
+        val message = if (PlaybackDiagnostics.isOutOfMemory(error))
+            "Не хватило памяти, чтобы открыть видео (${error.errorCodeName}). Файл при этом не повреждён."
+        else "Не удалось воспроизвести: ${error.errorCodeName}"
+        _state.value = _state.value.copy(isPlaying = false, error = message, errorCode = error.errorCodeName)
         scope.launch {
             val gone = m != null && withContext(Dispatchers.IO) { !MediaLocator.exists(app, app.saf, m) }
             val report = withContext(Dispatchers.IO) {

@@ -80,6 +80,7 @@ class GlassBottomBarGestureTest {
 
     private val selected = mutableIntStateOf(0)
     private val calls = mutableListOf<Int>()
+    private val reselects = mutableListOf<Int>()
     private val state = LiquidBarState()
     private val progress = mutableIntStateOf(0)
     private var barWidthPx = 0f
@@ -116,7 +117,7 @@ class GlassBottomBarGestureTest {
                         val tick = progress.intValue
                         val fresh = items.map { it.copy() }.also { check(tick >= 0) }
                         GlassBottomBar(fresh, selected.intValue, { calls += it; selected.intValue = it },
-                            Modifier.testTag("bar").measured(), state)
+                            Modifier.testTag("bar").measured(), state, onReselect = { reselects += it })
                     }
                 }
             }
@@ -161,6 +162,109 @@ class GlassBottomBarGestureTest {
         bar.performTouchInput { click(Offset(centerX(2), centerY)) }
         rule.waitForIdle()
         assertTrue(calls.isEmpty())
+        assertTrue("одиночное повторное нажатие не уводит в начало", reselects.isEmpty())
+    }
+
+    // ---------- двойное нажатие: «В начало раздела» ----------
+
+    @Test fun doubleTapOnSelectedTabGoesToSectionStartOnce() {
+        setBar()
+        bar.performTouchInput {
+            click(Offset(centerX(0), centerY)); advanceEventTime(120); click(Offset(centerX(0), centerY))
+        }
+        rule.waitForIdle()
+        assertEquals(listOf(0), reselects)
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test fun doubleTapOnOtherTabSelectsAtOnceThenGoesToItsStart() {
+        setBar()
+        bar.performTouchInput { click(Offset(centerX(2), centerY)) }
+        rule.waitForIdle()
+        // Первое нажатие переключает сразу, без ожидания второго.
+        assertEquals(listOf(2), calls)
+        assertTrue(reselects.isEmpty())
+        bar.performTouchInput { advanceEventTime(100); click(Offset(centerX(2), centerY)) }
+        rule.waitForIdle()
+        assertEquals(listOf(2), calls)
+        assertEquals(listOf(2), reselects)
+    }
+
+    @Test fun slowSecondTapIsNotADoubleTap() {
+        setBar()
+        bar.performTouchInput {
+            click(Offset(centerX(1), centerY)); advanceEventTime(600); click(Offset(centerX(1), centerY))
+        }
+        rule.waitForIdle()
+        assertTrue(reselects.isEmpty())
+    }
+
+    @Test fun tapsOnTwoDifferentTabsAreNotADoubleTap() {
+        setBar()
+        bar.performTouchInput {
+            click(Offset(centerX(1), centerY)); advanceEventTime(100); click(Offset(centerX(2), centerY))
+        }
+        rule.waitForIdle()
+        assertEquals(listOf(1, 2), calls)
+        assertTrue(reselects.isEmpty())
+    }
+
+    @Test fun dragReleaseThenTapIsNotADoubleTap() {
+        setBar()
+        bar.performTouchInput {
+            down(Offset(centerX(0), centerY)); slowMove(centerX(0), centerX(2)); up()
+            advanceEventTime(80)
+            click(Offset(centerX(2), centerY))
+        }
+        rule.waitForIdle()
+        assertEquals(listOf(2), calls)
+        assertTrue("ведение линзы не первое нажатие двойного", reselects.isEmpty())
+    }
+
+    @Test fun longPressThenTapIsNotADoubleTap() {
+        setBar()
+        bar.performTouchInput {
+            down(Offset(centerX(1), centerY)); advanceEventTime(900); up()
+            advanceEventTime(80)
+            click(Offset(centerX(1), centerY))
+        }
+        rule.waitForIdle()
+        assertTrue(reselects.isEmpty())
+    }
+
+    @Test fun twoFingerTouchIsNotPartOfADoubleTap() {
+        setBar()
+        bar.performTouchInput {
+            down(0, Offset(centerX(1), centerY))
+            down(1, Offset(centerX(3), centerY))
+            up(1); up(0)
+            advanceEventTime(80)
+            click(Offset(centerX(1), centerY))
+        }
+        rule.waitForIdle()
+        assertTrue(reselects.isEmpty())
+    }
+
+    @Test fun redrawsBetweenTapsKeepTheDoubleTap() {
+        setBar()
+        bar.performTouchInput { click(Offset(centerX(3), centerY)) }
+        rule.runOnIdle { progress.intValue++ }      // «прогресс загрузки» перерисовал панель
+        rule.waitForIdle()
+        bar.performTouchInput { advanceEventTime(90); click(Offset(centerX(3), centerY)) }
+        rule.waitForIdle()
+        assertEquals(listOf(3), calls)
+        assertEquals(listOf(3), reselects)
+    }
+
+    @Test fun sectionStartIsAnAccessibilityActionOfEachTab() {
+        setBar()
+        val tabs = rule.onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab))
+        val actions = tabs[1].fetchSemanticsNode().config[SemanticsActions.CustomActions]
+        assertEquals(listOf("В начало раздела «Загрузки»"), actions.map { it.label })
+        rule.runOnIdle { actions.first().action() }
+        rule.waitForIdle()
+        assertEquals(listOf(1), calls)
+        assertEquals(listOf(1), reselects)
     }
 
     @Test fun slowDragThroughAllTabsSelectsOnceOnRelease() {

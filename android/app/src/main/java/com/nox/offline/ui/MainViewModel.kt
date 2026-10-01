@@ -796,6 +796,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val a = settings.appearance.value
         sb.appendLine("Оформление: тема=${a.preset} стекло=${a.glassMode.key} фон=${a.wallpaper.key}")
         sb.appendLine("Обновления: ${nox.updates.state.value.javaClass.simpleName}")
+        sb.append(nox.updates.diagnostics())
         val sp = nox.storage.space()
         sb.appendLine("Хранилище: ${nox.storage.root.absolutePath}")
         sb.appendLine("Папка готовых видео: ${destinationStatus()}")

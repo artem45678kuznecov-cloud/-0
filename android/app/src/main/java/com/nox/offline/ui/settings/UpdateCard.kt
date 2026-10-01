@@ -84,9 +84,31 @@ fun UpdateSection(state: UpdateState, vm: MainViewModel, actions: NoxActions) {
             NoxProgress(if (state.total > 0) state.done.toFloat() / state.total else 0f,
                 kind = if (state.total > 0) com.nox.offline.ui.components.ProgressKind.DETERMINATE else com.nox.offline.ui.components.ProgressKind.INDETERMINATE)
             VSpace(6)
-            Muted("${Format.bytes(state.done)} из ${Format.bytes(state.total)} • загрузки видео не останавливаются", size = 13.sp)
+            Muted(com.nox.offline.updates.UpdateScheduler.downloadLine(state), size = 13.sp)
+            if (state.note.isNotBlank() && state.phase != com.nox.offline.updates.DownloadPhase.DOWNLOADING) {
+                Muted(state.note, size = 12.sp, color = Nox.TextSecondary, maxLines = 2)
+            }
+            Muted("Можно свернуть NOX: скачивание продолжится, скачанная часть сохраняется. Загрузки видео не останавливаются.",
+                size = 12.sp, color = Nox.TextSecondary)
             VSpace(10)
             GlassPill("Отменить", onClick = vm::cancelUpdateDownload)
+        }
+        is UpdateState.Verifying -> {
+            Text("Проверка файла ${state.manifest.versionName}", color = Nox.TextPrimary, fontSize = 16.sp)
+            VSpace(8)
+            NoxProgress(0f, kind = com.nox.offline.ui.components.ProgressKind.INDETERMINATE)
+            VSpace(6)
+            Muted("Размер, контрольная сумма SHA-256 и подпись — до установки.", size = 13.sp, color = Nox.TextSecondary)
+        }
+        is UpdateState.ReadyToInstall -> {
+            Text("Версия ${state.manifest.versionName} скачана и проверена", color = p.accentLight, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            VSpace(4)
+            Muted("Медиатека, очередь и настройки сохранятся. Повторно файл не скачивается.", size = 13.sp, color = Nox.TextSecondary)
+            VSpace(12)
+            GlassButton("Установить", onClick = { vm.downloadUpdate(state.manifest) }, icon = Icons.Rounded.SystemUpdate,
+                modifier = Modifier.fillMaxWidth(), height = 52.dp, textSize = 18.sp)
+            VSpace(8)
+            GlassPill("Позже", onClick = vm::updateLater)
         }
         is UpdateState.NeedsPermission -> {
             Text("Нужно разрешение на установку", color = Nox.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
@@ -133,7 +155,10 @@ fun UpdateBanner(state: UpdateState, vm: MainViewModel, onOpenSettings: () -> Un
     val (text, action) = when (state) {
         is UpdateState.Available -> "Доступна версия ${state.manifest.versionName}" to "Обновить"
         is UpdateState.JustUpdated -> "NOX обновлён до ${state.versionName}" to null
-        is UpdateState.Downloading -> "Скачивается обновление ${Format.percent(state.done, state.total)}%" to null
+        is UpdateState.Downloading -> "Скачивается обновление ${Format.percent(state.done, state.total)}%" +
+            (if (state.phase == com.nox.offline.updates.DownloadPhase.DOWNLOADING && state.bytesPerSecond > 0) " · ${Format.speed(state.bytesPerSecond)}"
+            else if (state.phase == com.nox.offline.updates.DownloadPhase.WAITING_NETWORK) " · ждём сеть" else "") to null
+        is UpdateState.ReadyToInstall -> "NOX ${state.manifest.versionName} готов к установке" to "Установить"
         else -> return
     }
     GlassSurface(modifier.statusBarsPadding().padding(horizontal = 16.dp, vertical = 6.dp).fillMaxWidth().height(52.dp),
@@ -145,6 +170,7 @@ fun UpdateBanner(state: UpdateState, vm: MainViewModel, onOpenSettings: () -> Un
             if (action != null) {
                 GlassPill(action, accent = true, height = 38.dp, textSize = 14.sp, onClick = {
                     if (state is UpdateState.Available) vm.downloadUpdate(state.manifest)
+                    if (state is UpdateState.ReadyToInstall) vm.downloadUpdate(state.manifest)
                     onOpenSettings()
                 })
             }

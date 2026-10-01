@@ -126,7 +126,9 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
                                 is UpdateState.Checking -> "Проверяем…"
                                 is UpdateState.Available -> "Доступна ${u.manifest.versionName}"
                                 is UpdateState.Downloading -> "Скачивается обновление"
-                                is UpdateState.Failed -> "Проверка не удалась"
+                                is UpdateState.Verifying -> "Проверка обновления"
+                                is UpdateState.ReadyToInstall -> "Обновление готово к установке"
+                                is UpdateState.Failed -> if (u.manifest != null) "Обновление не скачалось" else "Проверка не удалась"
                                 else -> "Проверка — по кнопке или в фоне"
                             }, color = LavenderText, fontSize = 9.5.sp, maxLines = 2, lineHeight = 12.sp)
                         }
@@ -137,6 +139,7 @@ fun SettingsScreen(vm: MainViewModel, actions: NoxActions, nav: Nav, padding: Pa
                     }
                 }
                 if (update is UpdateState.Available || update is UpdateState.Downloading || update is UpdateState.NeedsPermission ||
+                    update is UpdateState.Verifying || update is UpdateState.ReadyToInstall ||
                     update is UpdateState.Installing || update is UpdateState.Failed || update is UpdateState.JustUpdated) {
                     Spacer(Modifier.height(6.dp))
                     Tile(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp)) { UpdateSection(update, vm, actions) } }

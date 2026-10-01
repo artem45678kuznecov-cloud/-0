@@ -22,6 +22,26 @@ data class UpdateManifest(
     val notes: String,
     val publishedAt: String,
 ) {
+    /** Тот же формат, что nox-update.json: [parse] читает его обратно (задание обновления хранит манифест). */
+    fun toJson(): String = JSONObject().apply {
+        put("format", FORMAT)
+        put("formatVersion", FORMAT_VERSION)
+        put("applicationId", applicationId)
+        put("versionName", versionName)
+        put("versionCode", versionCode)
+        put("minSdk", minSdk)
+        put("abis", org.json.JSONArray(abis))
+        put("channel", channel)
+        put("apk", JSONObject().put("name", apkName).put("url", apkUrl).put("size", apkSize).put("sha256", apkSha256))
+        put("signingCertSha256", signingCertSha256)
+        put("releaseNotes", notes)
+        put("publishedAt", publishedAt)
+    }.toString()
+
+    /** Тот же выпуск: версия, размер и контрольная сумма файла совпадают. */
+    fun sameRelease(other: UpdateManifest): Boolean =
+        versionCode == other.versionCode && apkSize == other.apkSize && apkSha256 == other.apkSha256
+
     companion object {
         const val FORMAT = "nox-update"
         const val FORMAT_VERSION = 1

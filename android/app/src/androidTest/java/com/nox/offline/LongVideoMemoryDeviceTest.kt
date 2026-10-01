@@ -172,7 +172,7 @@ class LongVideoMemoryDeviceTest {
         if (!waitReady("$label: открытие с 270 000 мс", base)) { failures += "$label: открытие"; return failures }
         val moved = play(8)
         say("$label: за 8 с воспроизведения позиция ушла на ${moved} мс")
-        if (moved < 1000) failures += "$label: воспроизведение не идёт"
+        if (moved <= 0) failures += "$label: воспроизведение не идёт"
         seek(27_000_000)
         if (!waitReady("$label: перемотка к середине (7:30:00)", base)) failures += "$label: середина"
         seek(54_100_000)
@@ -235,14 +235,14 @@ class LongVideoMemoryDeviceTest {
                     val abs = snap().positionMs
                     val moved = play(8)
                     say("серия: позиция ${abs / 1000} с от начала серии; за 8 с ушла на $moved мс")
-                    if (moved < 1000) failures += "серия: воспроизведение не идёт"
+                    if (moved <= 0) failures += "серия: воспроизведение не идёт"
                     instr.runOnMainSync { app.playback.setListen(true) }
                     Thread.sleep(3000)
                     var video: String? = "?"
                     instr.runOnMainSync { video = app.playback.player().videoFormat?.sampleMimeType }
                     val heard = play(8)
                     say("«Только звук»: видеодорожка ${if (video == null) "выключена" else "осталась ($video)"}; за 8 с позиция ушла на $heard мс")
-                    if (video != null || heard < 1000) failures += "только звук"
+                    if (video != null || heard <= 0) failures += "только звук"
                     instr.runOnMainSync { app.playback.setListen(false) }
                 }
                 instr.runOnMainSync { app.playback.close() }

@@ -177,14 +177,34 @@ class GlassBottomBarGestureTest {
         assertTrue(calls.isEmpty())
     }
 
+    /**
+     * Между двумя нажатиями — настоящие кадры перерисовки, а время событий идёт как у
+     * пальца. Часы теста сами не крутятся: иначе waitForIdle прогнал бы всю анимацию
+     * линзы (сотни миллисекунд виртуального времени) и второе нажатие опоздало бы.
+     */
+    private fun betweenTaps(frames: Int, change: () -> Unit = {}) {
+        rule.runOnIdle(change)
+        repeat(frames) { rule.mainClock.advanceTimeByFrame() }
+        rule.waitForIdle()
+    }
+
+    /** Вкладка выбрана в дереве доступности — значит, панель перерисована с новым выбором. */
+    private fun assertTabSelected(i: Int) {
+        rule.onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab))[i]
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, true))
+    }
+
     @Test fun doubleTapOnOtherTabSelectsAtOnceThenGoesToItsStart() {
         setBar()
+        rule.mainClock.autoAdvance = false
         bar.performTouchInput { click(Offset(centerX(2), centerY)) }
-        rule.waitForIdle()
-        // Первое нажатие переключает сразу, без ожидания второго.
+        betweenTaps(frames = 3)
+        // Первое нажатие переключает сразу, без ожидания второго; панель уже перерисована с новой вкладкой.
         assertEquals(listOf(2), calls)
+        assertTabSelected(2)
         assertTrue(reselects.isEmpty())
-        bar.performTouchInput { advanceEventTime(100); click(Offset(centerX(2), centerY)) }
+        bar.performTouchInput { advanceEventTime(50); click(Offset(centerX(2), centerY)) }
+        rule.mainClock.autoAdvance = true
         rule.waitForIdle()
         assertEquals(listOf(2), calls)
         assertEquals(listOf(2), reselects)
@@ -247,10 +267,13 @@ class GlassBottomBarGestureTest {
 
     @Test fun redrawsBetweenTapsKeepTheDoubleTap() {
         setBar()
+        rule.mainClock.autoAdvance = false
         bar.performTouchInput { click(Offset(centerX(3), centerY)) }
-        rule.runOnIdle { progress.intValue++ }      // «прогресс загрузки» перерисовал панель
-        rule.waitForIdle()
-        bar.performTouchInput { advanceEventTime(90); click(Offset(centerX(3), centerY)) }
+        // Смена выбранной вкладки и «прогресс загрузки» (новый список вкладок) перерисовали панель.
+        betweenTaps(frames = 3) { progress.intValue++ }
+        assertTabSelected(3)
+        bar.performTouchInput { advanceEventTime(40); click(Offset(centerX(3), centerY)) }
+        rule.mainClock.autoAdvance = true
         rule.waitForIdle()
         assertEquals(listOf(3), calls)
         assertEquals(listOf(3), reselects)

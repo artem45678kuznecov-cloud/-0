@@ -14,6 +14,7 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import androidx.annotation.RequiresApi
@@ -63,13 +64,25 @@ object UpdateScheduler {
         false
     }
 
+    /**
+     * Любая сеть с доступом в интернет. NETWORK_TYPE_ANY требует ещё и «подтверждённую»
+     * сеть (проверка связи Google): там, где эта проверка не проходит (частичное подключение,
+     * блокировка проверочного адреса), задание не стартовало бы вовсе, а файл лежит на GitHub.
+     * Если интернета на деле нет — передача сама покажет повторы и честную ошибку.
+     */
+    private fun anyInternet(): NetworkRequest = NetworkRequest.Builder()
+        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+        .build()
+
     @RequiresApi(34)
     private fun scheduleUidt(context: Context, m: UpdateManifest): Boolean {
         val scheduler = context.getSystemService(JobScheduler::class.java)
         if (scheduler.getPendingJob(JOB_ID) != null) return true
         val info = JobInfo.Builder(JOB_ID, ComponentName(context, UpdateJobService::class.java))
             .setUserInitiated(true)
-            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+            .setRequiredNetwork(anyInternet())
             .setEstimatedNetworkBytes(m.apkSize.coerceAtLeast(1), JobInfo.NETWORK_BYTES_UNKNOWN.toLong())
             .build()
         val code = scheduler.schedule(info)
@@ -132,11 +145,16 @@ object UpdateScheduler {
         }
     }
 
+    /** Есть ли сейчас сеть с доступом в интернет (подтверждённость проверкой Google не нужна). */
+    fun online(context: Context): Boolean {
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return true
+        return cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    }
+
     /** Без UIDT (Android 13 и ниже) ждать сеть самим, но не дольше получаса. */
     suspend fun awaitNetwork(context: Context, onWaiting: () -> Unit): Boolean {
         val cm = context.getSystemService(ConnectivityManager::class.java) ?: return true
-        fun online() = cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-        if (online()) return true
+        if (online(context)) return true
         onWaiting()
         return withTimeoutOrNull(30 * 60_000L) {
             suspendCancellableCoroutine { cont ->

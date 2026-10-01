@@ -80,19 +80,28 @@ class UpdateTransfer(
         data class Failed(val message: String, val retryable: Boolean) : Result()
     }
 
-    /** Замеры передачи — для экрана и «Скопировать диагностику». */
-    class Stats {
-        var attempts = 0
-        /** Байт тела ответов, пришедших из сети за все попытки. */
-        var networkBytes = 0L
-        var transferMs = 0L
-        var pauseMs = 0L
-        var startPart = 0L
-        val requests = ArrayDeque<String>()
+    /** Замеры передачи — для экрана и «Скопировать диагностику». Верны и посреди попытки. */
+    inner class Stats {
+        @Volatile var attempts = 0
+            internal set
+        /** Байт тела ответов, пришедших из сети за все попытки, включая текущую. */
+        val networkBytes: Long get() = counter.get()
+        /** Время в передаче, включая текущую попытку. */
+        val transferMs: Long get() = finishedMs + attemptStart.let { if (it >= 0) now() - it else 0 }
+        @Volatile var pauseMs = 0L
+            internal set
+        @Volatile var startPart = 0L
+            internal set
+        @Volatile internal var finishedMs = 0L
+        @Volatile internal var attemptStart = -1L
+        private val requests = ArrayDeque<String>()
 
         fun repeatedBytes(finalSize: Long): Long = maxOf(0L, networkBytes - (finalSize - startPart))
 
-        internal fun request(line: String) {
+        /** Последние запросы (хост без параметров ссылки, коды, Range, времена). */
+        fun requestLines(): List<String> = synchronized(requests) { requests.toList() }
+
+        internal fun request(line: String) = synchronized(requests) {
             if (requests.size >= MAX_REQUESTS) requests.removeFirst()
             requests.addLast(line)
         }
@@ -144,7 +153,7 @@ class UpdateTransfer(
             speed.restart(before)
             report(onProgress, Progress(before, size, 0, -1, Phase.CONNECTING))
             val start = now()
-            val bytesAtStart = counter.get()
+            stats.attemptStart = start
             val out = try {
                 coroutineScope {
                     // Пока данные не идут, чтение сокета стоит до таймаута: экран узнаёт об остановке
@@ -168,19 +177,21 @@ class UpdateTransfer(
                         http.download(current, mapOf("Accept" to "application/vnd.android.package-archive"), part, expectedTotal = size) { done, total ->
                             val bps = speed.add(done)
                             val eta = if (bps > 0 && total > 0) (total - done) / bps else -1
-                            report(onProgress, Progress(done, if (total > 0) total else size, bps, eta, Phase.DOWNLOADING))
+                            // Сервер не продолжил с места обрыва и прислал файл целиком — часть пишется заново.
+                            val note = if (done < before) "сервер не продолжил с места обрыва — файл скачивается заново" else ""
+                            report(onProgress, Progress(done, if (total > 0) total else size, bps, eta, Phase.DOWNLOADING, note = note))
                         }
                     } finally {
                         ticker.cancel()
                     }
                 }
             } catch (e: CancellationException) {
-                stats.transferMs += now() - start
-                stats.networkBytes += counter.get() - bytesAtStart
+                stats.finishedMs += now() - start
+                stats.attemptStart = -1
                 throw e
             }
-            stats.transferMs += now() - start
-            stats.networkBytes += counter.get() - bytesAtStart
+            stats.finishedMs += now() - start
+            stats.attemptStart = -1
             val after = if (part.exists()) part.length() else 0L
             when (out) {
                 is HttpDownloader.Outcome.Completed -> return Result.Done
@@ -249,14 +260,17 @@ class UpdateTransfer(
 
         fun add(done: Long): Long {
             val t = now()
-            if (done > lastBytes) { lastGrowth = t; lastBytes = done }
+            // Часть начата заново (сервер прислал файл целиком): прежние точки скорости не годятся.
+            if (done < lastBytes) { n = 0; head = 0 }
+            // Любое изменение — данные идут (и при повторной загрузке начала файла).
+            if (done != lastBytes) { lastGrowth = t; lastBytes = done }
             push(t, done)
             // Самая старая точка не дальше WINDOW_MS назад.
             var oldest = (head - n + times.size) % times.size
             var k = n
             while (k > 1 && t - times[oldest] > WINDOW_MS) { oldest = (oldest + 1) % times.size; k-- }
             val dt = t - times[oldest]
-            return if (dt <= 0) 0 else (done - bytes[oldest]) * 1000 / dt
+            return if (dt <= 0) 0 else maxOf(0L, (done - bytes[oldest]) * 1000 / dt)
         }
 
         fun stalledMs(): Long = now() - lastGrowth

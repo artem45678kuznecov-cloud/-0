@@ -85,7 +85,7 @@ fun UpdateSection(state: UpdateState, vm: MainViewModel, actions: NoxActions) {
                 kind = if (state.total > 0) com.nox.offline.ui.components.ProgressKind.DETERMINATE else com.nox.offline.ui.components.ProgressKind.INDETERMINATE)
             VSpace(6)
             Muted(com.nox.offline.updates.UpdateScheduler.downloadLine(state), size = 13.sp)
-            if (state.note.isNotBlank() && state.phase != com.nox.offline.updates.DownloadPhase.DOWNLOADING) {
+            if (state.note.isNotBlank()) {
                 Muted(state.note, size = 12.sp, color = Nox.TextSecondary, maxLines = 2)
             }
             Muted("Можно свернуть NOX: скачивание продолжится, скачанная часть сохраняется. Загрузки видео не останавливаются.",

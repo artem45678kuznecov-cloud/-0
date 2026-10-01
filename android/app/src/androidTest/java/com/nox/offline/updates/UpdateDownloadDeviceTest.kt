@@ -30,7 +30,8 @@ import java.util.Locale
  * дальше стенд убивает процесс и смотрит, продолжится ли передача сама.
  *
  * Только по запросу (`nox.update=1`); адрес, размер, SHA-256 и versionCode
- * файла — аргументами. Отчёт: <external files>/updsrc/report-update.txt.
+ * файла — аргументами; `nox.update.steps=home,screen,net` — какие помехи
+ * устроить. Отчёт: <external files>/updsrc/report-update.txt.
  */
 @RunWith(AndroidJUnit4::class)
 class UpdateDownloadDeviceTest {
@@ -73,9 +74,17 @@ class UpdateDownloadDeviceTest {
             .put("apk", JSONObject().put("name", "nox.apk").put("url", arg("nox.update.url"))
                 .put("size", arg("nox.update.size")!!.toLong()).put("sha256", arg("nox.update.sha")))
             .toString())
-        if (arg("nox.update.fresh") == "1") File(ctx.filesDir, "updates").deleteRecursively()
+        if (arg("nox.update.fresh") == "1") {
+            // NOX сам продолжает сохранённое задание, когда оказывается на экране: сначала
+            // остановить его, потом удалять файлы (иначе передача пишет в удалённую часть).
+            instr.runOnMainSync { app.updates.cancelDownload() }
+            Thread.sleep(2000)
+            File(ctx.filesDir, "updates").deleteRecursively()
+        }
         reportFile.delete()
         val leaveAt = arg(ARG_LEAVE_AT)?.toDoubleOrNull() ?: 0.5
+        // Какие помехи устроить: home — свернуть, screen — погасить экран, net — режим полёта.
+        val steps = (arg("nox.update.steps") ?: "home,screen,net").split(',').map { it.trim() }.toSet()
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         Thread.sleep(3000)
         instr.runOnMainSync { app.updates.download(manifest) }
@@ -101,12 +110,12 @@ class UpdateDownloadDeviceTest {
                 }
                 val f = fraction(s)
                 if (s !is UpdateState.Downloading && s !is UpdateState.Verifying) { say("итог: $d"); break }
-                if (!home && f >= 0.08) {
+                if (!home && "home" in steps && f >= 0.08) {
                     home = true
                     instr.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
                     say("--- нажата «Домой»: NOX свёрнут")
                 }
-                if (home && sleepAt == 0L && f >= 0.2) {
+                if (home && "screen" in steps && sleepAt == 0L && f >= 0.2) {
                     sleepAt = now
                     shell("input keyevent 223")
                     say("--- экран погашен")
@@ -116,7 +125,7 @@ class UpdateDownloadDeviceTest {
                     shell("input keyevent 224")
                     say("--- экран включён (NOX по-прежнему свёрнут)")
                 }
-                if (woke && netOffAt == 0L && f >= 0.35) {
+                if ((woke || "screen" !in steps) && "net" in steps && netOffAt == 0L && f >= 0.35) {
                     netOffAt = now
                     shell("cmd connectivity airplane-mode enable")
                     say("--- сеть пропала (режим полёта)")
@@ -126,7 +135,7 @@ class UpdateDownloadDeviceTest {
                     shell("cmd connectivity airplane-mode disable")
                     say("--- сеть вернулась")
                 }
-                if (netBack && f >= leaveAt) {
+                if ((netBack || "net" !in steps) && f >= leaveAt) {
                     say("--- тест заканчивается на ${(f * 100).toInt()} %: процесс и задание остаются")
                     break
                 }

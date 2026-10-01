@@ -99,6 +99,13 @@ class UpdateRepository(
     @Volatile private var resumeWhenVisible = false
     @Volatile private var lastTransfer: UpdateTransfer? = null
     @Volatile private var userCancelled = false
+    /** job.json меняют носитель, «Отменить» и остановки системой — по одному, от текущего содержимого. */
+    private val jobLock = Any()
+
+    private fun updateJob(change: (UpdateJobStore.Job) -> UpdateJobStore.Job): UpdateJobStore.Job? = synchronized(jobLock) {
+        val cur = jobs.load() ?: return@synchronized null
+        change(cur).also { jobs.save(it) }
+    }
 
     /** При запуске: не новая ли это версия после нашей же установки; что с незаконченным скачиванием. */
     fun onAppStart() {
@@ -222,11 +229,13 @@ class UpdateRepository(
             existing?.let { old -> jobs.part(old.manifest).delete(); jobs.apk(old.manifest).delete() }
             UpdateJobStore.Job(m, System.currentTimeMillis())
         }
-        jobs.save(job)
+        synchronized(jobLock) { jobs.save(job) }
         resumeWhenVisible = false
         val part = jobs.part(m)
+        // Без сети задание ждёт её в системе — так и показываем, а не «соединение…».
         _state.value = if (jobs.apk(m).exists()) UpdateState.Verifying(m)
-        else UpdateState.Downloading(m, part.length(), m.apkSize, phase = DownloadPhase.CONNECTING)
+        else UpdateState.Downloading(m, part.length(), m.apkSize,
+            phase = if (UpdateScheduler.online(context)) DownloadPhase.CONNECTING else DownloadPhase.WAITING_NETWORK)
         if (jobs.apk(m).exists() || !UpdateScheduler.start(context, m)) {
             // Готовый файл только проверить; или носитель не поднялся — передача в процессе NOX.
             inProcess = scope.launch { runJob(carrier = "process") }
@@ -235,8 +244,7 @@ class UpdateRepository(
 
     fun cancelDownload() {
         userCancelled = true
-        val job = jobs.load()
-        if (job != null) jobs.save(job.copy(stoppedByUser = true, events = job.events + "остановлено пользователем"))
+        val job = updateJob { it.copy(stoppedByUser = true, events = it.events + "остановлено пользователем") }
         UpdateScheduler.stop(context)
         inProcess?.cancel()
         val m = job?.manifest ?: (_state.value as? UpdateState.Downloading)?.manifest
@@ -246,9 +254,8 @@ class UpdateRepository(
 
     /** Носитель остановлен системой (или пользователем в диспетчере задач). Часть файла остаётся. */
     fun onCarrierStopped(reason: String, byUser: Boolean) {
-        val job = jobs.load() ?: return
-        jobs.save(job.copy(stoppedByUser = job.stoppedByUser || (byUser && reason == "user"),
-            events = job.events + "носитель остановлен: $reason"))
+        updateJob { it.copy(stoppedByUser = it.stoppedByUser || (byUser && reason == "user"),
+            events = it.events + "носитель остановлен: $reason") } ?: return
         val s = _state.value
         if (s is UpdateState.Downloading && !(byUser && reason == "cancelled-by-app")) {
             _state.value = s.copy(phase = if (reason == "connectivity") DownloadPhase.WAITING_NETWORK else DownloadPhase.PAUSED,
@@ -274,7 +281,6 @@ class UpdateRepository(
             val apk = jobs.apk(m)
             val part = jobs.part(m)
             NoxLog.event("update-job-start", "carrier" to carrier, "version" to m.versionCode, "part" to part.length(), "apk" to apk.exists())
-            var saved = job
             if (!apk.exists()) {
                 val base = job
                 val transfer = UpdateTransfer(client,
@@ -287,13 +293,18 @@ class UpdateRepository(
                     log = { NoxLog.event("update-http", "msg" to it) })
                 lastTransfer = transfer
                 var lastSave = 0L
-                val result = transfer.run(m.apkUrl, part, m.apkSize, refresh = { refresh(m) }) { p ->
-                    publish(UpdateState.Downloading(m, p.received, p.total, p.bytesPerSecond, p.etaSeconds, p.phase.toUi(),
-                        p.retryInSeconds, p.note))
-                    val now = System.currentTimeMillis()
-                    if (now - lastSave > 5_000) { lastSave = now; saved = saveStats(base, transfer, null) }
+                var result: UpdateTransfer.Result? = null
+                try {
+                    result = transfer.run(m.apkUrl, part, m.apkSize, refresh = { refresh(m) }) { p ->
+                        publish(UpdateState.Downloading(m, p.received, p.total, p.bytesPerSecond, p.etaSeconds, p.phase.toUi(),
+                            p.retryInSeconds, p.note))
+                        val now = System.currentTimeMillis()
+                        if (now - lastSave > 5_000) { lastSave = now; saveStats(base, transfer, null) }
+                    }
+                } finally {
+                    // И когда носитель остановила система: счётчики этой попытки не теряются.
+                    saveStats(base, transfer, result)
                 }
-                saved = saveStats(base, transfer, result)
                 when (result) {
                     UpdateTransfer.Result.Done -> if (!part.renameTo(apk)) {
                         publish(UpdateState.Failed("не удалось сохранить скачанный файл", m, true)); return@withLock result
@@ -324,7 +335,7 @@ class UpdateRepository(
             val v = verifier.verify(apk, m, BuildConfig.VERSION_CODE)
             val verifyMs = (System.nanoTime() - t0) / 1_000_000
             NoxLog.event("update-verify", "ok" to v.ok, "ms" to verifyMs, "reason" to v.reason.ifBlank { null })
-            jobs.save(saved.copy(verifyMs = verifyMs))
+            updateJob { it.copy(verifyMs = verifyMs) }
             if (!v.ok) {
                 apk.delete(); part.delete(); jobs.clear()
                 publish(UpdateState.Failed("Проверка APK не пройдена: ${v.reason}", m, false))
@@ -350,16 +361,21 @@ class UpdateRepository(
         UpdateTransfer.Phase.WAITING_NETWORK -> DownloadPhase.WAITING_NETWORK
     }
 
-    /** Задание = счётчики прошлых носителей ([base]) + этой передачи; пишется по ходу и в конце. */
-    private fun saveStats(base: UpdateJobStore.Job, t: UpdateTransfer, result: UpdateTransfer.Result?): UpdateJobStore.Job {
+    /**
+     * Счётчики: сохранённые до этой передачи ([base]) + её собственные. Пишутся в текущий
+     * job.json: события и «остановил пользователь», дописанные тем временем, не затираются.
+     */
+    private fun saveStats(base: UpdateJobStore.Job, t: UpdateTransfer, result: UpdateTransfer.Result?): UpdateJobStore.Job? {
         val st = t.currentStats
-        val ev = if (result == null) base.events else base.events + "итог попыток: ${result.javaClass.simpleName}" +
-            ((result as? UpdateTransfer.Result.Failed)?.let { " — ${it.message}" } ?: "")
-        val updated = base.copy(attempts = base.attempts + st.attempts, networkBytes = base.networkBytes + st.networkBytes,
-            transferMs = base.transferMs + st.transferMs, pauseMs = base.pauseMs + st.pauseMs,
-            lastError = (result as? UpdateTransfer.Result.Failed)?.message ?: base.lastError, events = ev)
-        jobs.save(updated)
-        return updated
+        return updateJob { cur ->
+            val outcome = result?.let { r ->
+                "итог попыток: ${r.javaClass.simpleName}" + ((r as? UpdateTransfer.Result.Failed)?.let { " — ${it.message}" } ?: "")
+            }
+            cur.copy(attempts = base.attempts + st.attempts, networkBytes = base.networkBytes + st.networkBytes,
+                transferMs = base.transferMs + st.transferMs, pauseMs = base.pauseMs + st.pauseMs,
+                lastError = (result as? UpdateTransfer.Result.Failed)?.message ?: cur.lastError,
+                events = if (outcome != null) cur.events + outcome else cur.events)
+        }
     }
 
     /** Ссылка перестала работать: тот ли ещё выпуск опубликован. */
@@ -401,7 +417,7 @@ class UpdateRepository(
             (if (job.verifyMs >= 0) ", проверка ${job.verifyMs} мс" else ""))
         if (job.lastError.isNotBlank()) appendLine("  последняя ошибка: ${job.lastError}")
         job.events.takeLast(8).forEach { appendLine("  событие: $it") }
-        lastTransfer?.currentStats?.requests?.toList()?.takeLast(10)?.forEach { appendLine("  запрос: $it") }
+        lastTransfer?.currentStats?.requestLines()?.takeLast(10)?.forEach { appendLine("  запрос: $it") }
     }
 
     // ------------------------------------------------------------------

@@ -102,7 +102,7 @@ class UpdateTransferTest {
         assertArrayEquals(file, part.readBytes())
         assertEquals(file.size.toLong(), t.currentStats.networkBytes)
         assertEquals(0, t.currentStats.repeatedBytes(file.size.toLong()))
-        val log = t.currentStats.requests.joinToString("\n")
+        val log = t.currentStats.requestLines().joinToString("\n")
         assertTrue(log, log.contains("HTTP 302") && log.contains("HTTP 200"))
         assertFalse("подпись ссылки в журнал не попадает: $log", log.contains("secret"))
     }
@@ -117,7 +117,7 @@ class UpdateTransferTest {
         assertArrayEquals(file, part.readBytes())
         assertEquals(2, t.currentStats.attempts)
         assertEquals(0, t.currentStats.repeatedBytes(file.size.toLong()))
-        assertTrue(t.currentStats.requests.any { it.contains("Range bytes=150000-") })
+        assertTrue(t.currentStats.requestLines().any { it.contains("Range bytes=150000-") })
     }
 
     @Test fun `server refusal keeps the part and continues with a fresh link`() = runBlocking {
@@ -138,10 +138,14 @@ class UpdateTransferTest {
         server.dispatcher = github(file) { i, _ -> when (i) { 0 -> Fault.CutAfter(80_000); 1 -> Fault.IgnoreRange; else -> null } }
         val part = File(tmp.root, "NOX.apk.part")
         val t = transfer()
-        val r = t.run(url(), part, file.size.toLong(), refresh = { error("не нужен") }) { }
+        val seen = ArrayList<UpdateTransfer.Progress>()
+        val r = t.run(url(), part, file.size.toLong(), refresh = { error("не нужен") }) { seen += it }
         assertEquals(UpdateTransfer.Result.Done, r)
         assertArrayEquals(file, part.readBytes())
         assertEquals("повторены первые 80 000 байт", 80_000L, t.currentStats.repeatedBytes(file.size.toLong()))
+        // Экран говорит, что файл качается заново, а не «передача остановилась» на старом числе.
+        assertTrue(seen.any { it.phase == UpdateTransfer.Phase.DOWNLOADING && it.note.contains("заново") && it.received < 80_000 })
+        assertTrue(seen.none { it.bytesPerSecond < 0 })
     }
 
     @Test fun `different size at the source is a different file and is not appended`() = runBlocking {

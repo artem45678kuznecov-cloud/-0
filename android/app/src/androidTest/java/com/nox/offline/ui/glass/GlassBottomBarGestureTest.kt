@@ -52,6 +52,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.nox.offline.settings.GlassMode
+import com.nox.offline.ui.components.SheetController
+import com.nox.offline.ui.components.SheetHost
 import com.nox.offline.ui.theme.GlassConfig
 import com.nox.offline.ui.theme.LocalGlassConfig
 import org.junit.Assert.assertEquals
@@ -288,6 +290,68 @@ class GlassBottomBarGestureTest {
         rule.waitForIdle()
         assertEquals(listOf(1), calls)
         assertEquals(listOf(1), reselects)
+    }
+
+    // ---------- модальные окна над панелью ----------
+
+    /** Как в NoxRoot: панель внизу, слой листов и подтверждений — над ней, в том же окне. */
+    private fun setBarUnder(sheets: SheetController) {
+        rule.setContent {
+            padPx = with(LocalDensity.current) { 6.dp.toPx() }
+            CompositionLocalProvider(LocalGlassConfig provides economy) {
+                Box(Modifier.width(411.dp).height(640.dp)) {
+                    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
+                        GlassBottomBar(items, selected.intValue, { calls += it; selected.intValue = it },
+                            Modifier.testTag("bar").measured(), state, onReselect = { reselects += it })
+                    }
+                    SheetHost(sheets)
+                }
+            }
+        }
+        rule.waitForIdle()
+    }
+
+    @Test fun tapsOnTheBarUnderAnOpenSheetDoNotReachTabs() {
+        val sheets = SheetController()
+        setBarUnder(sheets)
+        rule.runOnIdle { sheets.show("Лист") { Text("Содержимое листа") } }
+        rule.waitForIdle()
+        bar.performTouchInput {
+            click(Offset(centerX(2), centerY)); advanceEventTime(120); click(Offset(centerX(2), centerY))
+            advanceEventTime(120)
+            click(Offset(centerX(0), centerY)); advanceEventTime(120); click(Offset(centerX(0), centerY))
+        }
+        rule.waitForIdle()
+        assertTrue("касания под листом не дошли до вкладок", calls.isEmpty())
+        assertTrue(reselects.isEmpty())
+        assertTrue("нажатие по листу его не закрывает", sheets.isOpen)
+    }
+
+    @Test fun tapOnTheBarUnderAConfirmationOnlyClosesIt() {
+        val sheets = SheetController()
+        setBarUnder(sheets)
+        rule.runOnIdle { sheets.confirm("Удалить?", "Проверка", "Удалить") { } }
+        rule.waitForIdle()
+        rule.mainClock.autoAdvance = false
+        // Первое нажатие приходится на затемнение над панелью: оно закрывает подтверждение и только.
+        bar.performTouchInput { click(Offset(centerX(0), centerY)) }
+        repeat(14) { rule.mainClock.advanceTimeByFrame() }
+        assertFalse(sheets.isOpen)
+        // Второе — уже по панели и в пределах времени двойного нажатия от первого.
+        bar.performTouchInput { click(Offset(centerX(0), centerY)) }
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+        assertTrue("нажатие по затемнению не стало первым нажатием двойного", reselects.isEmpty())
+        assertTrue(calls.isEmpty())
+        // Контроль: то же расписание без окна — двойное нажатие.
+        rule.mainClock.autoAdvance = false
+        rule.mainClock.advanceTimeBy(1_000)
+        bar.performTouchInput { click(Offset(centerX(0), centerY)) }
+        repeat(14) { rule.mainClock.advanceTimeByFrame() }
+        bar.performTouchInput { click(Offset(centerX(0), centerY)) }
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+        assertEquals(listOf(0), reselects)
     }
 
     @Test fun slowDragThroughAllTabsSelectsOnceOnRelease() {

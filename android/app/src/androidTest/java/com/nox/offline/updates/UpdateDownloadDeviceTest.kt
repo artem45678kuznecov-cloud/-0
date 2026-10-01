@@ -30,8 +30,8 @@ import java.util.Locale
  * дальше стенд убивает процесс и смотрит, продолжится ли передача сама.
  *
  * Только по запросу (`nox.update=1`); адрес, размер, SHA-256 и versionCode
- * файла — аргументами; `nox.update.steps=home,screen,net` — какие помехи
- * устроить. Отчёт: <external files>/updsrc/report-update.txt.
+ * файла — аргументами; `nox.update.steps=home,screen,net,cancel` — какие
+ * помехи устроить. Отчёт: <external files>/updsrc/report-update.txt.
  */
 @RunWith(AndroidJUnit4::class)
 class UpdateDownloadDeviceTest {
@@ -83,7 +83,8 @@ class UpdateDownloadDeviceTest {
         }
         reportFile.delete()
         val leaveAt = arg(ARG_LEAVE_AT)?.toDoubleOrNull() ?: 0.5
-        // Какие помехи устроить: home — свернуть, screen — погасить экран, net — режим полёта.
+        // Какие помехи устроить: home — свернуть, screen — погасить экран, net — режим полёта,
+        // cancel — «Отменить» и снова «Обновить» (только по имени).
         val steps = (arg("nox.update.steps") ?: "home,screen,net").split(',').map { it.trim() }.toSet()
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         Thread.sleep(3000)
@@ -97,6 +98,7 @@ class UpdateDownloadDeviceTest {
         var woke = false
         var netOffAt = 0L
         var netBack = false
+        var cancelled = false
         try {
             while (true) {
                 val s = app.updates.state.value
@@ -110,6 +112,17 @@ class UpdateDownloadDeviceTest {
                 }
                 val f = fraction(s)
                 if (s !is UpdateState.Downloading && s !is UpdateState.Verifying) { say("итог: $d"); break }
+                if (!cancelled && "cancel" in steps && f >= 0.15) {
+                    // «Отменить», потом снова «Обновить»: часть остаётся, продолжение — с неё.
+                    cancelled = true
+                    instr.runOnMainSync { app.updates.cancelDownload() }
+                    Thread.sleep(3000)
+                    val part = File(File(ctx.filesDir, "updates"), "NOX-${manifest.versionCode}.apk.part").length()
+                    say("--- «Отменить»: состояние ${app.updates.state.value.javaClass.simpleName}, часть на диске $part байт")
+                    Thread.sleep(5000)
+                    instr.runOnMainSync { app.updates.download(manifest) }
+                    say("--- снова «Обновить»")
+                }
                 if (!home && "home" in steps && f >= 0.08) {
                     home = true
                     instr.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)

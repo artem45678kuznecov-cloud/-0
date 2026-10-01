@@ -78,6 +78,8 @@ class UpdateRepository(
         const val RELEASES_PAGE = "https://github.com/$REPO/releases"
         private const val HOLD_TIMEOUT_MS = 10L * 60 * 1000
         private const val READY_NOTIFICATION = 44
+        /** Запас сверх недостающей части: установщик и база NOX тоже пишут на этот раздел. */
+        private const val FREE_SPACE_MARGIN = 32L * 1024 * 1024
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -221,7 +223,11 @@ class UpdateRepository(
 
     /** «Обновить» (и «Повторить», «Установить»): одно задание на этот выпуск и его носитель. */
     fun download(m: UpdateManifest) {
-        if (running) return
+        if (running) {
+            // «Отменить» и сразу «Обновить»: прежняя передача ещё закрывается — начать, как только освободится.
+            if (userCancelled) scope.launch { runLock.withLock { }; download(m) }
+            return
+        }
         val existing = jobs.load()
         val job = if (existing != null && existing.manifest.sameRelease(m)) {
             existing.copy(manifest = m, stoppedByUser = false, lastError = "")
@@ -282,6 +288,17 @@ class UpdateRepository(
             val part = jobs.part(m)
             NoxLog.event("update-job-start", "carrier" to carrier, "version" to m.versionCode, "part" to part.length(), "apk" to apk.exists())
             if (!apk.exists()) {
+                // Места не хватит — сказать сразу, а не тратить попытки на «обрыв» при записи.
+                val need = m.apkSize - (if (part.exists()) part.length() else 0L)
+                val free = dir.usableSpace
+                if (free in 0 until need + FREE_SPACE_MARGIN) {
+                    val msg = "недостаточно места: нужно ещё ${com.nox.offline.core.Format.bytes(need)}, " +
+                        "свободно ${com.nox.offline.core.Format.bytes(free)}"
+                    NoxLog.event("update-no-space", "need" to need, "free" to free)
+                    updateJob { it.copy(lastError = msg, events = it.events + msg) }
+                    publish(UpdateState.Failed("Скачивание не удалось: $msg. Скачанная часть сохранена.", m, true))
+                    return@withLock UpdateTransfer.Result.Failed(msg, true)
+                }
                 val base = job
                 val transfer = UpdateTransfer(client,
                     awaitNetwork = {
@@ -492,9 +509,14 @@ class UpdateRepository(
             is UpdateState.NeedsPermission -> current.manifest
             else -> null
         }
-        // Отказ от установки: проверенный файл остаётся, второй раз он не скачивается.
+        // Отказ от установки: проверенный файл остаётся, второй раз он не скачивается —
+        // так и показываем («скачана и проверена · Установить»), а не «Доступна · Обновить».
         _state.value = if (error == null) {
-            if (m != null) UpdateState.Available(m) else UpdateState.Idle
+            when {
+                m == null -> UpdateState.Idle
+                jobs.apk(m).exists() -> UpdateState.ReadyToInstall(m)
+                else -> UpdateState.Available(m)
+            }
         } else UpdateState.Failed("Установка не выполнена: $error", m, true)
         NoxLog.event("update-install-finished", "success" to false, "error" to error?.take(80))
     }

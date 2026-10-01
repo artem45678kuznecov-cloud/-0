@@ -29,13 +29,13 @@ class Mp4Inspector(private val r: CachedReader, private val ctl: CheckControl) {
         val height: Int,
         val timescale: Long,
         val duration: Long,
-        val sampleSizes: IntArray,
-        val chunkOffsets: LongArray,
+        val sampleSizes: IntColumn,
+        val chunkOffsets: LongColumn,
         val co64: Boolean,
         /** stsc: тройки first_chunk (с 1), samples_per_chunk, sample_description_index. */
-        val stsc: IntArray,
-        val sttsCounts: IntArray,
-        val sttsDeltas: IntArray,
+        val stsc: IntColumn,
+        val sttsCounts: IntColumn,
+        val sttsDeltas: IntColumn,
         /** Длина поля размера NAL (1, 2 или 4) для H.264/H.265, иначе 0. */
         val nalLength: Int,
         /** Смещение бокса stco/co64 внутри moov (от начала moov). */
@@ -88,6 +88,16 @@ class Mp4Inspector(private val r: CachedReader, private val ctl: CheckControl) {
         }
         if (moov.size > MAX_MOOV) {
             return result(FileCheck.Verdict.UNKNOWN, "Индекс moov слишком велик для проверки (${moov.size / (1024 * 1024)} МБ).", limits = limits)
+        }
+        // Индекс читается в память целиком. Проверка не должна сама уронить NOX нехваткой
+        // памяти (её часто запускают как раз после такой ошибки): нужна половина свободного.
+        val rt = Runtime.getRuntime()
+        val free = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())
+        if (moov.size > free / 2) {
+            return result(FileCheck.Verdict.UNKNOWN,
+                "Индекс кадров (moov) — ${moov.size / (1024 * 1024)} МБ, а свободной памяти у NOX сейчас ${free / (1024 * 1024)} МБ: " +
+                    "покадровая проверка пропущена, чтобы не помешать приложению.",
+                limits = limits + "покадровая проверка индекса — не хватило свободной памяти")
         }
         val index = try {
             parseIndex(top, moov)
@@ -253,25 +263,27 @@ class Mp4Inspector(private val r: CachedReader, private val ctl: CheckControl) {
             }
         }
 
-        val sizes: IntArray = m.child(stbl, "stsz")?.let { b ->
+        // Таблицы читаются прямо из байтов moov: копия каждой таблицы в отдельный массив
+        // удваивала бы память (у 15-часового фильма — десятки мегабайт сверху).
+        val sizes: IntColumn = m.child(stbl, "stsz")?.let { b ->
             val constant = m.u32(b.dataStart + 4)
             val count = m.u32(b.dataStart + 8).toInt()
-            if (constant > 0) IntArray(count) { constant.toInt() } else {
+            if (constant > 0) IntColumn.Constant(constant.toInt(), count) else {
                 need(m, b.dataStart + 12 + 4L * count <= b.end, "таблица размеров кадров (stsz) короче заявленного")
-                IntArray(count) { m.u32(b.dataStart + 12 + 4 * it).toInt() }
+                IntColumn.U32(m.b, b.dataStart + 12, 4, count)
             }
         } ?: m.child(stbl, "stz2")?.let { b ->
             val field = m.u8(b.dataStart + 7)
             val count = m.u32(b.dataStart + 8).toInt()
             val base = b.dataStart + 12
-            IntArray(count) { i ->
+            IntColumn.Unpacked(IntArray(count) { i ->
                 when (field) {
                     4 -> (m.u8(base + i / 2) shr (if (i % 2 == 0) 4 else 0)) and 0xF
                     8 -> m.u8(base + i)
                     16 -> m.u16(base + 2 * i)
                     else -> throw Mp4Broken("stz2 с полем $field бит")
                 }
-            }
+            })
         } ?: throw Mp4Broken("нет таблицы размеров кадров (stsz)")
 
         val stco = m.child(stbl, "stco")
@@ -280,21 +292,19 @@ class Mp4Inspector(private val r: CachedReader, private val ctl: CheckControl) {
         val chunkCount = m.u32(chunkBox.dataStart + 4).toInt()
         val width8 = if (co64 != null) 8 else 4
         need(m, chunkBox.dataStart + 8 + width8.toLong() * chunkCount <= chunkBox.end, "таблица смещений короче заявленного")
-        val offsets = LongArray(chunkCount) { i ->
-            if (co64 != null) m.u64(chunkBox.dataStart + 8 + 8 * i) else m.u32(chunkBox.dataStart + 8 + 4 * i)
-        }
+        val offsets = LongColumn(m.b, chunkBox.dataStart + 8, chunkCount, co64 != null)
 
         val stscBox = m.child(stbl, "stsc") ?: throw Mp4Broken("нет таблицы кадров в чанках (stsc)")
         val stscCount = m.u32(stscBox.dataStart + 4).toInt()
         need(m, stscBox.dataStart + 8 + 12L * stscCount <= stscBox.end, "таблица stsc короче заявленного")
-        val stsc = IntArray(stscCount * 3) { m.u32(stscBox.dataStart + 8 + 4 * it).toInt() }
+        val stsc = IntColumn.U32(m.b, stscBox.dataStart + 8, 4, stscCount * 3)
         need(m, stscCount == 0 || stsc[0] == 1, "stsc начинается не с первого чанка")
 
         val sttsBox = m.child(stbl, "stts")
         val sttsCount = sttsBox?.let { m.u32(it.dataStart + 4).toInt() } ?: 0
         if (sttsBox != null) need(m, sttsBox.dataStart + 8 + 8L * sttsCount <= sttsBox.end, "таблица времени (stts) короче заявленного")
-        val counts = IntArray(sttsCount) { m.u32(sttsBox!!.dataStart + 8 + 8 * it).toInt() }
-        val deltas = IntArray(sttsCount) { m.u32(sttsBox!!.dataStart + 12 + 8 * it).toInt() }
+        val counts = if (sttsBox == null) IntColumn.EMPTY else IntColumn.U32(m.b, sttsBox.dataStart + 8, 8, sttsCount)
+        val deltas = if (sttsBox == null) IntColumn.EMPTY else IntColumn.U32(m.b, sttsBox.dataStart + 12, 8, sttsCount)
 
         return Track(number, handler, codec, width, height, timescale, duration, sizes, offsets, co64 != null, stsc,
             counts, deltas, nal, chunkBox.pos)
@@ -496,6 +506,55 @@ class Mp4Inspector(private val r: CachedReader, private val ctl: CheckControl) {
                 sttsLeft = t.sttsCounts[sttsIdx]
             }
         }
+    }
+}
+
+/** Столбец таблицы moov (размеры кадров, stsc, stts) без копии в отдельный массив. */
+sealed class IntColumn {
+    abstract val size: Int
+    abstract operator fun get(i: Int): Int
+    fun isEmpty() = size == 0
+    fun isNotEmpty() = size > 0
+
+    /** 32-битные значения в moov: [count] штук с шагом [stride] байт от [start]. */
+    class U32(private val b: ByteArray, private val start: Int, private val stride: Int, private val count: Int) : IntColumn() {
+        override val size get() = count
+        override fun get(i: Int): Int {
+            if (i < 0 || i >= count) throw IndexOutOfBoundsException("столбец: $i из $count")
+            val p = start + stride * i
+            return (b[p].toInt() and 0xFF shl 24) or (b[p + 1].toInt() and 0xFF shl 16) or
+                (b[p + 2].toInt() and 0xFF shl 8) or (b[p + 3].toInt() and 0xFF)
+        }
+    }
+
+    /** Все кадры одного размера (stsz с общим размером). */
+    class Constant(private val value: Int, private val count: Int) : IntColumn() {
+        override val size get() = count
+        override fun get(i: Int): Int {
+            if (i < 0 || i >= count) throw IndexOutOfBoundsException("столбец: $i из $count")
+            return value
+        }
+    }
+
+    /** Значения, которые пришлось распаковать (stz2). */
+    class Unpacked(private val a: IntArray) : IntColumn() {
+        override val size get() = a.size
+        override fun get(i: Int) = a[i]
+    }
+
+    companion object {
+        val EMPTY: IntColumn = Unpacked(IntArray(0))
+    }
+}
+
+/** Смещения чанков (stco или co64) прямо в байтах moov. */
+class LongColumn(private val b: ByteArray, private val start: Int, val size: Int, private val wide: Boolean) {
+    operator fun get(i: Int): Long {
+        if (i < 0 || i >= size) throw IndexOutOfBoundsException("смещения чанков: $i из $size")
+        var p = start + (if (wide) 8 else 4) * i
+        var v = 0L
+        repeat(if (wide) 8 else 4) { v = (v shl 8) or (b[p++].toLong() and 0xFF) }
+        return v
     }
 }
 

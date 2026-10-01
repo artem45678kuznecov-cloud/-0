@@ -40,7 +40,8 @@ class UpdateTransferTest {
     private val client = OkHttpClient.Builder().readTimeout(5, TimeUnit.SECONDS).build()
 
     @Before fun start() { server = MockWebServer() }
-    @After fun stop() { server.shutdown() }
+    // Сервер, «замолчавший» посреди ответа, дольше 5 с не закрывается — это не ошибка передачи.
+    @After fun stop() { runCatching { server.shutdown() } }
 
     private fun data(size: Int) = ByteArray(size).also { Random(7).nextBytes(it) }
 
@@ -188,6 +189,47 @@ class UpdateTransferTest {
         runCatching { job.await() }
         assertTrue(part.length() >= 300_000)
         assertTrue(part.length() < file.size)
+    }
+
+    /** Сервер отдаёт начало и замолкает на [silenceSec] с, не закрывая соединение. */
+    private fun silentAfter(file: ByteArray, first: Int, silenceSec: Long): Dispatcher = object : Dispatcher() {
+        override fun dispatch(request: RecordedRequest): MockResponse {
+            if (request.path?.startsWith("/download/") == true) return MockResponse().setResponseCode(302).setHeader("Location", "/blob")
+            return MockResponse().setBody(Buffer().write(file)).throttleBody(first.toLong(), silenceSec, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test fun `silent server is shown as a stall, not as the last speed`() = runBlocking {
+        val file = data(150_000)
+        server.dispatcher = silentAfter(file, 100_000, 10)
+        val part = File(tmp.root, "p")
+        val seen = java.util.Collections.synchronizedList(ArrayList<UpdateTransfer.Progress>())
+        val r = UpdateTransfer(OkHttpClient.Builder().readTimeout(30, TimeUnit.SECONDS).build())
+            .run(url(), part, file.size.toLong(), refresh = { error("") }) { seen += it }
+        assertEquals(UpdateTransfer.Result.Done, r)
+        val stalled = seen.filter { it.phase == UpdateTransfer.Phase.STALLED }
+        assertTrue("остановка показана: ${seen.map { it.phase }.distinct()}", stalled.isNotEmpty())
+        assertTrue("во время остановки скорость не показывается", stalled.all { it.bytesPerSecond == 0L && it.etaSeconds < 0 })
+        assertEquals("остановка — на уже принятых байтах", 100_000L, stalled.first().received)
+        assertEquals(UpdateTransfer.Phase.DOWNLOADING, seen.last().phase)
+    }
+
+    @Test fun `cancel during a silent socket ends at once, not after the read timeout`() = runBlocking {
+        val file = data(150_000)
+        server.dispatcher = silentAfter(file, 100_000, 30)
+        val part = File(tmp.root, "p")
+        val job = async(kotlinx.coroutines.Dispatchers.IO) {
+            UpdateTransfer(OkHttpClient.Builder().readTimeout(60, TimeUnit.SECONDS).build())
+                .run(url(), part, file.size.toLong(), refresh = { error("") }) { }
+        }
+        withTimeout(10_000) { while (part.length() < 100_000) delay(50) }
+        delay(500)
+        val t0 = System.nanoTime()
+        job.cancel()
+        runCatching { job.await() }
+        val ms = (System.nanoTime() - t0) / 1_000_000
+        assertTrue("отмена заняла $ms мс", ms < 3_000)
+        assertEquals(100_000L, part.length())
     }
 
     /**

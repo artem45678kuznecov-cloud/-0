@@ -308,6 +308,9 @@ class UpdateRepository(
                     }
                     UpdateTransfer.Result.NoNetwork -> {
                         publish(UpdateState.Downloading(m, part.length(), m.apkSize, phase = DownloadPhase.WAITING_NETWORK))
+                        // Задание UIDT вернёт сама система; служба (Android 13 и ниже) ждала сеть полчаса и
+                        // закончилась — продолжим, когда NOX снова окажется на экране.
+                        if (carrier != "uidt") resumeWhenVisible = true
                         return@withLock result
                     }
                     is UpdateTransfer.Result.Failed -> {

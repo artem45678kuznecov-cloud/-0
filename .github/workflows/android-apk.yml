@@ -9,7 +9,7 @@ name: android-apk
 
 on:
   push:
-    branches: [android-stage-02-complete, android-0.2.1-liquid-bottom-bar, android-youtube-dynamic-quality, android-0.4-redesign-library, android-playback-container-fix]
+    branches: [android-stage-02-complete, android-0.2.1-liquid-bottom-bar, android-youtube-dynamic-quality, android-0.4-redesign-library, android-playback-container-fix, android-playback-navigation-updater-fix]
     paths:
       - "android/**"
       - ".github/workflows/android-apk.yml"

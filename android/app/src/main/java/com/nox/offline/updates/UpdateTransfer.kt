@@ -2,9 +2,12 @@ package com.nox.offline.updates
 
 import com.nox.offline.downloader.HttpDownloader
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import okhttp3.Call
 import okhttp3.EventListener
 import okhttp3.MediaType
@@ -98,6 +101,12 @@ class UpdateTransfer(
     private val counter = AtomicLong()
     private val stats = Stats()
     val currentStats: Stats get() = stats
+    /** Запрос, который сейчас идёт: его обрывают при отмене. */
+    @Volatile private var activeCall: Call? = null
+    private val progressLock = Any()
+
+    /** Прогресс приходит из потока передачи и от таймера остановки — вызывающий получает его по одному. */
+    private fun report(onProgress: (Progress) -> Unit, p: Progress) = synchronized(progressLock) { onProgress(p) }
 
     /** Клиент обновлений: считает байты тела и времена каждого запроса; клиент видеозагрузок не трогается. */
     private val client: OkHttpClient = baseClient.newBuilder()
@@ -129,21 +138,41 @@ class UpdateTransfer(
             val before = if (part.exists()) part.length() else 0L
             if (before >= size && size > 0) {
                 // Готовая часть: проверит SHA-256 и подпись вызывающий.
-                onProgress(Progress(before, size, 0, 0, Phase.DOWNLOADING))
+                report(onProgress, Progress(before, size, 0, 0, Phase.DOWNLOADING))
                 return Result.Done
             }
             speed.restart(before)
-            onProgress(Progress(before, size, 0, -1, Phase.CONNECTING))
+            report(onProgress, Progress(before, size, 0, -1, Phase.CONNECTING))
             val start = now()
             val bytesAtStart = counter.get()
             val out = try {
-                http.download(current, mapOf("Accept" to "application/vnd.android.package-archive"), part, expectedTotal = size) { done, total ->
-                    val bps = speed.add(done)
-                    val stalled = speed.stalledMs() >= STALL_MS
-                    val eta = if (bps > 0 && total > 0) (total - done) / bps else -1
-                    onProgress(Progress(done, if (total > 0) total else size, bps, eta,
-                        if (stalled) Phase.STALLED else Phase.DOWNLOADING,
-                        note = if (stalled) "данные не приходят ${speed.stalledMs() / 1000} с" else ""))
+                coroutineScope {
+                    // Пока данные не идут, чтение сокета стоит до таймаута: экран узнаёт об остановке
+                    // отсюда, а не видит последнюю скорость. Отмена обрывает и заблокированное чтение.
+                    // Свой поток: передача блокирует поток, в котором её вызвали.
+                    val ticker = launch(Dispatchers.IO) {
+                        try {
+                            while (true) {
+                                delay(1000)
+                                val idle = speed.stalledMs()
+                                if (idle >= STALL_MS) {
+                                    report(onProgress, Progress(maxOf(speed.lastBytes, part.length()), size, 0, -1, Phase.STALLED,
+                                        note = "данные не приходят ${idle / 1000} с"))
+                                }
+                            }
+                        } finally {
+                            activeCall?.cancel()
+                        }
+                    }
+                    try {
+                        http.download(current, mapOf("Accept" to "application/vnd.android.package-archive"), part, expectedTotal = size) { done, total ->
+                            val bps = speed.add(done)
+                            val eta = if (bps > 0 && total > 0) (total - done) / bps else -1
+                            report(onProgress, Progress(done, if (total > 0) total else size, bps, eta, Phase.DOWNLOADING))
+                        }
+                    } finally {
+                        ticker.cancel()
+                    }
                 }
             } catch (e: CancellationException) {
                 stats.transferMs += now() - start
@@ -185,7 +214,7 @@ class UpdateTransfer(
             backoff = minOf(backoff * 2, MAX_BACKOFF_MS)
             var left = wait
             while (left > 0) {
-                onProgress(Progress(after, size, 0, -1, Phase.RETRY_WAIT, retryInSeconds = ((left + 999) / 1000).toInt(),
+                report(onProgress, Progress(after, size, 0, -1, Phase.RETRY_WAIT, retryInSeconds = ((left + 999) / 1000).toInt(),
                     note = (out as? HttpDownloader.Outcome.Failed)?.message.orEmpty()))
                 val step = minOf(left, 1000L)
                 sleep(step)
@@ -201,8 +230,9 @@ class UpdateTransfer(
         private val bytes = LongArray(64)
         private var n = 0
         private var head = 0
-        private var lastGrowth = 0L
-        private var lastBytes = 0L
+        @Volatile private var lastGrowth = 0L
+        @Volatile var lastBytes = 0L
+            private set
 
         fun restart(at: Long) {
             n = 0; head = 0
@@ -258,7 +288,7 @@ class UpdateTransfer(
         private var code = 0
         private var bytes = 0L
 
-        override fun callStart(call: Call) { start = now() }
+        override fun callStart(call: Call) { start = now(); activeCall = call }
         override fun dnsStart(call: Call, domainName: String) { mark = now() }
         override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<java.net.InetAddress>) { dns = now() - mark }
         override fun connectStart(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy) { mark = now() }

@@ -12,6 +12,8 @@ import com.nox.offline.core.NoxLog
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.nox.offline.data.db.ChapterEntity
+import com.nox.offline.data.db.ChapterKind
 import com.nox.offline.data.db.MediaEntity
 import com.nox.offline.data.db.PlaybackEntity
 import com.nox.offline.media.CheckControl
@@ -39,7 +41,10 @@ import java.util.Locale
  * `nox.ballastMb=N` — до открытия занять N МиБ Java-кучи (как прочие данные
  * процесса на телефоне пользователя: в его отчёте в момент отказа было занято
  * 251 из 256 МиБ). Так сравниваются старый и новый разбор при одинаковой
- * нагрузке.
+ * нагрузке. `nox.cases=file,uri,repeat,check` — какие этапы прогнать (по
+ * умолчанию эти четыре; `features` — серия внутри файла и «Только звук» —
+ * только по имени). Отчёт дописывается построчно: прерванный прогон не
+ * теряет уже измеренное.
  */
 @RunWith(AndroidJUnit4::class)
 class LongVideoMemoryDeviceTest {
@@ -49,11 +54,15 @@ class LongVideoMemoryDeviceTest {
     private fun arg(k: String): String? = InstrumentationRegistry.getArguments().getString(k)
     private val report = StringBuilder()
     private val ballast = ArrayList<ByteArray>()
+    private val reportFile by lazy { File(File(ctx.getExternalFilesDir(null), "longsrc").apply { mkdirs() }, "report-memory.txt") }
 
     private fun say(s: String) {
         Log.i(TAG, s)
         report.append(s).append('\n')
+        runCatching { reportFile.appendText(s + "\n") }
     }
+
+    private fun wanted(case: String) = arg("nox.cases")?.split(',')?.map { it.trim() }?.contains(case) ?: (case != "features")
 
     private fun mib(b: Long) = String.format(Locale.US, "%.1f", b / 1_048_576.0)
 
@@ -177,7 +186,7 @@ class LongVideoMemoryDeviceTest {
         assumeTrue("длинное видео — только по запросу (nox.long=1)", arg("nox.long") == "1")
         val file = File(ctx.getExternalFilesDir(null), "NOX/Media/long15h.mp4")
         assumeTrue("нет файла стенда ${file.absolutePath}", file.exists())
-        val out = File(ctx.getExternalFilesDir(null), "longsrc").apply { mkdirs() }
+        reportFile.delete()
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val failures = ArrayList<String>()
         val ids = ArrayList<Long>()
@@ -200,36 +209,67 @@ class LongVideoMemoryDeviceTest {
             say("исходно (NOX на экране, видео не открыто${if (ballastMb > 0) ", занято ещё $ballastMb МиБ балласта" else ""}): " +
                 "Java ${mib(base.java)} МиБ, native ${mib(base.native)} МиБ")
 
-            failures += runCase("файл", db.media().get(byFile)!!, base)
-            failures += runCase("content://", db.media().get(byUri)!!, base)
+            if (wanted("file")) failures += runCase("файл", db.media().get(byFile)!!, base)
+            if (wanted("uri")) failures += runCase("content://", db.media().get(byUri)!!, base)
 
-            say("--- повторные открытия (файл), 3 раза")
-            repeat(3) { i ->
-                instr.runOnMainSync { app.playback.open(byFile) }
-                if (!waitReady("повтор ${i + 1}", base)) failures += "повтор ${i + 1}"
-                instr.runOnMainSync { app.playback.close() }
-                val c = now(gc = true)
-                say("  после закрытия ${i + 1}: Java +${mib(c.java - base.java)} МиБ")
+            if (wanted("repeat")) {
+                say("--- повторные открытия (файл), 3 раза")
+                repeat(3) { i ->
+                    instr.runOnMainSync { app.playback.open(byFile) }
+                    if (!waitReady("повтор ${i + 1}", base)) failures += "повтор ${i + 1}"
+                    instr.runOnMainSync { app.playback.close() }
+                    val c = now(gc = true)
+                    say("  после закрытия ${i + 1}: Java +${mib(c.java - base.java)} МиБ")
+                }
             }
 
-            say("--- «Проверить файл», затем воспроизведение")
-            val peaks = Peaks().apply { start() }
-            val t0 = System.currentTimeMillis()
-            val check = runCatching { FileChecks.check(app, db.media().get(byFile)!!, CheckControl.NONE) }
-            peaks.interrupt(); peaks.join()
-            val afterCheck = now(gc = true)
-            say("проверка: ${check.getOrNull()?.verdict ?: "СБОЙ ${check.exceptionOrNull()}"} за ${System.currentTimeMillis() - t0} мс; " +
-                "пик Java +${mib(peaks.java - base.java)} МиБ; удержано после GC +${mib(afterCheck.java - base.java)} МиБ")
-            if (check.isFailure) failures += "проверка файла"
-            instr.runOnMainSync { app.playback.open(byFile) }
-            if (!waitReady("после проверки: открытие", base)) failures += "открытие после проверки"
-            instr.runOnMainSync { app.playback.close() }
+            if (wanted("features")) {
+                // Виртуальная серия (часть 4 сборника: 7:30:00–10:00:00) — вырезка того же файла,
+                // перемотка к её началу идёт через индекс; затем «Только звук» и обратно.
+                say("--- серия внутри файла и «Только звук»")
+                val part = db.chapters().insert(ChapterEntity(mediaId = byFile, title = "Часть 4", startMs = 27_000_000,
+                    endMs = 36_000_000, kind = ChapterKind.EPISODE, createdAt = System.currentTimeMillis()))
+                instr.runOnMainSync { app.playback.open(byFile, chapterId = part) }
+                if (!waitReady("серия «Часть 4» (с 7:30:00)", base)) failures += "серия"
+                else {
+                    val abs = snap().positionMs
+                    val moved = play(8)
+                    say("серия: позиция ${abs / 1000} с от начала серии; за 8 с ушла на $moved мс")
+                    if (moved < 1000) failures += "серия: воспроизведение не идёт"
+                    instr.runOnMainSync { app.playback.setListen(true) }
+                    Thread.sleep(3000)
+                    var video: String? = "?"
+                    instr.runOnMainSync { video = app.playback.player().videoFormat?.sampleMimeType }
+                    val heard = play(8)
+                    say("«Только звук»: видеодорожка ${if (video == null) "выключена" else "осталась ($video)"}; за 8 с позиция ушла на $heard мс")
+                    if (video != null || heard < 1000) failures += "только звук"
+                    instr.runOnMainSync { app.playback.setListen(false) }
+                }
+                instr.runOnMainSync { app.playback.close() }
+                db.chapters().delete(part)
+                val c = now(gc = true)
+                say("после серии и «Только звук»: Java +${mib(c.java - base.java)} МиБ")
+            }
+
+            if (wanted("check")) {
+                say("--- «Проверить файл», затем воспроизведение")
+                val peaks = Peaks().apply { start() }
+                val t0 = System.currentTimeMillis()
+                val check = runCatching { FileChecks.check(app, db.media().get(byFile)!!, CheckControl.NONE) }
+                peaks.interrupt(); peaks.join()
+                val afterCheck = now(gc = true)
+                say("проверка: ${check.getOrNull()?.verdict ?: "СБОЙ ${check.exceptionOrNull()}"} за ${System.currentTimeMillis() - t0} мс; " +
+                    "пик Java +${mib(peaks.java - base.java)} МиБ; удержано после GC +${mib(afterCheck.java - base.java)} МиБ")
+                if (check.isFailure) failures += "проверка файла"
+                instr.runOnMainSync { app.playback.open(byFile) }
+                if (!waitReady("после проверки: открытие", base)) failures += "открытие после проверки"
+                instr.runOnMainSync { app.playback.close() }
+            }
 
             val pb = db.playback().get(byFile)
             say("позиция в базе после всех закрытий: ${pb?.positionMs} мс (была 270 000), просмотрено: ${pb?.completed}")
         } finally {
             ballast.clear()
-            File(out, "report-memory.txt").writeText(report.toString())
             instr.runOnMainSync { app.playback.close() }
             for (id in ids) { app.db.playback().delete(id); app.db.media().get(id)?.let { app.db.media().delete(it) } }
             scenario.close()

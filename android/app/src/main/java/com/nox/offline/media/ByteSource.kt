@@ -21,17 +21,28 @@ interface ByteSource : Closeable {
     fun read(pos: Long, buf: ByteArray, off: Int = 0, len: Int = buf.size): Int
 }
 
-/** Через FileChannel: и для обычного файла, и для дескриптора документа SAF. */
-class ChannelByteSource private constructor(private val stream: FileInputStream) : ByteSource {
+/**
+ * Через FileChannel: и для обычного файла, и для дескриптора документа SAF.
+ *
+ * Чтение только позиционное (pread): общая позиция дескриптора не читается и
+ * не меняется, поэтому источник не мешает другим читателям того же документа.
+ * [base] и [size] — границы файла внутри дескриптора (AssetFileDescriptor
+ * может начинаться не с нуля).
+ */
+class ChannelByteSource private constructor(
+    private val stream: FileInputStream,
+    private val base: Long = 0,
+    size: Long = -1,
+) : ByteSource {
     private val channel: FileChannel = stream.channel
-    override val size: Long = channel.size()
+    override val size: Long = if (size >= 0) size else channel.size() - base
 
     override fun read(pos: Long, buf: ByteArray, off: Int, len: Int): Int {
-        if (pos >= size || len <= 0) return 0
-        val bb = ByteBuffer.wrap(buf, off, len)
+        if (pos < 0 || pos >= size || len <= 0) return 0
+        val bb = ByteBuffer.wrap(buf, off, minOf(len.toLong(), size - pos).toInt())
         var done = 0
         while (bb.hasRemaining()) {
-            val n = channel.read(bb, pos + done)
+            val n = channel.read(bb, base + pos + done)
             if (n < 0) break
             if (n == 0 && pos + done >= size) break
             done += n
@@ -45,17 +56,25 @@ class ChannelByteSource private constructor(private val stream: FileInputStream)
         fun of(file: File): ChannelByteSource = ChannelByteSource(FileInputStream(file))
 
         /**
-         * Дескриптор документа (openFileDescriptor(uri, "r")). Если провайдер отдал
-         * канал без произвольного доступа — честная ошибка, а не чтение подряд.
+         * Дескриптор документа (openFileDescriptor / openAssetFileDescriptor).
+         * [offset] и [length] — границы документа в дескрипторе; length < 0 — до
+         * конца. Если провайдер отдал канал без произвольного доступа (pipe) —
+         * честная ошибка, а не чтение подряд.
          */
-        fun of(fd: FileDescriptor): ChannelByteSource {
-            val s = ChannelByteSource(FileInputStream(fd))
+        fun of(fd: FileDescriptor, offset: Long = 0, length: Long = -1): ChannelByteSource {
+            val stream = FileInputStream(fd)
             try {
-                s.channel.position(0)
+                // Проба позиционным чтением: позиция дескриптора не меняется.
+                stream.channel.read(ByteBuffer.allocate(1), offset)
+                val end = stream.channel.size()
+                if (offset < 0 || offset > end || (length >= 0 && offset + length > end)) {
+                    throw IOException("границы документа ($offset+$length) за пределами файла ($end байт)")
+                }
+                return ChannelByteSource(stream, offset, if (length >= 0) length else end - offset)
             } catch (e: IOException) {
+                runCatching { stream.close() }
                 throw IOException("источник не даёт читать файл по смещению (${e.message})", e)
             }
-            return s
         }
     }
 }

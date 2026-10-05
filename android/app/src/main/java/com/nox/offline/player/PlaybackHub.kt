@@ -343,7 +343,7 @@ class PlaybackHub(private val app: NoxApp) {
         )
         val resumeAt = if (readyForItem) (p?.currentPosition ?: requestedStartMs) else requestedStartMs
         val message = if (PlaybackDiagnostics.isOutOfMemory(error))
-            "Не хватило памяти, чтобы открыть видео (${error.errorCodeName}). Файл при этом не повреждён."
+            "Не хватило памяти при открытии видео (${error.errorCodeName}). Эта ошибка сама по себе не означает повреждение файла."
         else "Не удалось воспроизвести: ${error.errorCodeName}"
         _state.value = _state.value.copy(isPlaying = false, error = message, errorCode = error.errorCodeName)
         scope.launch {
@@ -372,10 +372,10 @@ class PlaybackHub(private val app: NoxApp) {
                 lenientTried = true
                 NoxLog.event("player-retry-no-cues", "media" to m.id)
                 val item = mediaItem(m, now?.segment, now?.durationMs ?: 0)
+                // Те же экстракторы NOX (MP4 — с ограниченным распознаванием), только Matroska без Cues.
                 val source = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
                     androidx.media3.datasource.DefaultDataSource.Factory(app),
-                    androidx.media3.extractor.DefaultExtractorsFactory()
-                        .setMatroskaExtractorFlags(androidx.media3.extractor.mkv.MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES),
+                    com.nox.offline.media.NoxExtractorsFactory(app, androidx.media3.extractor.mkv.MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES),
                 ).createMediaSource(item)
                 readyForItem = false
                 player().setMediaSource(source, resumeAt)

@@ -50,7 +50,7 @@ object PlaybackDiagnostics {
         sb.appendLine("Код: ${error.errorCode} ${error.errorCodeName}")
         sb.appendLine("Вид: ${kind(error.errorCode)}")
         if (isOutOfMemory(error)) {
-            sb.appendLine("Причина — нехватка памяти процесса (OutOfMemoryError) при разборе, а не повреждение файла.")
+            sb.appendLine("Причина — нехватка памяти процесса (OutOfMemoryError) при разборе. Эта ошибка сама по себе не означает повреждение файла.")
         }
         (error as? ExoPlaybackException)?.let { e ->
             sb.appendLine("Тип ExoPlayer: ${when (e.type) {

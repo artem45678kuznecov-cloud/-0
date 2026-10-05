@@ -40,12 +40,28 @@ import java.util.IdentityHashMap
  * метаданные берутся из тех же разборщиков Media3 (BoxParser), времена
  * считаются теми же формулами — плеер получает те же сэмплы.
  *
+ * Распознавание ([sniff]) тоже не держит индекс в памяти: заголовки боксов
+ * читаются по смещениям ([BoundedMp4Sniffer]), через ExtractorInput плеера
+ * просматриваются только первые [BoundedMp4Sniffer.INPUT_PEEK_BYTES] байт.
+ * Стандартный Mp4Extractor.sniff здесь не вызывается: на moov в начале файла он
+ * копирует весь индекс в peekBuffer (OutOfMemoryError у 70-часового марафона).
+ *
  * Что этот путь не поддерживает (шифрование, TrueHD, AC-4, PCM, подписи
- * CEA-608 в cdat, несогласованные таблицы), уходит в обычный Mp4Extractor —
- * с перемоткой источника в начало файла до выдачи первой дорожки.
+ * CEA-608 в cdat, несогласованные таблицы): если индекс небольшой
+ * (не больше [standardMoovLimit]), файл открывает обычный Mp4Extractor — с
+ * перемоткой в начало до выдачи первой дорожки. Большой индекс в обычный путь
+ * не отправляется (он и привёл сюда из-за памяти): понятная ошибка с причиной.
+ *
+ * Размеры служебных боксов ограничены ([leafLimit], [MAX_TOTAL_LEAF_BYTES]),
+ * вложенность — [MAX_DEPTH], число боксов индекса — [MAX_BOXES_IN_MOOV]:
+ * повреждённый файл даёт ошибку разбора, а не гигантскую аллокацию.
  */
 @UnstableApi
-class LargeMp4Extractor(private val openSource: () -> ByteSource) : Extractor, SeekMap {
+class LargeMp4Extractor(
+    /** До какого размера moov обычный Mp4Extractor безопасен как запасной путь. */
+    private val standardMoovLimit: Long = NoxExtractorsFactory.thresholdBytes(),
+    private val openSource: () -> ByteSource,
+) : Extractor, SeekMap {
     private val subtitleParserFactory: SubtitleParser.Factory = DefaultSubtitleParserFactory()
     private var rawOutput: ExtractorOutput = ExtractorOutput.PLACEHOLDER
     private var output: ExtractorOutput = ExtractorOutput.PLACEHOLDER
@@ -82,8 +98,59 @@ class LargeMp4Extractor(private val openSource: () -> ByteSource) : Extractor, S
     var fallbackReason: String? = null
         private set
 
-    override fun sniff(input: ExtractorInput): Boolean =
-        Mp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0).sniff(input)
+    /** Итог последнего распознавания (для журнала и тестов). */
+    var lastScan: BoundedMp4Sniffer.Scan? = null
+        private set
+
+    // Пределы разбора индекса.
+    private var moovBytes = -1L
+    private var boxesInMoov = 0
+    private var trakCount = 0
+    private var leafBytes = 0L
+
+    /**
+     * Распознавание с ограниченной памятью. Через [input] просматриваются только
+     * первые байты — и сверяются с тем же местом независимо открытого источника:
+     * так проверяется, что [openSource] читает тот же документ, что и плеер.
+     * Остальное — заголовки боксов по смещениям ([BoundedMp4Sniffer]).
+     * Основной поток не потребляется: позиция [input] не меняется.
+     *
+     * Если второй дескриптор не открылся, разбор индекса из файла невозможен:
+     * остаётся обычный sniff, но с бюджетом ([GuardedMp4Extractor]) — небольшой
+     * индекс узнаётся (и откроется обычным путём), большой — нет.
+     */
+    override fun sniff(input: ExtractorInput): Boolean {
+        val opened = try {
+            openSource()
+        } catch (e: Exception) {
+            NoxLog.event("mp4-large-sniff-no-source", "error" to "${e.javaClass.simpleName}: ${e.message?.take(80)}")
+            return GuardedMp4Extractor(Mp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0),
+                GuardedMp4Extractor.sniffBudget(standardMoovLimit)).sniff(input)
+        }
+        val at = input.peekPosition
+        var n = BoundedMp4Sniffer.INPUT_PEEK_BYTES.toLong()
+        if (input.length != C.LENGTH_UNSET.toLong()) n = minOf(n, input.length - at)
+        if (n < Mp4Box.HEADER_SIZE) { opened.close(); return false }
+        val head = ByteArray(n.toInt())
+        val scan = opened.use { src ->
+            if (!input.peekFully(head, 0, head.size, true)) return false
+            val mine = ByteArray(head.size)
+            val got = src.read(at, mine, 0, mine.size)
+            val lengthDiffers = input.length != C.LENGTH_UNSET.toLong() && input.length != src.size
+            if (got != mine.size || !mine.contentEquals(head) || lengthDiffers) {
+                throw IOException("Файл открыт для разбора индекса иначе, чем для чтения кадров " +
+                    "(${if (lengthDiffers) "длина ${src.size} вместо ${input.length}" else "в позиции $at другие данные"}): " +
+                    "экономный разбор MP4 невозможен")
+            }
+            // MP4 распознаётся только с начала файла.
+            if (at != 0L) return false
+            BoundedMp4Sniffer.scan(src)
+        }
+        lastScan = scan
+        NoxLog.event("mp4-large-sniff", "ok" to scan.unfragmentedWithMoov, "fragmented" to scan.fragmented,
+            "moovMiB" to scan.moovSize / 1_048_576, "moovAtEnd" to scan.moovAfterMdat, "why" to scan.failure?.take(80))
+        return scan.unfragmentedWithMoov
+    }
 
     override fun init(output: ExtractorOutput) {
         rawOutput = output
@@ -156,7 +223,10 @@ class LargeMp4Extractor(private val openSource: () -> ByteSource) : Extractor, S
             val rest = Mp4Box.LONG_HEADER_SIZE - Mp4Box.HEADER_SIZE
             input.readFully(header.data, Mp4Box.HEADER_SIZE, rest)
             headerRead += rest
-            atomSize = header.readUnsignedLongToLong()
+            atomSize = header.readLong()
+            if (atomSize < 0) {
+                throw ParserException.createForMalformedContainer("64-битный размер бокса ${fourcc(atomType)} больше 2^63", null)
+            }
         } else if (atomSize == Mp4Box.EXTENDS_TO_END_SIZE.toLong()) {
             var end = input.length
             if (end == C.LENGTH_UNSET.toLong()) containers.peek()?.let { end = it.endPosition }
@@ -165,23 +235,63 @@ class LargeMp4Extractor(private val openSource: () -> ByteSource) : Extractor, S
         if (atomSize < headerRead) {
             throw ParserException.createForUnsupportedContainerFeature("Atom size less than header length (unsupported).")
         }
-        when {
-            atomType in CONTAINERS -> {
-                val end = input.position + atomSize - headerRead
-                if (atomSize != headerRead.toLong() && atomType == Mp4Box.TYPE_meta) skipMetaHeaderRemainder(input)
-                containers.push(Mp4Box.ContainerBox(atomType, end))
-                if (atomSize == headerRead.toLong()) processAtomEnded(end) else enterHeaderState()
+        // Размеры — Long; конец бокса не должен переполняться и выходить за родителя.
+        if (atomSize - headerRead > Long.MAX_VALUE - input.position) {
+            throw ParserException.createForMalformedContainer("размер бокса ${fourcc(atomType)} не помещается в файл", null)
+        }
+        val atomEnd = input.position + atomSize - headerRead
+        containers.peek()?.let { parent ->
+            if (atomEnd > parent.endPosition) {
+                throw ParserException.createForMalformedContainer(
+                    "бокс ${fourcc(atomType)} выходит за границы ${fourcc(parent.type)}", null)
             }
-            atomType in TABLES && containers.isNotEmpty() -> {
+            if (++boxesInMoov > MAX_BOXES_IN_MOOV) {
+                throw ParserException.createForMalformedContainer("больше $MAX_BOXES_IN_MOOV боксов в индексе", null)
+            }
+        }
+        if (atomType == Mp4Box.TYPE_moov && containers.isEmpty()) {
+            if (input.length != C.LENGTH_UNSET.toLong() && atomEnd > input.length) {
+                throw ParserException.createForMalformedContainer("индекс moov обрезан: заявлено $atomSize байт, " +
+                    "до конца файла ${input.length - input.position + headerRead}", null)
+            }
+            moovBytes = atomSize
+        }
+        when {
+            isContainer(atomType) -> {
+                if (containers.size >= MAX_DEPTH) {
+                    throw ParserException.createForMalformedContainer("вложенность боксов глубже $MAX_DEPTH", null)
+                }
+                if (atomType == Mp4Box.TYPE_trak && ++trakCount > MAX_TRACKS) {
+                    throw ParserException.createForUnsupportedContainerFeature("больше $MAX_TRACKS дорожек")
+                }
+                if (atomSize != headerRead.toLong() && atomType == Mp4Box.TYPE_meta) skipMetaHeaderRemainder(input)
+                containers.push(Mp4Box.ContainerBox(atomType, atomEnd))
+                if (atomSize == headerRead.toLong()) processAtomEnded(atomEnd) else enterHeaderState()
+            }
+            isTable(atomType) && containers.isNotEmpty() -> {
                 // Таблицу сэмплов не читаем в память — запоминаем, где она в файле.
                 tables.getOrPut(containers.peek()!!) { HashMap() }[atomType] = TableBox(input.position, atomSize - headerRead)
                 atomData = null
                 state = STATE_PAYLOAD
             }
-            atomType in LEAVES -> {
-                if (headerRead != Mp4Box.HEADER_SIZE || atomSize > Int.MAX_VALUE) {
+            isLeaf(atomType) -> {
+                if (headerRead != Mp4Box.HEADER_SIZE) {
                     throw ParserException.createForUnsupportedContainerFeature("Unsupported leaf atom size")
                 }
+                val limit = leafLimit(atomType)
+                val overTotal = leafBytes + atomSize > MAX_TOTAL_LEAF_BYTES
+                if (atomSize > limit || overTotal) {
+                    if (!isOptionalLeaf(atomType)) {
+                        throw ParserException.createForMalformedContainer("служебный бокс ${fourcc(atomType)} занимает " +
+                            "$atomSize байт — больше допустимых ${if (overTotal) "$MAX_TOTAL_LEAF_BYTES на все такие боксы" else "$limit"}", null)
+                    }
+                    // Необязательные метаданные (названия, обложки) такого размера не разбираются — пропускаются.
+                    NoxLog.event("mp4-large-skip-meta", "box" to fourcc(atomType), "bytes" to atomSize)
+                    atomData = null
+                    state = STATE_PAYLOAD
+                    return true
+                }
+                leafBytes += atomSize
                 val data = ParsableByteArray(atomSize.toInt())
                 System.arraycopy(header.data, 0, data.data, 0, Mp4Box.HEADER_SIZE)
                 atomData = data
@@ -242,6 +352,16 @@ class LargeMp4Extractor(private val openSource: () -> ByteSource) : Extractor, S
         input.resetPeekPosition()
     }
 
+    private fun leafLimit(type: Int): Long = when {
+        type == Mp4Box.TYPE_stsd -> MAX_STSD_BYTES
+        type == Mp4Box.TYPE_elst -> MAX_ELST_BYTES
+        isOptionalLeaf(type) -> MAX_METADATA_LEAF_BYTES
+        else -> MAX_SMALL_LEAF_BYTES
+    }
+
+    private fun fourcc(type: Int): String = String(byteArrayOf((type ushr 24).toByte(), (type ushr 16).toByte(),
+        (type ushr 8).toByte(), type.toByte()), Charsets.ISO_8859_1)
+
     private fun isQuickTimeBrand(ftyp: ParsableByteArray): Boolean {
         ftyp.position = Mp4Box.HEADER_SIZE
         val major = ftyp.readInt()
@@ -262,7 +382,19 @@ class LargeMp4Extractor(private val openSource: () -> ByteSource) : Extractor, S
 
     private class Plan(val track: Track, val tables: Mp4SampleTables, val timeline: Mp4Timeline)
 
+    /**
+     * Неподдерживаемая деталь. Небольшой индекс — обычный Mp4Extractor (он безопасен
+     * по памяти). Большой — понятная ошибка: обычный разбор и привёл бы к нехватке
+     * памяти, ради которой файл попал на этот путь. Решение — до чтения индекса
+     * обычным путём; обратно в экономный путь из обычного возврата нет.
+     */
     private fun fallback(reason: String) {
+        if (moovBytes < 0 || moovBytes > standardMoovLimit) {
+            NoxLog.event("mp4-large-unsupported", "reason" to reason.take(120), "moovMiB" to moovBytes / 1_048_576)
+            throw ParserException.createForUnsupportedContainerFeature(
+                "Длинный MP4: $reason. Экономный разбор этого не поддерживает, а обычный разбор индекса " +
+                    "${moovBytes / 1_048_576} МиБ не помещается в память")
+        }
         fallbackReason = reason
         NoxLog.event("mp4-large-fallback", "reason" to reason.take(120))
         closeSource()
@@ -287,17 +419,22 @@ class LargeMp4Extractor(private val openSource: () -> ByteSource) : Extractor, S
             for (trak in moov.containerChildren) {
                 if (trak.type != Mp4Box.TYPE_trak) continue
                 var track = BoxParser.parseTrak(trak, mvhd, C.TIME_UNSET, null, false, isQuickTime) ?: continue
-                unsupportedReason(track)?.let { throw UnsupportedTables(it) }
                 val stbl = trak.getContainerBoxOfType(Mp4Box.TYPE_mdia)?.getContainerBoxOfType(Mp4Box.TYPE_minf)
                     ?.getContainerBoxOfType(Mp4Box.TYPE_stbl) ?: throw UnsupportedTables("нет stbl")
                 val t = tables[stbl] ?: throw UnsupportedTables("нет таблиц сэмплов")
                 if (t[Mp4Box.TYPE_stsz] == null) throw UnsupportedTables("размеры сэмплов в stz2")
+                // Дорожка без сэмплов: Media3 её пропускает (остальные таблицы у неё не проверяются).
+                if (Mp4SampleTables.sampleCountOf(src, t.getValue(Mp4Box.TYPE_stsz)) == 0L) continue
+                unsupportedReason(track)?.let { throw UnsupportedTables(it) }
                 val longOffsets = t[Mp4Box.TYPE_stco] == null
                 val st = Mp4SampleTables(src, t.getValue(Mp4Box.TYPE_stsz),
                     t[Mp4Box.TYPE_stco] ?: t[Mp4Box.TYPE_co64] ?: throw UnsupportedTables("нет смещений чанков"), longOffsets,
                     t[Mp4Box.TYPE_stsc] ?: throw UnsupportedTables("нет stsc"),
                     t[Mp4Box.TYPE_stts] ?: throw UnsupportedTables("нет stts"),
                     t[Mp4Box.TYPE_ctts], t[Mp4Box.TYPE_stss])
+                if (st.maxSize > MAX_SAMPLE_BYTES) {
+                    throw UnsupportedTables("сэмпл ${st.maxSize / 1_048_576} МиБ — таблица размеров похожа на повреждённую")
+                }
                 if (track.type == C.TRACK_TYPE_VIDEO && track.mediaDurationUs > 0) {
                     val frameRate = st.sampleCount / (track.mediaDurationUs / 1_000_000f)
                     track = track.copyWithFormat(track.format.buildUpon().setFrameRate(frameRate).build())
@@ -534,12 +671,41 @@ class LargeMp4Extractor(private val openSource: () -> ByteSource) : Extractor, S
         private const val BRAND_QUICKTIME = 0x71742020 // "qt  "
         private const val BRAND_HEIC = 0x68656963 // "heic"
 
-        private val CONTAINERS = setOf(Mp4Box.TYPE_moov, Mp4Box.TYPE_trak, Mp4Box.TYPE_mdia, Mp4Box.TYPE_minf,
-            Mp4Box.TYPE_stbl, Mp4Box.TYPE_edts, Mp4Box.TYPE_meta)
-        private val TABLES = setOf(Mp4Box.TYPE_stts, Mp4Box.TYPE_stss, Mp4Box.TYPE_ctts, Mp4Box.TYPE_stsc,
-            Mp4Box.TYPE_stsz, Mp4Box.TYPE_stz2, Mp4Box.TYPE_stco, Mp4Box.TYPE_co64)
-        private val LEAVES = setOf(Mp4Box.TYPE_mdhd, Mp4Box.TYPE_mvhd, Mp4Box.TYPE_hdlr, Mp4Box.TYPE_stsd,
-            Mp4Box.TYPE_elst, Mp4Box.TYPE_tkhd, Mp4Box.TYPE_ftyp, Mp4Box.TYPE_udta, Mp4Box.TYPE_keys, Mp4Box.TYPE_ilst)
+        // Типы боксов — через when, без множеств: заголовков сотни тысяч, а Set<Int> упаковывает каждый в Integer.
+        private fun isContainer(t: Int) = when (t) {
+            Mp4Box.TYPE_moov, Mp4Box.TYPE_trak, Mp4Box.TYPE_mdia, Mp4Box.TYPE_minf, Mp4Box.TYPE_stbl, Mp4Box.TYPE_edts,
+            Mp4Box.TYPE_meta -> true
+            else -> false
+        }
+        private fun isTable(t: Int) = when (t) {
+            Mp4Box.TYPE_stts, Mp4Box.TYPE_stss, Mp4Box.TYPE_ctts, Mp4Box.TYPE_stsc, Mp4Box.TYPE_stsz, Mp4Box.TYPE_stz2,
+            Mp4Box.TYPE_stco, Mp4Box.TYPE_co64 -> true
+            else -> false
+        }
+        private fun isLeaf(t: Int) = when (t) {
+            Mp4Box.TYPE_mdhd, Mp4Box.TYPE_mvhd, Mp4Box.TYPE_hdlr, Mp4Box.TYPE_stsd, Mp4Box.TYPE_elst, Mp4Box.TYPE_tkhd,
+            Mp4Box.TYPE_ftyp, Mp4Box.TYPE_udta, Mp4Box.TYPE_keys, Mp4Box.TYPE_ilst -> true
+            else -> false
+        }
+
+        /** Необязательные метаданные: слишком большие пропускаются, а не разбираются. */
+        private fun isOptionalLeaf(t: Int) = t == Mp4Box.TYPE_udta || t == Mp4Box.TYPE_keys || t == Mp4Box.TYPE_ilst
+
+        /** mvhd, tkhd, mdhd, hdlr, ftyp — по стандарту десятки байт. */
+        const val MAX_SMALL_LEAF_BYTES = 64 * 1024L
+        /** stsd (описания кодеков, с SPS/PPS и обложкой кодека) — обязательный, обычно сотни байт. */
+        const val MAX_STSD_BYTES = 1024 * 1024L
+        /** elst (правки): 20 байт на правку — до ~13 000 правок; у фильмов их одна-две. */
+        const val MAX_ELST_BYTES = 256 * 1024L
+        /** udta / keys / ilst (названия, обложки): до 1 МиБ разбираются, больше — пропускаются. */
+        const val MAX_METADATA_LEAF_BYTES = 1024 * 1024L
+        /** Все разбираемые в память боксы индекса вместе (необязательные сверх этого пропускаются). */
+        const val MAX_TOTAL_LEAF_BYTES = 16 * 1024 * 1024L
+        const val MAX_DEPTH = 16
+        const val MAX_TRACKS = 256
+        const val MAX_BOXES_IN_MOOV = 2_000_000
+        /** Наибольший сэмпл: буфер декодера берётся по нему (setMaxInputSize). */
+        const val MAX_SAMPLE_BYTES = 64 * 1024 * 1024
     }
 }
 

@@ -143,6 +143,26 @@ class LargeMp4ExtractorTest {
         assertEquals(a.harness.tracks.keys, b.harness.tracks.keys)
     }
 
+    /**
+     * Синтетический марафон (настоящие кадры, таблицы с ctts, stss, co64/stco,
+     * stsc с записями на каждый повтор, правка у видео) — короткие варианты
+     * целиком против Media3: moov в начале и в конце, 32- и 64-битные заголовки.
+     */
+    @Test fun syntheticMarathonMatchesMedia3() {
+        val gen = SyntheticMarathon(SyntheticMarathon.clipFromResources())
+        val variants = listOf(
+            "m-start.mp4" to SyntheticMarathon.Options(durationSec = 96),
+            "m-end-large.mp4" to SyntheticMarathon.Options(durationSec = 96, moovFirst = false, largeHeaders = true),
+            "m-stco-singles.mp4" to SyntheticMarathon.Options(durationSec = 96, co64 = false, audioSingles = 375),
+            "m-pairs-noedit.mp4" to SyntheticMarathon.Options(durationSec = 96, audioSingles = 1, videoEdit = false),
+        )
+        for ((name, o) in variants) {
+            val f = File(tmp.root, name)
+            gen.write(f, o)
+            assertTrue(compare(f, keepPerTrack = 2000, randomSeeks = 10, afterSeek = 120) > 0)
+        }
+    }
+
     /** Длинный файл стенда (NOX_LONG_FILE): все сэмплы и перемотки. */
     @Test fun longFileMatchesMedia3() {
         val path = System.getenv("NOX_LONG_FILE")

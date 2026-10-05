@@ -37,7 +37,10 @@ object Media3Probe {
         val lines = ArrayList<String>()
         val make: () -> Extractor = when (kind) {
             // Тот же выбор, что у плеера: MP4 с огромным индексом — без таблиц в куче.
-            ContainerCheck.Kind.MP4 -> { { NoxExtractorsFactory.largeMp4(context, uri) ?: Mp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0) } }
+            // Обычный Mp4Extractor — только с ограниченным sniff: большой индекс он не просматривает.
+            ContainerCheck.Kind.MP4 -> { {
+                NoxExtractorsFactory.largeMp4(context, uri) ?: GuardedMp4Extractor(Mp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0))
+            } }
             ContainerCheck.Kind.WEBM -> { { MatroskaExtractor(SubtitleParser.Factory.UNSUPPORTED, 0) } }
             ContainerCheck.Kind.UNKNOWN -> return Result(false, listOf("разборщик плеера: контейнер не MP4 и не WebM — не проверялся"))
         }
@@ -54,7 +57,11 @@ object Media3Probe {
         }
         try {
             input = open(0)
-            if (!ex.sniff(input)) return Result(false, listOf("разборщик плеера не узнал контейнер"), "sniff вернул false", 0)
+            if (!ex.sniff(input)) {
+                val why = if ((ex as? GuardedMp4Extractor)?.refusedOverBudget == true)
+                    "индекс moov больше предела обычного разбора, а экономный путь недоступен" else "sniff вернул false"
+                return Result(false, listOf("разборщик плеера не узнал контейнер: $why"), why, 0)
+            }
             input = open(0)
             ex.init(out)
             val ph = PositionHolder()

@@ -42,8 +42,8 @@ android {
         applicationId = "com.nox.offline"
         minSdk = 26
         targetSdk = 35
-        versionCode = noxVersionCodeOverride ?: 8
-        versionName = "0.4.3"
+        versionCode = noxVersionCodeOverride ?: 9
+        versionName = "0.4.4"
 
         // Chaquopy требует явного списка ABI: под каждый кладётся свой
         // рантайм Python. Для Python 3.12 у Chaquopy есть только 64-битные
@@ -114,6 +114,11 @@ android {
     // Схемы Room нужны инструментальному тесту миграции на устройстве.
     sourceSets {
         getByName("androidTest").assets.srcDir("$projectDir/schemas")
+        // Генератор длинного MP4 и его ролик — общие для тестов JVM и устройства.
+        getByName("test").java.srcDir("src/sharedTest/java")
+        getByName("test").resources.srcDir("src/sharedTest/resources")
+        getByName("androidTest").java.srcDir("src/sharedTest/java")
+        getByName("androidTest").assets.srcDir("src/sharedTest/resources")
     }
 }
 

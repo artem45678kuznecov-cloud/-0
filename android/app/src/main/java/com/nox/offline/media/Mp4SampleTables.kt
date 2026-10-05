@@ -15,7 +15,8 @@ class UnsupportedTables(reason: String) : IOException(reason)
  * Mp4Extractor из Media3 разворачивает их в массивы по 32 байта на сэмпл и
  * вдобавок держит весь moov в памяти: у 15-часового фильма это ~150 МиБ кучи
  * при лимите 256 МиБ. Здесь в памяти только разреженные указатели (каждая
- * [STEP]-я запись), а нужные записи читаются окнами через [CachedReader].
+ * 2^shift-я запись, не больше [MAX_POINTERS] указателей на таблицу — их объём
+ * не растёт с длиной фильма), а нужные записи читаются окнами через [CachedReader].
  *
  * Значения повторяют разбор BoxParser.parseStbl из Media3 1.5.1 для корректных
  * таблиц. Всё, что Media3 разбирает с оговорками (несогласованные таблицы,
@@ -59,7 +60,10 @@ class Mp4SampleTables(
     /** Наименьшее смещение ctts: ниже него время показа не опускается. */
     val minCts: Int
 
-    // Разреженные указатели: запись k*STEP и с какого сэмпла она начинается.
+    // Разреженные указатели: запись k shl shift и с какого сэмпла она начинается.
+    private val sttsShift: Int
+    private val cttsShift: Int
+    private val stscShift: Int
     private val sttsSample: IntArray
     private val sttsTime: LongArray
     private val cttsSample: IntArray
@@ -67,6 +71,10 @@ class Mp4SampleTables(
 
     init {
         val r = CachedReader(src, 64 * 1024)
+        // Таблицы — внутри файла: заявленные размеры не дают читать (и выделять) за его концом.
+        for (t in listOfNotNull(stsz, chunkOffsets, stsc, stts, ctts, stss)) {
+            if (t.dataPos < 0 || t.dataSize < 0 || t.dataPos > src.size - t.dataSize) throw UnsupportedTables("таблица за концом файла")
+        }
         if (stsz.dataSize < 12) throw UnsupportedTables("короткий stsz")
         fixedSize = r.u32(stsz.dataPos + 4).toIntChecked("размер сэмпла")
         sampleCount = r.u32(stsz.dataPos + 8).toIntChecked("число сэмплов")
@@ -95,8 +103,8 @@ class Mp4SampleTables(
         stscCount = r.u32(stsc.dataPos + 4).toIntChecked("число записей stsc")
         if (stscCount == 0 || stsc.dataSize < 8 + 12L * stscCount) throw UnsupportedTables("stsc пуст или короче заявленного")
         if (r.u32(stscEntries) != 1L) throw UnsupportedTables("первая запись stsc не с чанка 1")
-        val stscIdx = (stscCount + STEP - 1) / STEP
-        stscSample = LongArray(stscIdx)
+        stscShift = shiftFor(stscCount)
+        stscSample = LongArray(pointers(stscCount, stscShift))
         var samplesBefore = 0L
         var prevFirst = 0L
         var prevSpc = 0L
@@ -107,7 +115,7 @@ class Mp4SampleTables(
             if (first <= prevFirst) throw UnsupportedTables("stsc не по возрастанию")
             if (spc > Int.MAX_VALUE) throw UnsupportedTables("слишком много сэмплов в чанке")
             if (e > 0) samplesBefore += runChunks(prevFirst - 1, first - 1) * prevSpc
-            if (e % STEP == 0) stscSample[e / STEP] = samplesBefore
+            if (e and ((1 shl stscShift) - 1) == 0) stscSample[e ushr stscShift] = samplesBefore
             prevFirst = first
             prevSpc = spc
         }
@@ -117,16 +125,16 @@ class Mp4SampleTables(
         // stts: шаги неотрицательные, записей с нулём сэмплов нет, сумма — ровно число сэмплов.
         sttsCount = r.u32(stts.dataPos + 4).toIntChecked("число записей stts")
         if (sttsCount == 0 || stts.dataSize < 8 + 8L * sttsCount) throw UnsupportedTables("stts пуст или короче заявленного")
-        val sttsIdx = (sttsCount + STEP - 1) / STEP
-        sttsSample = IntArray(sttsIdx)
-        sttsTime = LongArray(sttsIdx)
+        sttsShift = shiftFor(sttsCount)
+        sttsSample = IntArray(pointers(sttsCount, sttsShift))
+        sttsTime = LongArray(sttsSample.size)
         var n = 0L
         var time = 0L
         scan(src, sttsEntries, sttsCount, 8) { b, o, e ->
             val count = be32(b, o).toLong() and 0xFFFFFFFFL
             val delta = be32(b, o + 4)
             if (count == 0L || delta < 0) throw UnsupportedTables("stts с пустой записью или отрицательным шагом")
-            if (e % STEP == 0) { sttsSample[e / STEP] = n.toInt(); sttsTime[e / STEP] = time }
+            if (e and ((1 shl sttsShift) - 1) == 0) { sttsSample[e ushr sttsShift] = n.toInt(); sttsTime[e ushr sttsShift] = time }
             n += count
             time += count * delta
             if (n > sampleCount) throw UnsupportedTables("в stts больше сэмплов, чем в stsz")
@@ -138,15 +146,15 @@ class Mp4SampleTables(
         if (ctts != null) {
             cttsCount = r.u32(ctts.dataPos + 4).toIntChecked("число записей ctts")
             if (ctts.dataSize < 8 + 8L * cttsCount) throw UnsupportedTables("ctts короче заявленного")
-            val cttsIdx = (cttsCount + STEP - 1) / STEP
-            cttsSample = IntArray(cttsIdx)
+            cttsShift = shiftFor(cttsCount)
+            cttsSample = IntArray(pointers(cttsCount, cttsShift))
             var c = 0L
             var minOffset = Int.MAX_VALUE
             var last = 0
             scan(src, cttsEntries, cttsCount, 8) { b, o, e ->
                 val count = be32(b, o).toLong() and 0xFFFFFFFFL
                 val offset = be32(b, o + 4)
-                if (e % STEP == 0) cttsSample[e / STEP] = c.toInt()
+                if (e and ((1 shl cttsShift) - 1) == 0) cttsSample[e ushr cttsShift] = c.toInt()
                 if (count > 0) { minOffset = minOf(minOffset, offset); last = offset }
                 c += count
                 if (c > sampleCount) throw UnsupportedTables("в ctts больше сэмплов, чем в stsz")
@@ -156,6 +164,7 @@ class Mp4SampleTables(
             lastCts = last
         } else {
             cttsCount = 0
+            cttsShift = 0
             cttsSample = IntArray(0)
             minCts = 0
             lastCts = 0
@@ -209,8 +218,8 @@ class Mp4SampleTables(
 
         /** Время декодирования сэмпла [i] (единицы дорожки). */
         fun decodeTime(i: Int): Long {
-            var k = floorIndex(sttsSample, i)
-            var e = k * STEP
+            val k = floorIndex(sttsSample, i)
+            var e = k shl sttsShift
             var first = sttsSample[k].toLong()
             var time = sttsTime[k]
             while (true) {
@@ -227,7 +236,7 @@ class Mp4SampleTables(
         fun cts(i: Int): Int {
             if (!hasCtts) return 0
             val k = floorIndex(cttsSample, i)
-            var e = k * STEP
+            var e = k shl cttsShift
             var first = cttsSample[k].toLong()
             while (true) {
                 val count = r.u32(cttsEntries + 8L * e)
@@ -284,7 +293,7 @@ class Mp4SampleTables(
         /** Чанк сэмпла [i] и номер первого сэмпла этого чанка. */
         fun chunkOf(i: Int): Pair<Int, Int> {
             val k = floorIndex(stscSample, i.toLong())
-            var e = k * STEP
+            var e = k shl stscShift
             var first = stscSample[k]
             while (true) {
                 val chunk0 = r.u32(stscEntries + 12L * e) - 1
@@ -348,7 +357,7 @@ class Mp4SampleTables(
             index = i
             // stts
             var k = floorIndex(sttsSample, i)
-            var e = k * STEP
+            var e = k shl sttsShift
             var first = sttsSample[k].toLong()
             var time = sttsTime[k]
             while (true) {
@@ -364,7 +373,7 @@ class Mp4SampleTables(
             // ctts
             if (hasCtts) {
                 k = floorIndex(cttsSample, i)
-                e = k * STEP
+                e = k shl cttsShift
                 first = cttsSample[k].toLong()
                 while (true) {
                     val count = r.u32(cttsEntries + 8L * e)
@@ -378,7 +387,7 @@ class Mp4SampleTables(
             } else cts = 0
             // stsc + чанк
             k = floorIndex(stscSample, i.toLong())
-            e = k * STEP
+            e = k shl stscShift
             var firstSample = stscSample[k]
             while (true) {
                 val chunk0 = r.u32(stscEntries + 12L * e) - 1
@@ -459,8 +468,29 @@ class Mp4SampleTables(
     }
 
     companion object {
-        /** Шаг разреженных указателей: столько записей таблицы на один указатель. */
+        /** Наименьший шаг разреженных указателей: столько записей таблицы на один указатель. */
         const val STEP = 256
+        private const val MIN_SHIFT = 8
+
+        /** Указателей на одну таблицу не больше: stts — 12 байт на указатель, итого ≤ 768 КиБ. */
+        const val MAX_POINTERS = 65_536
+
+        /** Шаг 2^shift: не меньше [STEP] и такой, чтобы указателей было не больше [MAX_POINTERS]. */
+        internal fun shiftFor(count: Int): Int {
+            var s = MIN_SHIFT
+            while (s < 30 && pointers(count, s) > MAX_POINTERS) s++
+            return s
+        }
+
+        private fun pointers(count: Int, shift: Int): Int = if (count <= 0) 0 else ((count - 1) ushr shift) + 1
+
+        /** Число сэмплов дорожки по stsz (0 — пустая дорожка: Media3 её пропускает). */
+        fun sampleCountOf(src: ByteSource, stsz: TableBox): Long {
+            if (stsz.dataSize < 12 || stsz.dataPos < 0 || stsz.dataPos > src.size - 12) throw UnsupportedTables("короткий stsz")
+            val b = ByteArray(4)
+            if (src.read(stsz.dataPos + 8, b, 0, 4) < 4) throw UnsupportedTables("короткий stsz")
+            return be32(b, 0).toLong() and 0xFFFFFFFFL
+        }
 
         private fun be32(b: ByteArray, o: Int): Int =
             (b[o].toInt() and 0xFF shl 24) or (b[o + 1].toInt() and 0xFF shl 16) or (b[o + 2].toInt() and 0xFF shl 8) or (b[o + 3].toInt() and 0xFF)

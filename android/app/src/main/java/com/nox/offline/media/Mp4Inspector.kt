@@ -274,9 +274,11 @@ class Mp4Inspector(private val r: CachedReader, private val ctl: CheckControl) {
             }
         } ?: m.child(stbl, "stz2")?.let { b ->
             val field = m.u8(b.dataStart + 7)
-            val count = m.u32(b.dataStart + 8).toInt()
+            val count = m.u32(b.dataStart + 8)
             val base = b.dataStart + 12
-            IntColumn.Unpacked(IntArray(count) { i ->
+            // Массив распакованных размеров — только под записи, которые действительно есть в боксе.
+            need(m, field in intArrayOf(4, 8, 16) && base + (count * field + 7) / 8 <= b.end, "stz2 короче заявленного")
+            IntColumn.Unpacked(IntArray(count.toInt()) { i ->
                 when (field) {
                     4 -> (m.u8(base + i / 2) shr (if (i % 2 == 0) 4 else 0)) and 0xF
                     8 -> m.u8(base + i)

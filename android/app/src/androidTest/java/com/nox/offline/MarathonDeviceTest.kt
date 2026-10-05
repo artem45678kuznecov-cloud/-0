@@ -373,7 +373,8 @@ class MarathonDeviceTest {
             ballast.clear()
             instr.runOnMainSync { app.playback.player().removeAnalyticsListener(counters); app.playback.close() }
             for (id in ids) { app.db.playback().delete(id); app.db.media().get(id)?.let { app.db.media().delete(it) } }
-            scenario.close()
+            // После полного экрана и PiP состояние главного окна сценарию может быть неизвестно — закрытие только уборка.
+            runCatching { scenario.close() }.onFailure { say("закрытие главного окна: ${it.javaClass.simpleName}") }
         }
         val shaAfter = sha256(file)
         say("исходный файл: SHA-256 до ${shaBefore.take(16)}…, после ${shaAfter.take(16)}…; размер ${file.length()} (был $sizeBefore); " +

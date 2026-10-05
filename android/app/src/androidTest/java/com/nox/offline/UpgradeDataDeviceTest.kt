@@ -27,13 +27,14 @@ import java.security.MessageDigest
 /**
  * Обновление поверх опубликованной версии с данными пользователя.
  *
- * Запускается скриптом выпуска (tools/ci-upgrade-check.sh) на эмуляторе в два
- * приёма: `nox.upgrade=seed` — внутри установленной опубликованной версии
- * (0.4.3) создаются медиатека, позиции, главы и серии, коллекция, субтитры,
- * закладка, недокачанная загрузка с файлом .part, оформление и фон, и
- * записывается снимок; затем поверх ставится новый подписанный APK
- * (`adb install -r`), и `nox.upgrade=verify` — уже внутри новой версии —
- * сверяет всё со снимком. Без аргумента не запускается.
+ * Запускается скриптом выпуска (tools/ci-upgrade-check.sh) на эмуляторе:
+ * `nox.upgrade=seed` — внутри установленной опубликованной версии (0.4.3)
+ * создаются медиатека, позиции, главы и серии, коллекция, субтитры,
+ * закладка, недокачанная загрузка с файлом .part, оформление и фон; прежняя
+ * версия открывается с ними; `nox.upgrade=snapshot` — снимок всех данных;
+ * затем поверх ставится новый подписанный APK (`adb install -r`), он
+ * открывается, и `nox.upgrade=verify` — уже внутри новой версии — сверяет
+ * всё со снимком. Без аргумента не запускается.
  *
  * Код засева пользуется только тем, что есть и в 0.4.3: база, хранилище,
  * библиотека, разметка, субтитры, настройки.
@@ -89,9 +90,16 @@ class UpgradeDataDeviceTest {
         app.settings.updateAppearance { it.copy(glassMode = GlassMode.ECONOMY, wallpaper = WallpaperKind.AURORA, customHue = 30f, dim = 0.6f) }
         Thread.sleep(500)
 
+        say("засеяно: видео $mediaId, серия $ep, коллекция $col, загрузка $dl (.part ${part.length()} байт)")
+    }
+
+    /** Снимок «до» — после того как прежняя версия открылась с этими данными (её собственные изменения не в счёт). */
+    @Test
+    fun snapshotBefore() {
+        assumeTrue("только из скрипта выпуска", arg("nox.upgrade") == "snapshot")
         val snap = snapshot()
         File(dir, "before.txt").writeText(snap)
-        say("засеяно: видео $mediaId, серия $ep, коллекция $col, загрузка $dl (.part ${part.length()} байт)\n$snap")
+        say("снимок до обновления:\n$snap")
     }
 
     @Test
@@ -107,7 +115,10 @@ class UpgradeDataDeviceTest {
         val pb = kv(b.getValue("package"))
         val pa = kv(a.getValue("package"))
         say("версия до: ${pb["versionName"]} (${pb["versionCode"]}), после: ${pa["versionName"]} (${pa["versionCode"]})")
-        if (pa.getValue("versionCode").toLong() <= pb.getValue("versionCode").toLong()) problems += "versionCode не вырос"
+        // Прогон механики на отладочной сборке ставит поверх ту же версию.
+        val dry = arg("nox.dryRun") == "1"
+        val grew = pa.getValue("versionCode").toLong() > pb.getValue("versionCode").toLong()
+        if (!grew && !(dry && pa["versionCode"] == pb["versionCode"])) problems += "versionCode не вырос"
         if (pa["firstInstallTime"] != pb["firstInstallTime"]) problems += "firstInstallTime изменился — это переустановка, а не обновление"
         if (pa["cert"] != pb["cert"]) problems += "сертификат подписи изменился"
         if (pa["applicationId"] != pb["applicationId"]) problems += "applicationId изменился"
@@ -117,10 +128,16 @@ class UpgradeDataDeviceTest {
             val y = a[name]
             when {
                 y == null -> problems += "раздел $name пропал"
-                name == "prefs nox_settings" -> {
+                name.startsWith("prefs ") -> {
                     val kb = kv(x)
                     val ka = kv(y)
-                    for ((k, v) in kb) if (ka[k] != v) problems += "настройка $k: было «$v», стало «${ka[k]}»"
+                    for ((k, v) in kb) {
+                        if (ka[k] == v) continue
+                        // Служебные отметки (время проверки обновлений, последняя запущенная версия,
+                        // время автокопии) при запуске новой версии меняются по замыслу.
+                        if (k in BOOKKEEPING) say("служебная отметка $k: было «$v», стало «${ka[k]}»")
+                        else problems += "настройка $k: было «$v», стало «${ka[k]}»"
+                    }
                 }
                 else -> {
                     // Всё, что было, должно остаться как было; новое (например, автокопия) — только в отчёт.
@@ -151,8 +168,10 @@ class UpgradeDataDeviceTest {
         append("applicationId=${ctx.packageName}\nversionName=${info.versionName}\nversionCode=$code\n")
         append("firstInstallTime=${info.firstInstallTime}\ncert=$cert\n")
 
-        append("=== prefs nox_settings\n")
-        ctx.getSharedPreferences("nox_settings", Context.MODE_PRIVATE).all.toSortedMap().forEach { (k, v) -> append("$k=$v\n") }
+        for (file in listOf("nox_settings", "nox_library")) {
+            append("=== prefs $file\n")
+            ctx.getSharedPreferences(file, Context.MODE_PRIVATE).all.toSortedMap().forEach { (k, v) -> append("$k=$v\n") }
+        }
 
         val sql = app.db.openHelper.readableDatabase
         val tables = ArrayList<String>()
@@ -201,4 +220,8 @@ class UpgradeDataDeviceTest {
     private fun kv(s: String) = s.lines().filter { '=' in it }.associate { it.substringBefore('=') to it.substringAfter('=') }
 
     private fun sha(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
+
+    companion object {
+        private val BOOKKEEPING = setOf("updLastCheck", "updLastRun", "updPending", "autoBackupLastAt", "autoBackupError")
+    }
 }

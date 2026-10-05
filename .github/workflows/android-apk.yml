@@ -171,6 +171,7 @@ jobs:
           path: |
             android/app/build/reports/androidTests/
             android/build-shots/
+            android/build-upgrade/
           if-no-files-found: ignore
 
   release:

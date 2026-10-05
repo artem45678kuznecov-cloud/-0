@@ -90,6 +90,8 @@ class MarathonMp4Test {
         assertTrue("$title: длительность $duration вместо ${layout.durationUs}", Math.abs(duration - layout.durationUs) <= 100_000)
         assertTrue("$title: первый видеосэмпл — ключевой с 0: ${r["firstSamples"]}", r.getValue("firstSamples").contains(":0:key=true"))
         assertEquals("$title: эталон первого повтора", "575", r["refSamples"])
+        // Плеер ограничивает буфер, только если вход продвигается: между проверками LoadControl — меньше 50 с.
+        assertTrue("$title: между проверками загрузки ${r["maxContentBetweenLoadChecksS"]} с", r.getValue("maxContentBetweenLoadChecksS").toLong() < 50)
         assertEquals("$title: данные сэмплов после перемоток совпадают с эталоном", "0", r["crcMismatches"])
         assertTrue("$title: сверено сэмплов ${r["crcChecked"]}", r.getValue("crcChecked").toInt() > 300)
         // Первый кадр ролика показывается с 80 мс (так его читает и Media3): к началу перемотка встаёт на него.

@@ -138,7 +138,8 @@ class LargeMp4Extractor(
             val got = src.read(at, mine, 0, mine.size)
             val lengthDiffers = input.length != C.LENGTH_UNSET.toLong() && input.length != src.size
             if (got != mine.size || !mine.contentEquals(head) || lengthDiffers) {
-                throw IOException("Файл открыт для разбора индекса иначе, чем для чтения кадров " +
+                // ParserException: повтор загрузки здесь не поможет (Media3 такие не повторяет).
+                throw ParserException.createForUnsupportedContainerFeature("Файл открыт для разбора индекса иначе, чем для чтения кадров " +
                     "(${if (lengthDiffers) "длина ${src.size} вместо ${input.length}" else "в позиции $at другие данные"}): " +
                     "экономный разбор MP4 невозможен")
             }

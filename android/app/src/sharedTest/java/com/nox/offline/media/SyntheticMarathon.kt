@@ -39,6 +39,14 @@ class SyntheticMarathon(private val clip: ByteArray) {
         val extraMoovBoxes: List<Triple<String, Long, Int>> = emptyList(),
         /** Нули в конце stsd видео (описание кодека раздувается, записи те же). */
         val videoStsdPadding: Long = 0,
+        /**
+         * Сколько копий данных ролика в mdat; повторы идут по копиям по кругу. Позиция
+         * чтения растёт больше чем на 1 МиБ подряд, как у настоящего фильма: ExoPlayer
+         * спрашивает LoadControl, только когда вход продвинулся на 1 МиБ после
+         * последнего переоткрытия, — при данных в одной копии (340 КБ) он грузил бы
+         * без остановки, чего у обычного файла не бывает.
+         */
+        val dataCopies: Int = 4,
     )
 
     /** Дорожка ролика: всё, что нужно для повторов. */
@@ -162,7 +170,7 @@ class SyntheticMarathon(private val clip: ByteArray) {
             },
             full(if (o.co64) "co64" else "stco", totalV, offsetBytes) { out ->
                 out.i32(0); out.i32(totalV.toInt())
-                for (r in 0 until reps) for (j in 0 until vPer) out.offset(dataStart + vChunkRel[j], o.co64)
+                for (r in 0 until reps) for (j in 0 until vPer) out.offset(dataStart + (r % o.dataCopies) * dataBytes + vChunkRel[j], o.co64)
             },
         )
         val aStscEntries = reps.toLong() * (if (o.audioSingles in 1 until aPer) 2 else 1)
@@ -183,7 +191,7 @@ class SyntheticMarathon(private val clip: ByteArray) {
             },
             full(if (o.co64) "co64" else "stco", reps.toLong() * aChunksPerRep, offsetBytes) { out ->
                 out.i32(0); out.i32(reps * aChunksPerRep)
-                for (r in 0 until reps) for (c in 0 until aChunksPerRep) out.offset(dataStart + aChunkRel[c], o.co64)
+                for (r in 0 until reps) for (c in 0 until aChunksPerRep) out.offset(dataStart + (r % o.dataCopies) * dataBytes + aChunkRel[c], o.co64)
             },
         )
         val big = o.largeHeaders
@@ -222,11 +230,12 @@ class SyntheticMarathon(private val clip: ByteArray) {
             trak(audio, 2, aTicks, aTables, false),
         ))
         val mdatHeader = if (big) 16 else 8
-        val mdatSize = mdatHeader + o.holeBytes + dataBytes
+        require(o.dataCopies >= 1)
+        val mdatSize = mdatHeader + o.holeBytes + dataBytes * o.dataCopies
         val moovPos = if (o.moovFirst) ftyp.size.toLong() else ftyp.size + mdatSize
         val mdatPos = if (o.moovFirst) ftyp.size + moov.size else ftyp.size.toLong()
         dataStart = mdatPos + mdatHeader + o.holeBytes
-        require(o.co64 || dataStart + dataBytes < (1L shl 32)) { "stco: смещения не помещаются в 32 бита" }
+        require(o.co64 || dataStart + dataBytes * o.dataCopies < (1L shl 32)) { "stco: смещения не помещаются в 32 бита" }
 
         out.delete()
         Out(out).use { w ->
@@ -234,9 +243,9 @@ class SyntheticMarathon(private val clip: ByteArray) {
             fun mdat() {
                 if (big) { w.i32(1); w.type("mdat"); w.i64(mdatSize) } else { w.i32(mdatSize.toInt()); w.type("mdat") }
                 w.hole(o.holeBytes)
-                for (u in units) for (k in 0 until u.n) {
+                repeat(o.dataCopies) { for (u in units) for (k in 0 until u.n) {
                     if (u.video) w.bytes(video.sample(clip, u.first + k)) else w.bytes(audio.sample(clip, audioSkip + u.first + k))
-                }
+                } }
             }
             if (o.moovFirst) { moov.write(w); mdat() } else { mdat(); moov.write(w) }
         }

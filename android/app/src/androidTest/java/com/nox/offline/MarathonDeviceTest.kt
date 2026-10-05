@@ -142,13 +142,21 @@ class MarathonDeviceTest {
         if (video) check(b.video > a.video, "$stage: кадры не выводятся")
     }
 
-    private fun seek(stage: String, ms: Long, base: Mem) {
+    /** [video] — проверять вывод кадров (только когда видео на экране). */
+    private fun seek(stage: String, ms: Long, base: Mem, video: Boolean = true) {
         instr.runOnMainSync { app.playback.player().seekTo(ms) }
         if (waitReady(stage, base)) {
             val pos = snap().positionMs
             check(pos in ms - 2_500..ms + 1_000, "$stage: позиция $pos вместо $ms")
-            play(stage, 4)
+            play(stage, 4, video)
         }
+    }
+
+    /** Дескрипторы закрываются в потоке загрузки после закрытия плеера: ждать до 10 с. */
+    private fun waitNoFds(name: String): Int {
+        val t0 = System.currentTimeMillis()
+        while (fds(name) > 0 && System.currentTimeMillis() - t0 < 10_000) Thread.sleep(200)
+        return fds(name)
     }
 
     /** Открытые дескрипторы процесса на файл [name] (по /proc/self/fd). */
@@ -220,6 +228,8 @@ class MarathonDeviceTest {
             repeat(ballastMb) { ballast += ByteArray(1 shl 20) { 1 } }
             instr.runOnMainSync { app.playback.player().addAnalyticsListener(counters) }
             val base = mem(gc = true)
+            // Пик за весь прогон: открытия, воспроизведение, перемотки, проверка файла.
+            val whole = Peaks().apply { start() }
             say("до открытия: Java ${mib(base.java)} МиБ (балласт $ballastMb МиБ, свободно до предела ${mib(rt.maxMemory() - base.java)} МиБ), " +
                 "native ${mib(base.native)} МиБ")
 
@@ -245,11 +255,11 @@ class MarathonDeviceTest {
             NoxLog.dump().filter { it.contains("mp4-") }.take(8).forEach { say("  журнал: $it") }
             instr.runOnMainSync { app.playback.close() }
             resumed()?.takeIf { it is PlayerActivity }?.let { a -> instr.runOnMainSync { a.finish() } }
-            Thread.sleep(1500)
+            val leftAfterClose = waitNoFds(file.name)
             var closed = mem(gc = true)
             say("после закрытия: Java +${mib(closed.java - base.java)} МиБ, native +${mib(closed.native - base.native)} МиБ; " +
-                "дескрипторов на файл: ${fds(file.name)}")
-            check(fds(file.name) == 0, "после закрытия остались дескрипторы на файл")
+                "дескрипторов на файл: $leftAfterClose")
+            check(leftAfterClose == 0, "после закрытия остались дескрипторы на файл")
 
             // 2. content:// (FileProvider: openTypedAssetFileDescriptor, как у документа SAF), сохранённая позиция после 48 ч
             NoxLog.clear()
@@ -258,8 +268,8 @@ class MarathonDeviceTest {
                 val pos = snap().positionMs
                 check(pos in 48 * 3_600_000L..48 * 3_600_000L + 6_000, "content://: позиция $pos вместо 48:00:05")
                 play("content://: воспроизведение после 48 ч", 5, video = false)
-                seek("content://: 99 %", layout.durationUs / 1000 * 99 / 100, base)
-                seek("content://: назад к 0:10:00", 600_000L, base)
+                seek("content://: 99 %", layout.durationUs / 1000 * 99 / 100, base, video = false)
+                seek("content://: назад к 0:10:00", 600_000L, base, video = false)
             }
             NoxLog.dump().filter { it.contains("mp4-") }.take(4).forEach { say("  журнал: $it") }
             instr.runOnMainSync { app.playback.close() }
@@ -276,10 +286,10 @@ class MarathonDeviceTest {
             instr.runOnMainSync { app.playback.open(byFile, play = false) }
             Thread.sleep(150)
             instr.runOnMainSync { app.playback.close() }
-            Thread.sleep(2000)
+            val leftAfterCancel = waitNoFds(file.name)
             closed = mem(gc = true)
-            say("отмена подготовки: Java +${mib(closed.java - base.java)} МиБ; дескрипторов на файл: ${fds(file.name)}")
-            check(fds(file.name) == 0, "после отмены остались дескрипторы на файл")
+            say("отмена подготовки: Java +${mib(closed.java - base.java)} МиБ; дескрипторов на файл: $leftAfterCancel")
+            check(leftAfterCancel == 0, "после отмены остались дескрипторы на файл")
 
             // 5. Повторные открытия: память не копится
             val after = ArrayList<String>()
@@ -295,8 +305,10 @@ class MarathonDeviceTest {
             check(after.last().toDouble() - after.first().toDouble() < 4.0, "повторные открытия копят память: $after")
 
             // 6. «Картинка в картинке»
+            val pipSupported = ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)
+            if (!pipSupported) say("картинка в картинке: устройство её не поддерживает — этап не проверялся")
             instr.runOnMainSync { app.playback.open(byFile, play = true) }
-            if (waitReady("картинка в картинке: открытие", base)) {
+            if (pipSupported && waitReady("картинка в картинке: открытие", base)) {
                 ctx.startActivity(PlayerActivity.fullscreen(ctx, pip = true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 val pa = waitActivity(PlayerActivity::class.java)
                 Thread.sleep(4000)
@@ -317,9 +329,11 @@ class MarathonDeviceTest {
             if (waitReady("серия «Часть 31» (с 30:00:00)", base)) {
                 var abs = 0L
                 instr.runOnMainSync { abs = app.playback.state.value.absoluteMs }
-                say("серия: абсолютная позиция ${abs / 1000} с")
+                val rel = snap().positionMs
+                say("серия: абсолютная позиция ${abs / 1000} с, внутри серии ${rel / 1000} с")
                 check(abs in 30 * 3_600_000L - 2_500..30 * 3_600_000L + 2_000, "серия: абсолютная позиция $abs")
-                play("серия «Часть 31»", 4)
+                check(rel in 0..2_000, "серия: позиция внутри серии $rel")
+                play("серия «Часть 31»", 4, video = false)
                 instr.runOnMainSync { app.playback.setListen(true) }
                 Thread.sleep(2500)
                 play("«Только звук»", 4, video = false)
@@ -348,6 +362,10 @@ class MarathonDeviceTest {
             if (waitReady("после проверки: открытие", base)) play("после проверки", 4, video = false)
             instr.runOnMainSync { app.playback.close() }
 
+            whole.interrupt(); whole.join()
+            say("пик за весь прогон: Java ${mib(whole.java)} МиБ (+${mib(whole.java - base.java)} от исходного), " +
+                "native +${mib(whole.native - base.native)} МиБ; предел Java-кучи ${mib(Runtime.getRuntime().maxMemory())} МиБ")
+            check(whole.java - base.java < 64L shl 20, "Java-куча выросла больше чем на 64 МиБ")
             check(counters.loadErrors == 0, "ошибки загрузки источника: ${counters.loadErrors}")
             val pb = db.playback().get(byFile)
             say("позиция файла в базе после всех закрытий: ${pb?.positionMs} мс")

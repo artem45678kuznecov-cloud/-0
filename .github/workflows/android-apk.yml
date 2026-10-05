@@ -287,6 +287,59 @@ jobs:
           echo "CERT_SHA256=$CERT" >> "$GITHUB_ENV"
           echo "APK_ABIS=$ABIS" >> "$GITHUB_ENV"
 
+      # До публикации: тот же подписанный APK ставится поверх опубликованной
+      # предыдущей версии с данными пользователя и открывает длинный MP4
+      # (tools/ci-upgrade-check.sh). Не прошло — выпуска нет.
+      - name: Previous release and release test APK
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          APK=app/build/outputs/apk/release/app-release.apk
+          SHA_BEFORE=$(sha256sum "$APK" | awk '{print $1}')
+          mkdir -p build-upgrade
+          URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$REPO/releases/latest" \
+            | python3 -c 'import json,sys; r=json.load(sys.stdin); print(next(a["browser_download_url"] for a in r["assets"] if a["name"].endswith(".apk")))')
+          echo "Прежний выпуск: $URL"
+          curl -fsSL --retry 3 -o build-upgrade/previous.apk "$URL"
+          PREV_CERT=$("$BT/apksigner" verify --print-certs build-upgrade/previous.apk | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')
+          if [ "$PREV_CERT" != "$CERT_SHA256" ]; then echo "::error::подпись прежнего выпуска $PREV_CERT не совпадает с $CERT_SHA256"; exit 1; fi
+          "$BT/aapt2" dump badging build-upgrade/previous.apk | head -1
+          ./gradlew --no-daemon --stacktrace -Pnox.requireReleaseKey=true -Pnox.testBuildType=release assembleReleaseAndroidTest
+          # Выпускаемый APK этой сборкой не меняется.
+          test "$(sha256sum "$APK" | awk '{print $1}')" = "$SHA_BEFORE"
+
+      - name: Enable KVM
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Upgrade over previous release with data (emulator API 34)
+        if: steps.tag.outputs.exists == 'false'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          disable-animations: true
+          disk-size: 6000M
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          working-directory: android
+          script: bash tools/ci-upgrade-check.sh build-upgrade/previous.apk app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/androidTest/release/app-release-androidTest.apk
+
+      - name: Upgrade check reports
+        if: always() && steps.tag.outputs.exists == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nox-upgrade-check
+          path: android/build-upgrade/
+          if-no-files-found: ignore
+
       - name: Release files
         if: steps.tag.outputs.exists == 'false'
         env:

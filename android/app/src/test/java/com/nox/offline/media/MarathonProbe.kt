@@ -101,6 +101,7 @@ object MarathonProbe {
         var ended = false
         var onSample: ((Sample) -> Unit)? = null
         var samples = 0L
+        var maxTimeUs = 0L
 
         inner class T(val id: Int) : TrackOutput {
             var format: Format? = null
@@ -119,6 +120,7 @@ object MarathonProbe {
             }
             override fun sampleMetadata(timeUs: Long, flags: Int, size: Int, offset: Int, cryptoData: TrackOutput.CryptoData?) {
                 samples++
+                maxTimeUs = maxOf(maxTimeUs, timeUs)
                 onSample?.invoke(Sample(id, timeUs, flags, size, crc.value))
                 crc.reset()
             }
@@ -143,7 +145,16 @@ object MarathonProbe {
         val ph = PositionHolder()
         var reloads = 0
 
+        // Как ExtractingLoadable: LoadControl спрашивается, только когда вход ушёл на 1 МиБ дальше
+        // позиции последнего открытия. Сколько секунд содержимого читается между такими проверками.
+        private var checkPos = 0L
+        private var checkTimeUs = -1L
+        var maxUsBetweenLoadChecksClosed = 0L
+        /** Наибольший отрезок содержимого без проверки, включая текущий, ещё не закрытый. */
+        val maxUsBetweenLoadChecks: Long get() = maxOf(maxUsBetweenLoadChecksClosed, if (checkTimeUs < 0) 0 else out.maxTimeUs - checkTimeUs)
+
         fun open(position: Long) {
+            checkPos = position
             ChainSupport.init(adapter, Reader(raf, position, length, base), position, length, out)
         }
 
@@ -156,7 +167,15 @@ object MarathonProbe {
         /** Читать, пока [until] не скажет «хватит»; false — конец файла. */
         fun read(until: () -> Boolean): Boolean {
             while (!until()) {
-                when (adapter.read(ph)) {
+                val r = adapter.read(ph)
+                val p = adapter.currentInputPosition
+                if (checkTimeUs < 0) checkTimeUs = out.maxTimeUs
+                if (p > checkPos + LOAD_CHECK_INTERVAL_BYTES) {
+                    maxUsBetweenLoadChecksClosed = maxOf(maxUsBetweenLoadChecksClosed, out.maxTimeUs - checkTimeUs)
+                    checkPos = p
+                    checkTimeUs = out.maxTimeUs
+                }
+                when (r) {
                     Extractor.RESULT_SEEK -> { reloads++; open(ph.position) }
                     Extractor.RESULT_END_OF_INPUT -> return false
                 }
@@ -176,6 +195,9 @@ object MarathonProbe {
             raf.close()
         }
     }
+
+    /** ProgressiveMediaSource.Factory: DEFAULT_LOADING_CHECK_INTERVAL_BYTES. */
+    private const val LOAD_CHECK_INTERVAL_BYTES = 1024 * 1024L
 
     internal fun peekBufferBytes(input: ExtractorInput): Int =
         (DefaultExtractorInput::class.java.getDeclaredField("peekBuffer").apply { isAccessible = true }.get(input) as ByteArray).size
@@ -289,6 +311,11 @@ object MarathonProbe {
         r("firstSamplesMs", (System.nanoTime() - t0) / 1_000_000)
         r("firstSamples", firsts.values.sortedBy { it.track }.joinToString(";") { "${it.track}:${it.timeUs}:key=${it.flags and C.BUFFER_FLAG_KEY_FRAME != 0}" })
         r("refSamples", ref.size)
+        // Ещё 3 минуты подряд: как часто ExoPlayer смог бы спросить LoadControl (иначе буфер не ограничен).
+        chain.out.onSample = null
+        val until = chain.out.maxTimeUs + 180_000_000
+        chain.read { chain.out.maxTimeUs >= until }
+        r("maxContentBetweenLoadChecksS", chain.maxUsBetweenLoadChecks / 1_000_000)
         r("fdsWhileOpen", fileFds(file))
 
         // 4. Перемотки: начало, сохранённая позиция, середина, после 24 ч и 48 ч, 99 %, назад

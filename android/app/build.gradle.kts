@@ -111,6 +111,10 @@ android {
         unitTests.isReturnDefaultValues = true
     }
 
+    // Проверка выпуска (tools/ci-upgrade-check.sh): тесты на устройстве для релизной сборки,
+    // чтобы инструментировать тот самый подписанный APK. Обычно — отладочная.
+    testBuildType = (project.findProperty("nox.testBuildType") as String?) ?: "debug"
+
     // Схемы Room нужны инструментальному тесту миграции на устройстве.
     sourceSets {
         getByName("androidTest").assets.srcDir("$projectDir/schemas")
